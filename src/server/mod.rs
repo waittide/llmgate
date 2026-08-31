@@ -1,0 +1,121 @@
+pub mod auth;
+pub mod handlers;
+pub mod middleware;
+pub mod resp;
+
+use crate::{
+    op::AppState,
+    server::{
+        handlers::{
+            apikey, channel, group, log, model, relay, setting, static_files, stats, update, user,
+        },
+        middleware::{admin_auth_middleware, api_key_auth_middleware},
+    },
+};
+use axum::{
+    middleware::from_fn_with_state,
+    routing::{delete, get, post},
+    Router,
+};
+use tower_http::{
+    compression::CompressionLayer,
+    cors::{Any, CorsLayer},
+    trace::TraceLayer,
+};
+
+pub fn build_router(state: AppState) -> Router {
+    // 1. Admin API Router (protected by admin_auth_middleware)
+    let admin_router = Router::new()
+        // User
+        .route("/user/change-password", post(user::change_password))
+        .route("/user/change-username", post(user::change_username))
+        .route("/user/status", get(user::status))
+        // Channel
+        .route("/channel/list", get(channel::list_channel))
+        .route("/channel/create", post(channel::create_channel))
+        .route("/channel/update", post(channel::update_channel))
+        .route("/channel/enable", post(channel::enable_channel))
+        .route("/channel/delete/{id}", delete(channel::delete_channel))
+        .route("/channel/fetch-model", post(channel::fetch_model))
+        .route("/channel/sync", post(channel::sync_channel))
+        .route("/channel/last-sync-time", get(channel::get_last_sync_time))
+        // Group
+        .route("/group/list", get(group::list_groups))
+        .route("/group/runtime/stream", get(group::stream_group_runtime))
+        .route("/group/create", post(group::create_group))
+        .route("/group/update", post(group::update_group))
+        .route("/group/active/{id}", post(group::update_group_active_item))
+        .route("/group/delete/{id}", delete(group::delete_group))
+        // APIKey
+        .route("/apikey/list", get(apikey::list_api_keys))
+        .route("/apikey/create", post(apikey::create_api_key))
+        .route("/apikey/update", post(apikey::update_api_key))
+        .route("/apikey/delete/{id}", delete(apikey::delete_api_key))
+        // Model
+        .route("/model/list", get(model::list_llm))
+        .route("/model/create", post(model::create_llm))
+        .route("/model/update", post(model::update_llm))
+        .route("/model/delete", post(model::delete_llm))
+        .route("/model/update-price", post(model::update_llm_price))
+        .route("/model/rebuild-price", post(model::rebuild_llm_price))
+        .route("/model/last-update-time", get(model::get_last_update_time))
+        // Setting
+        .route("/setting/list", get(setting::get_setting_list))
+        .route("/setting/set", post(setting::set_setting))
+        .route("/setting/export", get(setting::export_db))
+        .route("/setting/import", post(setting::import_db))
+        // Stats
+        .route("/stats/today", get(stats::get_stats_today))
+        .route("/stats/daily", get(stats::get_stats_daily))
+        .route("/stats/hourly", get(stats::get_stats_hourly))
+        .route("/stats/total", get(stats::get_stats_total))
+        .route("/stats/apikey", get(stats::get_stats_apikey))
+        // Log
+        .route("/log/overview/stream", get(log::stream_overview))
+        .route("/log/{id}/request-body", get(log::get_request_body))
+        .route("/log/{id}/response-body", get(log::get_response_body))
+        .route("/log/{request_id}/{round}/stop", post(log::interrupt_round))
+        .route("/log/clear", delete(log::clear_log))
+        .layer(from_fn_with_state(state.clone(), admin_auth_middleware));
+
+    // 2. API Key Dashboard Router (protected by api_key_auth_middleware)
+    let apikey_dashboard_router = Router::new()
+        .route("/apikey/stats", get(apikey::get_api_key_stats_by_id))
+        .route("/apikey/login", get(apikey::login_api_key))
+        .layer(from_fn_with_state(state.clone(), api_key_auth_middleware));
+
+    // 3. Public Admin API Router (Login & Version check)
+    let public_api_router = Router::new()
+        .route("/user/login", post(user::login))
+        .route("/update", get(update::check_update));
+
+    // 4. Combined /api/v1 router
+    let api_v1 = Router::new()
+        .merge(public_api_router)
+        .merge(admin_router)
+        .merge(apikey_dashboard_router);
+
+    // 5. Client LLM Proxy Router /v1 (protected by api_key_auth_middleware)
+    let client_v1 = Router::new()
+        .route("/models", get(model::get_model_list))
+        .route("/chat/completions", post(relay::chat_completions))
+        .route("/responses", post(relay::responses))
+        .route("/messages", post(relay::messages))
+        .layer(from_fn_with_state(state.clone(), api_key_auth_middleware));
+
+    // 6. CORS Configuration
+    let cors = CorsLayer::new()
+        .allow_origin(Any)
+        .allow_methods(Any)
+        .allow_headers(Any);
+
+    // 7. Root Router with Fallback to SPA static files
+    Router::new()
+        .nest("/api/v1", api_v1)
+        .nest("/v1", client_v1)
+        .fallback(static_files::serve_static)
+        .layer(cors)
+        .layer(CompressionLayer::new())
+        .layer(TraceLayer::new_for_http())
+        .with_state(state)
+}
