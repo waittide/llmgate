@@ -1,7 +1,9 @@
-use crate::model::{Channel, ChannelProvider};
-use anyhow::{anyhow, Result};
-use reqwest::{header::HeaderMap, Client, RequestBuilder};
 use std::{sync::LazyLock, time::Duration};
+
+use anyhow::{Result, anyhow};
+use reqwest::{Client, RequestBuilder, header::HeaderMap};
+
+use crate::model::{Channel, ChannelProvider};
 
 pub fn normalize_base_url(base_url: &str) -> String {
     base_url.trim_end_matches('/').to_string()
@@ -89,7 +91,9 @@ pub fn build_upstream_headers(channel: &Channel) -> Result<HeaderMap> {
 
     headers.insert(
         "Content-Type",
-        "application/json".parse().map_err(|_| anyhow!("Invalid content-type"))?,
+        "application/json"
+            .parse()
+            .map_err(|_| anyhow!("Invalid content-type"))?,
     );
 
     // Apply custom headers
@@ -113,9 +117,21 @@ mod tests {
     fn test_normalize_base_url() {
         assert_eq!(normalize_base_url("https://api.openai.com"), "https://api.openai.com");
         assert_eq!(normalize_base_url("https://api.openai.com/"), "https://api.openai.com");
-        assert_eq!(normalize_base_url("https://api.openai.com///"), "https://api.openai.com");
-        assert_eq!(normalize_base_url("https://custom.gateway.com/v1"), "https://custom.gateway.com/v1");
-        assert_eq!(normalize_base_url("https://custom.gateway.com/v1/"), "https://custom.gateway.com/v1");
-        assert_eq!(normalize_base_url("https://custom.gateway.com/api"), "https://custom.gateway.com/api");
+        assert_eq!(
+            normalize_base_url("https://api.openai.com///"),
+            "https://api.openai.com"
+        );
+        assert_eq!(
+            normalize_base_url("https://custom.gateway.com/v1"),
+            "https://custom.gateway.com/v1"
+        );
+        assert_eq!(
+            normalize_base_url("https://custom.gateway.com/v1/"),
+            "https://custom.gateway.com/v1"
+        );
+        assert_eq!(
+            normalize_base_url("https://custom.gateway.com/api"),
+            "https://custom.gateway.com/api"
+        );
     }
 }

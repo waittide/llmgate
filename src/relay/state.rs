@@ -1,54 +1,55 @@
+use std::sync::{
+    Arc,
+    atomic::{AtomicU64, Ordering},
+};
+
 use dashmap::DashMap;
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
-use std::sync::{
-    atomic::{AtomicU64, Ordering},
-    Arc,
-};
 use tokio::sync::broadcast;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Usage {
     #[serde(default)]
-    pub prompt_tokens: i64,
+    pub prompt_tokens:     i64,
     #[serde(default)]
     pub completion_tokens: i64,
     #[serde(default)]
-    pub total_tokens: i64,
+    pub total_tokens:      i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RequestOverview {
-    pub id: u64,
-    pub status: String,
-    pub started_at: String,
-    pub duration: i64, // ms
-    pub model: String,
-    pub usage: Usage,
-    pub cost: f64,
-    pub round: i64,
+    pub id:             u64,
+    pub status:         String,
+    pub started_at:     String,
+    pub duration:       i64, // ms
+    pub model:          String,
+    pub usage:          Usage,
+    pub cost:           f64,
+    pub round:          i64,
     pub target_channel: String,
-    pub target_model: String,
-    pub sending: bool,
+    pub target_model:   String,
+    pub sending:        bool,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub error: Option<String>,
+    pub error:          Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub rounds: Vec<crate::model::RoundLog>,
+    pub rounds:         Vec<crate::model::RoundLog>,
 }
 
 #[derive(Debug)]
 pub struct RequestStateInternal {
-    pub overview: RequestOverview,
-    pub request_body: String,
-    pub response_body: String,
+    pub overview:        RequestOverview,
+    pub request_body:    String,
+    pub response_body:   String,
     pub started_instant: std::time::Instant,
 }
 
 pub struct RequestStateManager {
-    counter: AtomicU64,
-    requests: DashMap<u64, Arc<RwLock<RequestStateInternal>>>,
+    counter:    AtomicU64,
+    requests:   DashMap<u64, Arc<RwLock<RequestStateInternal>>>,
     recent_ids: Arc<RwLock<Vec<u64>>>,
-    tx: broadcast::Sender<RequestOverview>,
+    tx:         broadcast::Sender<RequestOverview>,
 }
 
 impl RequestStateManager {
@@ -93,9 +94,9 @@ impl RequestStateManager {
         };
 
         let internal = Arc::new(RwLock::new(RequestStateInternal {
-            overview: overview.clone(),
-            request_body: body,
-            response_body: String::new(),
+            overview:        overview.clone(),
+            request_body:    body,
+            response_body:   String::new(),
             started_instant: std::time::Instant::now(),
         }));
 
@@ -113,14 +114,7 @@ impl RequestStateManager {
         id
     }
 
-    pub fn update_round(
-        &self,
-        id: u64,
-        round: i64,
-        target_channel: String,
-        target_model: String,
-        sending: bool,
-    ) {
+    pub fn update_round(&self, id: u64, round: i64, target_channel: String, target_model: String, sending: bool) {
         if let Some(req) = self.requests.get(&id) {
             let mut lock = req.write();
             lock.overview.round = round;
@@ -132,14 +126,7 @@ impl RequestStateManager {
         }
     }
 
-    pub fn update_round_error(
-        &self,
-        id: u64,
-        round: i64,
-        target_channel: String,
-        target_model: String,
-        error: String,
-    ) {
+    pub fn update_round_error(&self, id: u64, round: i64, target_channel: String, target_model: String, error: String) {
         if let Some(req) = self.requests.get(&id) {
             let mut lock = req.write();
             lock.overview.round = round;
@@ -163,7 +150,12 @@ impl RequestStateManager {
     pub fn record_round_attempt(&self, id: u64, round_log: crate::model::RoundLog) {
         if let Some(req) = self.requests.get(&id) {
             let mut lock = req.write();
-            if let Some(pos) = lock.overview.rounds.iter().position(|r| r.round == round_log.round) {
+            if let Some(pos) = lock
+                .overview
+                .rounds
+                .iter()
+                .position(|r| r.round == round_log.round)
+            {
                 lock.overview.rounds[pos] = round_log;
             } else {
                 lock.overview.rounds.push(round_log);
@@ -200,11 +192,15 @@ impl RequestStateManager {
     }
 
     pub fn get_request_body(&self, id: u64) -> Option<String> {
-        self.requests.get(&id).map(|r| r.read().request_body.clone())
+        self.requests
+            .get(&id)
+            .map(|r| r.read().request_body.clone())
     }
 
     pub fn get_response_body(&self, id: u64) -> Option<String> {
-        self.requests.get(&id).map(|r| r.read().response_body.clone())
+        self.requests
+            .get(&id)
+            .map(|r| r.read().response_body.clone())
     }
 
     pub fn clear(&self) {

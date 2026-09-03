@@ -1,45 +1,47 @@
-use crate::{
-    model::RequestLog,
-    op::{log as op_log, AppState},
-    relay::state::Usage,
-    server::resp::{error, success, success_msg},
-};
+use std::convert::Infallible;
+
 use axum::{
     extract::{Path, Query, State},
     http::StatusCode,
     response::{
-        sse::{Event, KeepAlive, Sse},
         IntoResponse, Response,
+        sse::{Event, KeepAlive, Sse},
     },
 };
-use futures::StreamExt;
+use futures::{StreamExt, stream};
 use serde::{Deserialize, Serialize};
-use std::convert::Infallible;
-use tokio_stream::wrappers::BroadcastStream;
+
+use crate::{
+    model::RequestLog,
+    op::{AppState, log as op_log},
+    relay::state::Usage,
+    server::resp::{error, success, success_msg},
+};
 
 pub async fn stream_overview(State(state): State<AppState>) -> Response {
     let rx = state.request_state_manager.subscribe();
     let initial_recent = state.request_state_manager.get_recent_overviews();
 
-    let initial_stream = futures::stream::iter(initial_recent.into_iter().map(|overview| {
+    let initial_stream = stream::iter(initial_recent.into_iter().map(|overview| {
         let json_str = serde_json::to_string(&overview).unwrap_or_default();
         Ok::<Event, Infallible>(Event::default().event("overview").data(json_str))
     }));
 
-    let broadcast_stream = BroadcastStream::new(rx).filter_map(|res| async move {
-        match res {
-            Ok(overview) => {
-                let json_str = serde_json::to_string(&overview).unwrap_or_default();
-                Some(Ok::<Event, Infallible>(
-                    Event::default().event("overview").data(json_str),
-                ))
+    let broadcast_stream = stream::unfold(rx, |mut rx| async move {
+        loop {
+            match rx.recv().await {
+                Ok(overview) => {
+                    let json_str = serde_json::to_string(&overview).unwrap_or_default();
+                    let event = Ok::<Event, Infallible>(Event::default().event("overview").data(json_str));
+                    return Some((event, rx));
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => return None,
             }
-            Err(_) => None,
         }
     });
 
     let combined_stream = initial_stream.chain(broadcast_stream);
-
     Sse::new(combined_stream)
         .keep_alive(
             KeepAlive::new()
@@ -54,36 +56,36 @@ pub async fn stream_overview(State(state): State<AppState>) -> Response {
 #[derive(Debug, Deserialize)]
 pub struct LogListParams {
     #[serde(default)]
-    pub page: i64,
+    pub page:      i64,
     #[serde(default)]
     pub page_size: i64,
     #[serde(default)]
-    pub model: String,
+    pub model:     String,
     #[serde(default)]
-    pub status: String,
+    pub status:    String,
     #[serde(default)]
-    pub keyword: String,
+    pub keyword:   String,
 }
 
 /// Overview DTO shaped to match the live SSE `RequestOverview` so the same
 /// frontend cards render persisted history.
 #[derive(Serialize)]
 pub struct LogOverviewDto {
-    pub id: u64,
-    pub status: String,
-    pub started_at: String,
-    pub duration: i64,
-    pub model: String,
-    pub usage: Usage,
-    pub cost: f64,
-    pub round: i64,
+    pub id:             u64,
+    pub status:         String,
+    pub started_at:     String,
+    pub duration:       i64,
+    pub model:          String,
+    pub usage:          Usage,
+    pub cost:           f64,
+    pub round:          i64,
     pub target_channel: String,
-    pub target_model: String,
-    pub sending: bool,
+    pub target_model:   String,
+    pub sending:        bool,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub error: Option<String>,
+    pub error:          Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub rounds: Vec<crate::model::RoundLog>,
+    pub rounds:         Vec<crate::model::RoundLog>,
 }
 #[derive(Serialize)]
 pub struct LogListPageDto {
@@ -108,9 +110,9 @@ fn to_overview(log: &RequestLog) -> LogOverviewDto {
         duration: log.wait_time,
         model: log.model.clone(),
         usage: Usage {
-            prompt_tokens: log.prompt_tokens,
+            prompt_tokens:     log.prompt_tokens,
             completion_tokens: log.completion_tokens,
-            total_tokens: log.total_tokens,
+            total_tokens:      log.total_tokens,
         },
         cost: log.cost,
         round: log.round,
@@ -122,16 +124,13 @@ fn to_overview(log: &RequestLog) -> LogOverviewDto {
     }
 }
 
-pub async fn list_logs(
-    State(state): State<AppState>,
-    Query(params): Query<LogListParams>,
-) -> Response {
+pub async fn list_logs(State(state): State<AppState>, Query(params): Query<LogListParams>) -> Response {
     let query = op_log::LogListQuery {
-        page: params.page,
+        page:      params.page,
         page_size: params.page_size,
-        model: &params.model,
-        status: &params.status,
-        keyword: &params.keyword,
+        model:     &params.model,
+        status:    &params.status,
+        keyword:   &params.keyword,
     };
     match op_log::list_request_logs(&state, &query).await {
         Ok((total, items)) => success(LogListPageDto {
@@ -150,10 +149,7 @@ pub async fn get_log_detail(State(state): State<AppState>, Path(id): Path<u64>) 
     }
 }
 
-pub async fn get_request_body(
-    State(state): State<AppState>,
-    Path(id): Path<u64>,
-) -> Response {
+pub async fn get_request_body(State(state): State<AppState>, Path(id): Path<u64>) -> Response {
     if let Some(body) = state.request_state_manager.get_request_body(id) {
         return success(body);
     }
@@ -163,10 +159,7 @@ pub async fn get_request_body(
     }
 }
 
-pub async fn get_response_body(
-    State(state): State<AppState>,
-    Path(id): Path<u64>,
-) -> Response {
+pub async fn get_response_body(State(state): State<AppState>, Path(id): Path<u64>) -> Response {
     if let Some(body) = state.request_state_manager.get_response_body(id) {
         return success(body);
     }

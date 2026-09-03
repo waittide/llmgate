@@ -1,9 +1,7 @@
-use crate::{
-    model::LLMPrice,
-    relay::state::Usage,
-};
 use serde::Deserialize;
 use serde_json::Value;
+
+use crate::{model::LLMPrice, relay::state::Usage};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ApiFormat {
@@ -15,7 +13,7 @@ pub enum ApiFormat {
 #[derive(Debug, Deserialize)]
 pub struct ChatRequestMetadata {
     #[serde(default)]
-    pub model: String,
+    pub model:  String,
     #[serde(default)]
     pub stream: bool,
 }
@@ -24,11 +22,7 @@ pub fn parse_request_metadata(body: &[u8]) -> Option<ChatRequestMetadata> {
     serde_json::from_slice(body).ok()
 }
 
-pub fn rewrite_request_body_in_json(
-    body: &[u8],
-    new_model: &str,
-    param_override: Option<&str>,
-) -> Vec<u8> {
+pub fn rewrite_request_body_in_json(body: &[u8], new_model: &str, param_override: Option<&str>) -> Vec<u8> {
     if let Ok(mut val) = serde_json::from_slice::<Value>(body)
         && let Some(obj) = val.as_object_mut()
     {
@@ -60,7 +54,10 @@ pub fn convert_openai_to_anthropic(val: &Value) -> Value {
     if let Some(stream) = val.get("stream") {
         anthropic_obj.insert("stream".to_string(), stream.clone());
     }
-    if let Some(max_tokens) = val.get("max_tokens").or_else(|| val.get("max_completion_tokens")) {
+    if let Some(max_tokens) = val
+        .get("max_tokens")
+        .or_else(|| val.get("max_completion_tokens"))
+    {
         anthropic_obj.insert("max_tokens".to_string(), max_tokens.clone());
     } else {
         anthropic_obj.insert("max_tokens".to_string(), serde_json::json!(4096));
@@ -78,7 +75,10 @@ pub fn convert_openai_to_anthropic(val: &Value) -> Value {
     if let Some(messages) = val.get("messages").and_then(|m| m.as_array()) {
         for msg in messages {
             let role = msg.get("role").and_then(|r| r.as_str()).unwrap_or("user");
-            let content = msg.get("content").cloned().unwrap_or(Value::String(String::new()));
+            let content = msg
+                .get("content")
+                .cloned()
+                .unwrap_or(Value::String(String::new()));
 
             if role == "system" {
                 if let Some(s) = content.as_str() {
@@ -145,7 +145,10 @@ pub fn convert_openai_to_gemini(val: &Value) -> Value {
     if let Some(top_p) = val.get("top_p") {
         gen_config.insert("topP".to_string(), top_p.clone());
     }
-    if let Some(max_tokens) = val.get("max_tokens").or_else(|| val.get("max_completion_tokens")) {
+    if let Some(max_tokens) = val
+        .get("max_tokens")
+        .or_else(|| val.get("max_completion_tokens"))
+    {
         gen_config.insert("maxOutputTokens".to_string(), max_tokens.clone());
     }
     if !gen_config.is_empty() {
@@ -155,11 +158,7 @@ pub fn convert_openai_to_gemini(val: &Value) -> Value {
     Value::Object(gemini_obj)
 }
 
-pub fn calculate_cost(
-    prompt_tokens: i64,
-    completion_tokens: i64,
-    price: Option<&LLMPrice>,
-) -> f64 {
+pub fn calculate_cost(prompt_tokens: i64, completion_tokens: i64, price: Option<&LLMPrice>) -> f64 {
     match price {
         Some(p) => {
             // Price is per 1M tokens

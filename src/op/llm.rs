@@ -1,9 +1,10 @@
+use anyhow::{Result, anyhow};
+use sqlx::Row;
+
 use crate::{
     model::{LLMInfo, LLMPrice},
     op::AppState,
 };
-use anyhow::{anyhow, Result};
-use sqlx::Row;
 
 pub async fn refresh_llm_cache(state: &AppState) -> Result<()> {
     let rows = sqlx::query("SELECT name, input, output, cache_read, cache_write FROM llm_infos")
@@ -14,9 +15,9 @@ pub async fn refresh_llm_cache(state: &AppState) -> Result<()> {
     for row in rows {
         let name: String = row.get("name");
         let price = LLMPrice {
-            input: row.get("input"),
-            output: row.get("output"),
-            cache_read: row.get("cache_read"),
+            input:       row.get("input"),
+            output:      row.get("output"),
+            cache_read:  row.get("cache_read"),
             cache_write: row.get("cache_write"),
         };
         local_prices.insert(name.to_lowercase(), price);
@@ -34,7 +35,7 @@ pub fn list_llm_infos(state: &AppState) -> Vec<LLMInfo> {
         .llm_prices
         .iter()
         .map(|entry| LLMInfo {
-            name: entry.key().clone(),
+            name:  entry.key().clone(),
             price: entry.value().clone(),
         })
         .collect();
@@ -117,11 +118,9 @@ pub async fn delete_llm_info(state: &AppState, name: &str) -> Result<()> {
 }
 
 pub async fn cleanup_ghosts(state: &AppState) -> Result<()> {
-    sqlx::query(
-        "DELETE FROM llm_infos WHERE LOWER(name) NOT IN (SELECT LOWER(name) FROM channel_models)"
-    )
-    .execute(&state.db)
-    .await?;
+    sqlx::query("DELETE FROM llm_infos WHERE LOWER(name) NOT IN (SELECT LOWER(name) FROM channel_models)")
+        .execute(&state.db)
+        .await?;
 
     refresh_llm_cache(state).await?;
     Ok(())

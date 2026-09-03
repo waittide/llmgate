@@ -1,5 +1,6 @@
-use clap::Parser;
 use std::path::PathBuf;
+
+use clap::Parser;
 
 pub const APP_NAME: &str = "octopus";
 pub const APP_DESC: &str = "all ai service in one place (Rust Edition)";
@@ -14,7 +15,12 @@ pub struct Config {
     #[arg(short = 'p', long, default_value_t = 8080, help = "Server listening port")]
     pub port: u16,
 
-    #[arg(short = 'd', long, default_value = "data", help = "Data directory for database and files")]
+    #[arg(
+        short = 'd',
+        long,
+        default_value = "data",
+        help = "Data directory for database and files"
+    )]
     pub data_dir: PathBuf,
 
     #[arg(long, default_value_t = false, help = "Enable debug logging")]

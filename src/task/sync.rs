@@ -1,12 +1,14 @@
-use crate::{
-    model::{Channel, ChannelModel, ChannelModelSource, ChannelProvider},
-    op::{channel, AppState},
-    relay::upstream::{build_upstream_request, get_client},
-};
+use std::sync::atomic::{AtomicI64, Ordering};
+
 use anyhow::Result;
 use serde_json::Value;
-use std::sync::atomic::{AtomicI64, Ordering};
 use tracing::{info, warn};
+
+use crate::{
+    model::{Channel, ChannelModel, ChannelModelSource, ChannelProvider},
+    op::{AppState, channel},
+    relay::upstream::{build_upstream_request, get_client},
+};
 
 static LAST_SYNC_TIME: AtomicI64 = AtomicI64::new(0);
 
@@ -79,27 +81,27 @@ pub async fn sync_all_channel_models(state: &AppState) -> Result<()> {
                     if !manual_names.contains(&f) {
                         all_added_models.push(f.clone());
                         existing_models.push(ChannelModel {
-                            id: 0,
+                            id:         0,
                             channel_id: ch.id,
-                            name: f,
-                            source: ChannelModelSource::Auto,
-                            metrics: Default::default(),
+                            name:       f,
+                            source:     ChannelModelSource::Auto,
+                            metrics:    Default::default(),
                         });
                     }
                 }
 
                 let update_req = crate::model::ChannelUpdateRequest {
-                    id: ch.id,
-                    name: None,
-                    channel_type: None,
-                    enabled: None,
-                    base_url: None,
-                    key: None,
-                    models: Some(existing_models),
-                    auto_sync: None,
-                    custom_header: None,
+                    id:             ch.id,
+                    name:           None,
+                    channel_type:   None,
+                    enabled:        None,
+                    base_url:       None,
+                    key:            None,
+                    models:         Some(existing_models),
+                    auto_sync:      None,
+                    custom_header:  None,
                     param_override: None,
-                    match_regex: None,
+                    match_regex:    None,
                 };
                 let _ = channel::update_channel(state, &update_req).await;
             }

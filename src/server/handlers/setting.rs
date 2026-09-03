@@ -1,24 +1,22 @@
-use crate::{
-    model::{BackupData, Setting},
-    op::{backup, setting, AppState},
-    server::resp::{error, success},
-};
 use axum::{
-    extract::{FromRequest, Multipart, Request, State},
-    http::{header, HeaderValue, StatusCode},
-    response::Response,
     Json,
+    extract::{FromRequest, Multipart, Request, State},
+    http::{HeaderValue, StatusCode, header},
+    response::Response,
 };
 use bytes::Bytes;
+
+use crate::{
+    model::{BackupData, Setting},
+    op::{AppState, backup, setting},
+    server::resp::{error, success},
+};
 
 pub async fn get_setting_list(State(state): State<AppState>) -> Response {
     success(setting::list_settings(&state))
 }
 
-pub async fn set_setting(
-    State(state): State<AppState>,
-    Json(payload): Json<Setting>,
-) -> Response {
+pub async fn set_setting(State(state): State<AppState>, Json(payload): Json<Setting>) -> Response {
     match setting::set_setting_string(&state, &payload.key, &payload.value).await {
         Ok(_) => success(payload),
         Err(e) => error(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
@@ -41,10 +39,7 @@ pub async fn export_db(State(state): State<AppState>) -> Response {
             Response::builder()
                 .status(StatusCode::OK)
                 .header(header::CONTENT_TYPE, "application/json")
-                .header(
-                    header::CONTENT_DISPOSITION,
-                    HeaderValue::from_str(&filename).unwrap(),
-                )
+                .header(header::CONTENT_DISPOSITION, HeaderValue::from_str(&filename).unwrap())
                 .body(axum::body::Body::from(json_bytes))
                 .unwrap()
         }
@@ -52,10 +47,7 @@ pub async fn export_db(State(state): State<AppState>) -> Response {
     }
 }
 
-pub async fn import_db(
-    State(state): State<AppState>,
-    req: Request,
-) -> Response {
+pub async fn import_db(State(state): State<AppState>, req: Request) -> Response {
     let (parts, body) = req.into_parts();
     let content_type = parts
         .headers
@@ -79,12 +71,7 @@ pub async fn import_db(
                         file_bytes = Some(b);
                         break;
                     }
-                    Err(e) => {
-                        return error(
-                            StatusCode::BAD_REQUEST,
-                            &format!("Failed to read upload file: {}", e),
-                        )
-                    }
+                    Err(e) => return error(StatusCode::BAD_REQUEST, &format!("Failed to read upload file: {}", e)),
                 }
             }
         }
@@ -96,23 +83,13 @@ pub async fn import_db(
     } else {
         match axum::body::to_bytes(body, 50 * 1024 * 1024).await {
             Ok(b) => b,
-            Err(e) => {
-                return error(
-                    StatusCode::BAD_REQUEST,
-                    &format!("Failed to read request body: {}", e),
-                )
-            }
+            Err(e) => return error(StatusCode::BAD_REQUEST, &format!("Failed to read request body: {}", e)),
         }
     };
 
     let backup_data: BackupData = match serde_json::from_slice(&json_bytes) {
         Ok(data) => data,
-        Err(e) => {
-            return error(
-                StatusCode::BAD_REQUEST,
-                &format!("Invalid JSON backup file: {}", e),
-            )
-        }
+        Err(e) => return error(StatusCode::BAD_REQUEST, &format!("Invalid JSON backup file: {}", e)),
     };
 
     match backup::import_backup(&state, backup_data).await {

@@ -1,40 +1,34 @@
+use std::sync::Arc;
+
+use axum::{
+    Json,
+    extract::{Extension, State},
+    http::StatusCode,
+    response::{IntoResponse, Response},
+};
+use serde::Deserialize;
+
 use crate::{
-    model::{
-        AnthropicModel, AnthropicModelList, LLMInfo, OpenAIModel, OpenAIModelList,
-    },
-    op::{group, llm, AppState},
+    model::{AnthropicModel, AnthropicModelList, LLMInfo, OpenAIModel, OpenAIModelList},
+    op::{AppState, group, llm},
     server::{
         middleware::AuthContext,
         resp::{error, success, success_msg},
     },
 };
-use axum::{
-    extract::{Extension, State},
-    http::StatusCode,
-    response::{IntoResponse, Response},
-    Json,
-};
-use serde::Deserialize;
-use std::sync::Arc;
 
 pub async fn list_llm(State(state): State<AppState>) -> Response {
     success(llm::list_llm_infos(&state))
 }
 
-pub async fn create_llm(
-    State(state): State<AppState>,
-    Json(payload): Json<LLMInfo>,
-) -> Response {
+pub async fn create_llm(State(state): State<AppState>, Json(payload): Json<LLMInfo>) -> Response {
     match llm::batch_create_llm_infos(&state, vec![payload]).await {
         Ok(_) => success_msg("model created"),
         Err(e) => error(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
     }
 }
 
-pub async fn update_llm(
-    State(state): State<AppState>,
-    Json(payload): Json<LLMInfo>,
-) -> Response {
+pub async fn update_llm(State(state): State<AppState>, Json(payload): Json<LLMInfo>) -> Response {
     match llm::update_llm_info(&state, &payload).await {
         Ok(_) => success_msg("model updated"),
         Err(e) => error(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
@@ -46,10 +40,7 @@ pub struct DeleteLLMReq {
     pub name: String,
 }
 
-pub async fn delete_llm(
-    State(state): State<AppState>,
-    Json(payload): Json<DeleteLLMReq>,
-) -> Response {
+pub async fn delete_llm(State(state): State<AppState>, Json(payload): Json<DeleteLLMReq>) -> Response {
     match llm::delete_llm_info(&state, &payload.name).await {
         Ok(_) => success_msg("model deleted"),
         Err(e) => error(StatusCode::BAD_REQUEST, &e.to_string()),
@@ -90,10 +81,10 @@ pub async fn get_model_list(
         let anthropic_models: Vec<AnthropicModel> = models
             .into_iter()
             .map(|m| AnthropicModel {
-                id: m.clone(),
-                created_at: "2024-01-01T00:00:00Z".to_string(),
+                id:           m.clone(),
+                created_at:   "2024-01-01T00:00:00Z".to_string(),
                 display_name: m,
-                model_type: "model".to_string(),
+                model_type:   "model".to_string(),
             })
             .collect();
 
@@ -111,16 +102,16 @@ pub async fn get_model_list(
         let open_ai_models: Vec<OpenAIModel> = models
             .into_iter()
             .map(|m| OpenAIModel {
-                id: m,
-                object: "model".to_string(),
-                created: 1763395200,
+                id:       m,
+                object:   "model".to_string(),
+                created:  1763395200,
                 owned_by: "octopus".to_string(),
             })
             .collect();
 
         let res = OpenAIModelList {
-            object: "list".to_string(),
-            data: open_ai_models,
+            object:  "list".to_string(),
+            data:    open_ai_models,
             success: true,
         };
         Json(res).into_response()

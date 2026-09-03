@@ -1,28 +1,26 @@
-use crate::{
-    model::APIKey,
-    op::{apikey::get_api_key_by_key, stats::get_stats_api_key, AppState},
-    server::{auth::verify_jwt, resp::error},
-};
+use std::sync::Arc;
+
 use axum::{
     extract::{Request, State},
-    http::{header, StatusCode},
+    http::{StatusCode, header},
     middleware::Next,
     response::Response,
 };
-use std::sync::Arc;
+
+use crate::{
+    model::APIKey,
+    op::{AppState, apikey::get_api_key_by_key, stats::get_stats_api_key},
+    server::{auth::verify_jwt, resp::error},
+};
 
 #[derive(Clone, Debug)]
 pub struct AuthContext {
-    pub api_key: APIKey,
-    pub supported_models: Vec<String>,
+    pub api_key:             APIKey,
+    pub supported_models:    Vec<String>,
     pub is_anthropic_header: bool,
 }
 
-pub async fn admin_auth_middleware(
-    State(state): State<AppState>,
-    mut req: Request,
-    next: Next,
-) -> Response {
+pub async fn admin_auth_middleware(State(state): State<AppState>, mut req: Request, next: Next) -> Response {
     let mut token_opt = None;
 
     if let Some(auth_header) = req.headers().get(header::AUTHORIZATION)
@@ -47,11 +45,7 @@ pub async fn admin_auth_middleware(
     }
 }
 
-pub async fn api_key_auth_middleware(
-    State(state): State<AppState>,
-    mut req: Request,
-    next: Next,
-) -> Response {
+pub async fn api_key_auth_middleware(State(state): State<AppState>, mut req: Request, next: Next) -> Response {
     let mut is_anthropic_header = false;
     let mut api_key_str_opt = None;
 

@@ -1,9 +1,6 @@
-use crate::{
-    model::APIKey,
-    op::AppState,
-    utils::generate_api_key,
-};
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
+
+use crate::{model::APIKey, op::AppState, utils::generate_api_key};
 
 pub async fn refresh_apikey_cache(state: &AppState) -> Result<()> {
     let keys: Vec<APIKey> = sqlx::query_as("SELECT * FROM api_keys ORDER BY id ASC")
@@ -26,12 +23,18 @@ pub async fn refresh_apikey_cache(state: &AppState) -> Result<()> {
     for (k, v) in &local_index {
         state.api_key_str_index.insert(k.clone(), *v);
     }
-    state.api_key_str_index.retain(|k, _| local_index.contains_key(k));
+    state
+        .api_key_str_index
+        .retain(|k, _| local_index.contains_key(k));
     Ok(())
 }
 
 pub fn list_api_keys(state: &AppState) -> Vec<APIKey> {
-    let mut list: Vec<APIKey> = state.api_keys.iter().map(|entry| entry.value().clone()).collect();
+    let mut list: Vec<APIKey> = state
+        .api_keys
+        .iter()
+        .map(|entry| entry.value().clone())
+        .collect();
     list.sort_by_key(|k| k.id);
     list
 }

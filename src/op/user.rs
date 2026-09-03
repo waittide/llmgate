@@ -1,9 +1,10 @@
+use anyhow::{Result, anyhow};
+
 use crate::{
     model::{User, UserChangePassword, UserChangeUsername},
     op::AppState,
     utils::{hash_password, verify_password},
 };
-use anyhow::{anyhow, Result};
 
 pub async fn refresh_user_cache(state: &AppState) -> Result<()> {
     let user: Option<User> = sqlx::query_as("SELECT id, username, password FROM users LIMIT 1")

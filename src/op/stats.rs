@@ -1,9 +1,10 @@
+use anyhow::Result;
+use sqlx::Row;
+
 use crate::{
     model::{StatsAPIKey, StatsDaily, StatsHourly, StatsMetrics, StatsTotal},
     op::AppState,
 };
-use anyhow::Result;
-use sqlx::Row;
 
 pub async fn refresh_stats_cache(state: &AppState) -> Result<()> {
     let now_date = chrono::Local::now().format("%Y%m%d").to_string();
@@ -14,13 +15,13 @@ pub async fn refresh_stats_cache(state: &AppState) -> Result<()> {
         .await?;
     if let Some(row) = total_row {
         let metrics = StatsMetrics {
-            input_token: row.get("input_token"),
-            output_token: row.get("output_token"),
-            input_cost: row.get("input_cost"),
-            output_cost: row.get("output_cost"),
-            wait_time: row.get("wait_time"),
+            input_token:     row.get("input_token"),
+            output_token:    row.get("output_token"),
+            input_cost:      row.get("input_cost"),
+            output_cost:     row.get("output_cost"),
+            wait_time:       row.get("wait_time"),
             request_success: row.get("request_success"),
-            request_failed: row.get("request_failed"),
+            request_failed:  row.get("request_failed"),
         };
         let mut t = state.stats_total.write();
         *t = StatsTotal { id: 1, metrics };
@@ -33,13 +34,13 @@ pub async fn refresh_stats_cache(state: &AppState) -> Result<()> {
         .await?;
     if let Some(row) = daily_row {
         let metrics = StatsMetrics {
-            input_token: row.get("input_token"),
-            output_token: row.get("output_token"),
-            input_cost: row.get("input_cost"),
-            output_cost: row.get("output_cost"),
-            wait_time: row.get("wait_time"),
+            input_token:     row.get("input_token"),
+            output_token:    row.get("output_token"),
+            input_cost:      row.get("input_cost"),
+            output_cost:     row.get("output_cost"),
+            wait_time:       row.get("wait_time"),
             request_success: row.get("request_success"),
-            request_failed: row.get("request_failed"),
+            request_failed:  row.get("request_failed"),
         };
         let mut d = state.stats_daily.write();
         *d = StatsDaily {
@@ -55,8 +56,8 @@ pub async fn refresh_stats_cache(state: &AppState) -> Result<()> {
         .await?;
 
     let mut hourlies = std::array::from_fn(|i| StatsHourly {
-        hour: i as i64,
-        date: now_date.clone(),
+        hour:    i as i64,
+        date:    now_date.clone(),
         metrics: StatsMetrics::default(),
     });
 
@@ -67,13 +68,13 @@ pub async fn refresh_stats_cache(state: &AppState) -> Result<()> {
                 hour,
                 date: now_date.clone(),
                 metrics: StatsMetrics {
-                    input_token: row.get("input_token"),
-                    output_token: row.get("output_token"),
-                    input_cost: row.get("input_cost"),
-                    output_cost: row.get("output_cost"),
-                    wait_time: row.get("wait_time"),
+                    input_token:     row.get("input_token"),
+                    output_token:    row.get("output_token"),
+                    input_cost:      row.get("input_cost"),
+                    output_cost:     row.get("output_cost"),
+                    wait_time:       row.get("wait_time"),
                     request_success: row.get("request_success"),
-                    request_failed: row.get("request_failed"),
+                    request_failed:  row.get("request_failed"),
                 },
             };
         }
@@ -91,13 +92,13 @@ pub async fn refresh_stats_cache(state: &AppState) -> Result<()> {
     for row in apikey_rows {
         let api_key_id: i64 = row.get("api_key_id");
         let metrics = StatsMetrics {
-            input_token: row.get("input_token"),
-            output_token: row.get("output_token"),
-            input_cost: row.get("input_cost"),
-            output_cost: row.get("output_cost"),
-            wait_time: row.get("wait_time"),
+            input_token:     row.get("input_token"),
+            output_token:    row.get("output_token"),
+            input_cost:      row.get("input_cost"),
+            output_cost:     row.get("output_cost"),
+            wait_time:       row.get("wait_time"),
             request_success: row.get("request_success"),
-            request_failed: row.get("request_failed"),
+            request_failed:  row.get("request_failed"),
         };
         state
             .stats_api_keys
@@ -107,13 +108,7 @@ pub async fn refresh_stats_cache(state: &AppState) -> Result<()> {
     Ok(())
 }
 
-pub fn record_metrics(
-    state: &AppState,
-    api_key_id: i64,
-    channel_id: i64,
-    channel_model_id: i64,
-    delta: &StatsMetrics,
-) {
+pub fn record_metrics(state: &AppState, api_key_id: i64, channel_id: i64, channel_model_id: i64, delta: &StatsMetrics) {
     let now = chrono::Local::now();
     let now_date = now.format("%Y%m%d").to_string();
     let current_hour = now.format("%H").to_string().parse::<usize>().unwrap_or(0);
@@ -186,15 +181,15 @@ pub async fn get_stats_daily(state: &AppState) -> Result<Vec<StatsDaily>> {
     let mut list = Vec::new();
     for row in rows {
         list.push(StatsDaily {
-            date: row.get("date"),
+            date:    row.get("date"),
             metrics: StatsMetrics {
-                input_token: row.get("input_token"),
-                output_token: row.get("output_token"),
-                input_cost: row.get("input_cost"),
-                output_cost: row.get("output_cost"),
-                wait_time: row.get("wait_time"),
+                input_token:     row.get("input_token"),
+                output_token:    row.get("output_token"),
+                input_cost:      row.get("input_cost"),
+                output_cost:     row.get("output_cost"),
+                wait_time:       row.get("wait_time"),
                 request_success: row.get("request_success"),
-                request_failed: row.get("request_failed"),
+                request_failed:  row.get("request_failed"),
             },
         });
     }

@@ -1,9 +1,10 @@
+use std::{fs, path::Path, str::FromStr, time::Duration};
+
 use anyhow::Result;
 use sqlx::{
-    sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous},
     Pool, Sqlite,
+    sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous},
 };
-use std::{fs, path::Path, str::FromStr, time::Duration};
 use tracing::info;
 
 pub type DbPool = Pool<Sqlite>;

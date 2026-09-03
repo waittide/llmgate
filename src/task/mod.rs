@@ -1,9 +1,11 @@
 pub mod price;
 pub mod sync;
 
-use crate::op::{stats::flush_stats_to_db, AppState};
 use std::time::Duration;
+
 use tracing::{error, info};
+
+use crate::op::{AppState, stats::flush_stats_to_db};
 
 pub fn start_background_tasks(state: AppState) {
     // 1. Periodic Stats Flush (every 10 minutes)

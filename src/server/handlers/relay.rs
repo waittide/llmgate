@@ -1,15 +1,17 @@
-use crate::{
-    op::AppState,
-    relay::{forward_relay, protocol::ApiFormat},
-    server::middleware::AuthContext,
-};
+use std::sync::Arc;
+
 use axum::{
     extract::{Extension, State},
     http::{HeaderMap, Uri},
     response::Response,
 };
 use bytes::Bytes;
-use std::sync::Arc;
+
+use crate::{
+    op::AppState,
+    relay::{forward_relay, protocol::ApiFormat},
+    server::middleware::AuthContext,
+};
 
 pub async fn chat_completions(
     State(state): State<AppState>,

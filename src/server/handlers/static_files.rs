@@ -1,6 +1,6 @@
 use axum::{
     body::Body,
-    http::{header, HeaderValue, Response, StatusCode, Uri},
+    http::{HeaderValue, Response, StatusCode, Uri, header},
 };
 use rust_embed::RustEmbed;
 
@@ -27,10 +27,7 @@ pub async fn serve_static(uri: Uri) -> Response<Body> {
                     HeaderValue::from_static("public, max-age=31536000, immutable"),
                 );
             } else {
-                response = response.header(
-                    header::CACHE_CONTROL,
-                    HeaderValue::from_static("no-cache"),
-                );
+                response = response.header(header::CACHE_CONTROL, HeaderValue::from_static("no-cache"));
             }
 
             response.body(Body::from(content.data)).unwrap()
@@ -40,7 +37,10 @@ pub async fn serve_static(uri: Uri) -> Response<Body> {
             if let Some(index_content) = Asset::get("index.html") {
                 Response::builder()
                     .status(StatusCode::OK)
-                    .header(header::CONTENT_TYPE, HeaderValue::from_static("text/html; charset=utf-8"))
+                    .header(
+                        header::CONTENT_TYPE,
+                        HeaderValue::from_static("text/html; charset=utf-8"),
+                    )
                     .header(header::CACHE_CONTROL, HeaderValue::from_static("no-cache"))
                     .body(Body::from(index_content.data))
                     .unwrap()

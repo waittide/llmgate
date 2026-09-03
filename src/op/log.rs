@@ -1,6 +1,7 @@
-use crate::{model::RequestLog, op::AppState};
 use anyhow::Result;
 use sqlx::QueryBuilder;
+
+use crate::{model::RequestLog, op::AppState};
 
 pub const LOG_RETENTION_DAYS_KEY: &str = "log_retention_days";
 const DEFAULT_RETENTION_DAYS: i64 = 7;
@@ -94,11 +95,12 @@ pub async fn purge_expired_logs(state: &AppState) -> Result<i64> {
     let days = get_log_retention_days(state);
     let cutoff_sec = chrono::Utc::now().timestamp() - days * 86400;
     let cutoff_ms = chrono::Utc::now().timestamp_millis() - days * 86400 * 1000;
-    let res = sqlx::query("DELETE FROM request_logs WHERE (created_at < ? AND created_at < 1000000000000) OR created_at < ?")
-        .bind(cutoff_sec)
-        .bind(cutoff_ms)
-        .execute(&state.db)
-        .await?;
+    let res =
+        sqlx::query("DELETE FROM request_logs WHERE (created_at < ? AND created_at < 1000000000000) OR created_at < ?")
+            .bind(cutoff_sec)
+            .bind(cutoff_ms)
+            .execute(&state.db)
+            .await?;
     Ok(res.rows_affected() as i64)
 }
 
@@ -111,39 +113,33 @@ pub async fn clear_all_logs(state: &AppState) -> Result<i64> {
 }
 /// Fetches a single request log by its database id (or fallback to latest request_id).
 pub async fn get_request_log(state: &AppState, id: i64) -> Result<Option<RequestLog>> {
-    let row = sqlx::query_as::<_, RequestLog>(
-        "SELECT * FROM request_logs WHERE id = ? LIMIT 1",
-    )
-    .bind(id)
-    .fetch_optional(&state.db)
-    .await?;
+    let row = sqlx::query_as::<_, RequestLog>("SELECT * FROM request_logs WHERE id = ? LIMIT 1")
+        .bind(id)
+        .fetch_optional(&state.db)
+        .await?;
 
     if row.is_some() {
         return Ok(row);
     }
 
-    let row_fallback = sqlx::query_as::<_, RequestLog>(
-        "SELECT * FROM request_logs WHERE request_id = ? ORDER BY id DESC LIMIT 1",
-    )
-    .bind(id)
-    .fetch_optional(&state.db)
-    .await?;
+    let row_fallback =
+        sqlx::query_as::<_, RequestLog>("SELECT * FROM request_logs WHERE request_id = ? ORDER BY id DESC LIMIT 1")
+            .bind(id)
+            .fetch_optional(&state.db)
+            .await?;
     Ok(row_fallback)
 }
 pub struct LogListQuery<'a> {
-    pub page: i64,
+    pub page:      i64,
     pub page_size: i64,
-    pub model: &'a str,
-    pub status: &'a str,
-    pub keyword: &'a str,
+    pub model:     &'a str,
+    pub status:    &'a str,
+    pub keyword:   &'a str,
 }
 
 /// Fetches a paginated, optionally-filtered list of request logs.
 /// Returns (total_count, page_items) ordered newest-first.
-pub async fn list_request_logs(
-    state: &AppState,
-    query: &LogListQuery<'_>,
-) -> Result<(i64, Vec<RequestLog>)> {
+pub async fn list_request_logs(state: &AppState, query: &LogListQuery<'_>) -> Result<(i64, Vec<RequestLog>)> {
     let page = query.page.max(1);
     let page_size = query.page_size.clamp(1, 200);
     let offset = (page - 1) * page_size;

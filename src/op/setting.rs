@@ -1,5 +1,6 @@
-use crate::{model::Setting, op::AppState};
 use anyhow::Result;
+
+use crate::{model::Setting, op::AppState};
 
 pub async fn refresh_setting_cache(state: &AppState) -> Result<()> {
     let settings: Vec<Setting> = sqlx::query_as("SELECT key, value FROM settings")
@@ -18,7 +19,7 @@ pub fn list_settings(state: &AppState) -> Vec<Setting> {
         .settings
         .iter()
         .map(|entry| Setting {
-            key: entry.key().clone(),
+            key:   entry.key().clone(),
             value: entry.value().clone(),
         })
         .collect();

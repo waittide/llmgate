@@ -3,80 +3,82 @@ pub mod backup;
 pub mod channel;
 pub mod group;
 pub mod llm;
+pub mod log;
 pub mod setting;
 pub mod stats;
 pub mod user;
-pub mod log;
+
+use std::sync::Arc;
+
+use anyhow::Result;
+use dashmap::DashMap;
+use parking_lot::RwLock;
+use tokio::sync::mpsc;
+use tracing::info;
 
 use crate::{
     db::DbPool,
     model::{
-        APIKey, Channel, ChannelModel, Group, LLMPrice, RequestLog, StatsAPIKey, StatsDaily,
-        StatsHourly, StatsMetrics, StatsTotal,
+        APIKey, Channel, ChannelModel, Group, LLMPrice, RequestLog, StatsAPIKey, StatsDaily, StatsHourly, StatsMetrics,
+        StatsTotal,
     },
     relay::{route::RouteManager, state::RequestStateManager},
 };
-use anyhow::Result;
-use dashmap::DashMap;
-use parking_lot::RwLock;
-use std::sync::Arc;
-use tokio::sync::mpsc;
-use tracing::info;
 
 #[derive(Clone)]
 pub struct AppState {
-    pub db: DbPool,
-    pub channels: Arc<DashMap<i64, Channel>>,
-    pub channel_models: Arc<DashMap<i64, ChannelModel>>,
-    pub groups: Arc<DashMap<i64, Group>>,
-    pub group_name_index: Arc<DashMap<String, i64>>,
-    pub api_keys: Arc<DashMap<i64, APIKey>>,
-    pub api_key_str_index: Arc<DashMap<String, i64>>,
-    pub llm_prices: Arc<DashMap<String, LLMPrice>>,
-    pub settings: Arc<DashMap<String, String>>,
-    pub stats_total: Arc<RwLock<StatsTotal>>,
-    pub stats_daily: Arc<RwLock<StatsDaily>>,
-    pub stats_hourly: Arc<RwLock<[StatsHourly; 24]>>,
-    pub stats_api_keys: Arc<DashMap<i64, StatsAPIKey>>,
-    pub route_manager: Arc<RouteManager>,
+    pub db:                    DbPool,
+    pub channels:              Arc<DashMap<i64, Channel>>,
+    pub channel_models:        Arc<DashMap<i64, ChannelModel>>,
+    pub groups:                Arc<DashMap<i64, Group>>,
+    pub group_name_index:      Arc<DashMap<String, i64>>,
+    pub api_keys:              Arc<DashMap<i64, APIKey>>,
+    pub api_key_str_index:     Arc<DashMap<String, i64>>,
+    pub llm_prices:            Arc<DashMap<String, LLMPrice>>,
+    pub settings:              Arc<DashMap<String, String>>,
+    pub stats_total:           Arc<RwLock<StatsTotal>>,
+    pub stats_daily:           Arc<RwLock<StatsDaily>>,
+    pub stats_hourly:          Arc<RwLock<[StatsHourly; 24]>>,
+    pub stats_api_keys:        Arc<DashMap<i64, StatsAPIKey>>,
+    pub route_manager:         Arc<RouteManager>,
     pub request_state_manager: Arc<RequestStateManager>,
-    pub jwt_secret: Arc<RwLock<String>>,
-    pub log_sender: mpsc::Sender<RequestLog>,
+    pub jwt_secret:            Arc<RwLock<String>>,
+    pub log_sender:            mpsc::Sender<RequestLog>,
 }
 
 impl AppState {
     pub async fn init(db: DbPool) -> Result<Self> {
         let now_date = chrono::Local::now().format("%Y%m%d").to_string();
         let default_hourlies = std::array::from_fn(|i| StatsHourly {
-            hour: i as i64,
-            date: now_date.clone(),
+            hour:    i as i64,
+            date:    now_date.clone(),
             metrics: StatsMetrics::default(),
         });
 
         let state = Self {
-            db: db.clone(),
-            channels: Arc::new(DashMap::new()),
-            channel_models: Arc::new(DashMap::new()),
-            groups: Arc::new(DashMap::new()),
-            group_name_index: Arc::new(DashMap::new()),
-            api_keys: Arc::new(DashMap::new()),
-            api_key_str_index: Arc::new(DashMap::new()),
-            llm_prices: Arc::new(DashMap::new()),
-            settings: Arc::new(DashMap::new()),
-            stats_total: Arc::new(RwLock::new(StatsTotal {
-                id: 1,
+            db:                    db.clone(),
+            channels:              Arc::new(DashMap::new()),
+            channel_models:        Arc::new(DashMap::new()),
+            groups:                Arc::new(DashMap::new()),
+            group_name_index:      Arc::new(DashMap::new()),
+            api_keys:              Arc::new(DashMap::new()),
+            api_key_str_index:     Arc::new(DashMap::new()),
+            llm_prices:            Arc::new(DashMap::new()),
+            settings:              Arc::new(DashMap::new()),
+            stats_total:           Arc::new(RwLock::new(StatsTotal {
+                id:      1,
                 metrics: StatsMetrics::default(),
             })),
-            stats_daily: Arc::new(RwLock::new(StatsDaily {
-                date: now_date.clone(),
+            stats_daily:           Arc::new(RwLock::new(StatsDaily {
+                date:    now_date.clone(),
                 metrics: StatsMetrics::default(),
             })),
-            stats_hourly: Arc::new(RwLock::new(default_hourlies)),
-            stats_api_keys: Arc::new(DashMap::new()),
-            route_manager: Arc::new(RouteManager::new()),
+            stats_hourly:          Arc::new(RwLock::new(default_hourlies)),
+            stats_api_keys:        Arc::new(DashMap::new()),
+            route_manager:         Arc::new(RouteManager::new()),
             request_state_manager: Arc::new(RequestStateManager::new()),
-            jwt_secret: Arc::new(RwLock::new("octopus-jwt-secret-default".to_string())),
-            log_sender: {
+            jwt_secret:            Arc::new(RwLock::new("octopus-jwt-secret-default".to_string())),
+            log_sender:            {
                 let (tx, rx) = mpsc::channel(2048);
                 crate::op::log::start_log_worker(db.clone(), rx);
                 tx

@@ -239,12 +239,12 @@ pub struct GroupRelayConfig {
 impl Default for GroupRelayConfig {
     fn default() -> Self {
         Self {
-            member_max_attempts: 2,
-            member_retry_interval_seconds: 1,
+            member_max_attempts:                        2,
+            member_retry_interval_seconds:              1,
             member_non_stream_response_timeout_seconds: 60,
-            member_stream_first_event_timeout_seconds: 30,
-            member_cooldown_seconds: 300,
-            member_affinity_seconds: 0,
+            member_stream_first_event_timeout_seconds:  30,
+            member_cooldown_seconds:                    300,
+            member_affinity_seconds:                    0,
         }
     }
 }
@@ -347,27 +347,27 @@ pub struct RoundLog {
 #[derive(Debug, Clone, Default, Serialize, Deserialize, sqlx::FromRow)]
 #[serde(default)]
 pub struct RequestLog {
-    pub id:              i64,
-    pub request_id:      i64,
-    pub status:          String,
-    pub model:           String,
-    pub target_channel:  String,
-    pub target_model:    String,
-    pub request_url:     String,
-    pub request_headers: String,
-    pub request_body:    String,
-    pub response_url:    String,
-    pub response_headers: String,
-    pub response_body:   String,
-    pub prompt_tokens:   i64,
+    pub id:                i64,
+    pub request_id:        i64,
+    pub status:            String,
+    pub model:             String,
+    pub target_channel:    String,
+    pub target_model:      String,
+    pub request_url:       String,
+    pub request_headers:   String,
+    pub request_body:      String,
+    pub response_url:      String,
+    pub response_headers:  String,
+    pub response_body:     String,
+    pub prompt_tokens:     i64,
     pub completion_tokens: i64,
-    pub total_tokens:    i64,
-    pub cost:            f64,
-    pub wait_time:       i64,
-    pub round:           i64,
-    pub error:           Option<String>,
-    pub rounds_detail:   String,
-    pub created_at:      i64,
+    pub total_tokens:      i64,
+    pub cost:              f64,
+    pub wait_time:         i64,
+    pub round:             i64,
+    pub error:             Option<String>,
+    pub rounds_detail:     String,
+    pub created_at:        i64,
 }
 
 // ---------------- LLM Pricing & Models ----------------

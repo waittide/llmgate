@@ -1,12 +1,10 @@
+use anyhow::{Result, anyhow};
+use sqlx::Row;
+
 use crate::{
-    model::{
-        Group, GroupActiveItemUpdateRequest, GroupItem, GroupMode, GroupRelayConfig,
-        GroupUpdateRequest,
-    },
+    model::{Group, GroupActiveItemUpdateRequest, GroupItem, GroupMode, GroupRelayConfig, GroupUpdateRequest},
     op::AppState,
 };
-use anyhow::{anyhow, Result};
-use sqlx::Row;
 
 pub async fn refresh_group_cache(state: &AppState) -> Result<()> {
     let rows = sqlx::query("SELECT id, name, mode, active_item_id, relay_config FROM groups ORDER BY id ASC")
@@ -22,8 +20,7 @@ pub async fn refresh_group_cache(state: &AppState) -> Result<()> {
         let mode_str: String = row.get("mode");
         let active_item_id: i64 = row.get("active_item_id");
         let relay_config_json: String = row.get("relay_config");
-        let relay_config: GroupRelayConfig =
-            serde_json::from_str(&relay_config_json).unwrap_or_default();
+        let relay_config: GroupRelayConfig = serde_json::from_str(&relay_config_json).unwrap_or_default();
 
         let group = Group {
             id,
@@ -82,12 +79,18 @@ pub async fn refresh_group_cache(state: &AppState) -> Result<()> {
     for (k, v) in &local_name_index {
         state.group_name_index.insert(k.clone(), *v);
     }
-    state.group_name_index.retain(|k, _| local_name_index.contains_key(k));
+    state
+        .group_name_index
+        .retain(|k, _| local_name_index.contains_key(k));
     Ok(())
 }
 
 pub fn list_groups(state: &AppState) -> Vec<Group> {
-    let mut list: Vec<Group> = state.groups.iter().map(|entry| entry.value().clone()).collect();
+    let mut list: Vec<Group> = state
+        .groups
+        .iter()
+        .map(|entry| entry.value().clone())
+        .collect();
     list.sort_by_key(|g| g.id);
     list
 }
@@ -123,29 +126,25 @@ pub fn get_group_by_id(state: &AppState, id: i64) -> Result<Group> {
 pub async fn create_group(state: &AppState, group: &mut Group) -> Result<()> {
     let relay_config_json = serde_json::to_string(&group.relay_config)?;
     let mut tx = state.db.begin().await?;
-    let result = sqlx::query(
-        "INSERT INTO groups (name, mode, active_item_id, relay_config) VALUES (?, ?, ?, ?)",
-    )
-    .bind(&group.name)
-    .bind(group.mode.as_str())
-    .bind(group.active_item_id)
-    .bind(&relay_config_json)
-    .execute(&mut *tx)
-    .await?;
+    let result = sqlx::query("INSERT INTO groups (name, mode, active_item_id, relay_config) VALUES (?, ?, ?, ?)")
+        .bind(&group.name)
+        .bind(group.mode.as_str())
+        .bind(group.active_item_id)
+        .bind(&relay_config_json)
+        .execute(&mut *tx)
+        .await?;
 
     let group_id = result.last_insert_rowid();
     group.id = group_id;
 
     for item in &mut group.items {
         item.group_id = group_id;
-        let item_res = sqlx::query(
-            "INSERT INTO group_items (group_id, channel_model_id, priority) VALUES (?, ?, ?)",
-        )
-        .bind(group_id)
-        .bind(item.channel_model_id)
-        .bind(item.priority)
-        .execute(&mut *tx)
-        .await?;
+        let item_res = sqlx::query("INSERT INTO group_items (group_id, channel_model_id, priority) VALUES (?, ?, ?)")
+            .bind(group_id)
+            .bind(item.channel_model_id)
+            .bind(item.priority)
+            .execute(&mut *tx)
+            .await?;
         item.id = item_res.last_insert_rowid();
     }
 
@@ -172,14 +171,12 @@ pub async fn update_group(state: &AppState, req: &GroupUpdateRequest) -> Result<
         .await?;
 
     for item in &req.items_to_add {
-        sqlx::query(
-            "INSERT OR IGNORE INTO group_items (group_id, channel_model_id, priority) VALUES (?, ?, ?)",
-        )
-        .bind(req.id)
-        .bind(item.channel_model_id)
-        .bind(item.priority)
-        .execute(&mut *tx)
-        .await?;
+        sqlx::query("INSERT OR IGNORE INTO group_items (group_id, channel_model_id, priority) VALUES (?, ?, ?)")
+            .bind(req.id)
+            .bind(item.channel_model_id)
+            .bind(item.priority)
+            .execute(&mut *tx)
+            .await?;
     }
 
     for item in &req.items_to_update {

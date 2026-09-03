@@ -1,12 +1,12 @@
+use anyhow::{Result, anyhow};
+use sqlx::Row;
+
 use crate::{
     model::{
-        Channel, ChannelModel, ChannelModelSource, ChannelProvider, ChannelUpdateRequest,
-        CustomHeader, StatsMetrics,
+        Channel, ChannelModel, ChannelModelSource, ChannelProvider, ChannelUpdateRequest, CustomHeader, StatsMetrics,
     },
     op::AppState,
 };
-use anyhow::{anyhow, Result};
-use sqlx::Row;
 
 pub async fn refresh_channel_cache(state: &AppState) -> Result<()> {
     // 1. Fetch all channels into local map first to avoid cache-stampede / 404 race
@@ -25,19 +25,18 @@ pub async fn refresh_channel_cache(state: &AppState) -> Result<()> {
         let key: String = row.get("key");
         let auto_sync: bool = row.get::<i64, _>("auto_sync") != 0;
         let custom_header_json: String = row.get("custom_header");
-        let custom_header: Vec<CustomHeader> =
-            serde_json::from_str(&custom_header_json).unwrap_or_default();
+        let custom_header: Vec<CustomHeader> = serde_json::from_str(&custom_header_json).unwrap_or_default();
         let param_override: Option<String> = row.get("param_override");
         let match_regex: Option<String> = row.get("match_regex");
 
         let metrics = StatsMetrics {
-            input_token: row.get("input_token"),
-            output_token: row.get("output_token"),
-            input_cost: row.get("input_cost"),
-            output_cost: row.get("output_cost"),
-            wait_time: row.get("wait_time"),
+            input_token:     row.get("input_token"),
+            output_token:    row.get("output_token"),
+            input_cost:      row.get("input_cost"),
+            output_cost:     row.get("output_cost"),
+            wait_time:       row.get("wait_time"),
             request_success: row.get("request_success"),
-            request_failed: row.get("request_failed"),
+            request_failed:  row.get("request_failed"),
         };
 
         let channel = Channel {
@@ -70,13 +69,13 @@ pub async fn refresh_channel_cache(state: &AppState) -> Result<()> {
         let name: String = row.get("name");
         let source_str: String = row.get("source");
         let metrics = StatsMetrics {
-            input_token: row.get("input_token"),
-            output_token: row.get("output_token"),
-            input_cost: row.get("input_cost"),
-            output_cost: row.get("output_cost"),
-            wait_time: row.get("wait_time"),
+            input_token:     row.get("input_token"),
+            output_token:    row.get("output_token"),
+            input_cost:      row.get("input_cost"),
+            output_cost:     row.get("output_cost"),
+            wait_time:       row.get("wait_time"),
             request_success: row.get("request_success"),
-            request_failed: row.get("request_failed"),
+            request_failed:  row.get("request_failed"),
         };
 
         let channel_model = ChannelModel {
@@ -102,12 +101,18 @@ pub async fn refresh_channel_cache(state: &AppState) -> Result<()> {
     for (k, v) in &local_models {
         state.channel_models.insert(*k, v.clone());
     }
-    state.channel_models.retain(|k, _| local_models.contains_key(k));
+    state
+        .channel_models
+        .retain(|k, _| local_models.contains_key(k));
     Ok(())
 }
 
 pub fn list_channels(state: &AppState) -> Vec<Channel> {
-    let mut list: Vec<Channel> = state.channels.iter().map(|entry| entry.value().clone()).collect();
+    let mut list: Vec<Channel> = state
+        .channels
+        .iter()
+        .map(|entry| entry.value().clone())
+        .collect();
     list.sort_by_key(|c| c.id);
     list
 }
@@ -146,14 +151,12 @@ pub async fn create_channel(state: &AppState, channel: &mut Channel) -> Result<(
 
     for model in &mut channel.models {
         model.channel_id = channel_id;
-        let m_res = sqlx::query(
-            "INSERT INTO channel_models (channel_id, name, source) VALUES (?, ?, ?)",
-        )
-        .bind(channel_id)
-        .bind(&model.name)
-        .bind(model.source.as_str())
-        .execute(&mut *tx)
-        .await?;
+        let m_res = sqlx::query("INSERT INTO channel_models (channel_id, name, source) VALUES (?, ?, ?)")
+            .bind(channel_id)
+            .bind(&model.name)
+            .bind(model.source.as_str())
+            .execute(&mut *tx)
+            .await?;
         model.id = m_res.last_insert_rowid();
     }
 
@@ -173,7 +176,10 @@ pub async fn update_channel(state: &AppState, req: &ChannelUpdateRequest) -> Res
     let auto_sync = req.auto_sync.unwrap_or(current.auto_sync);
     let custom_header = req.custom_header.as_ref().unwrap_or(&current.custom_header);
     let custom_header_json = serde_json::to_string(custom_header)?;
-    let param_override = req.param_override.as_ref().or(current.param_override.as_ref());
+    let param_override = req
+        .param_override
+        .as_ref()
+        .or(current.param_override.as_ref());
     let match_regex = req.match_regex.as_ref().or(current.match_regex.as_ref());
 
     let mut tx = state.db.begin().await?;
@@ -199,12 +205,11 @@ pub async fn update_channel(state: &AppState, req: &ChannelUpdateRequest) -> Res
 
     // Handle models update if provided (incremental update to preserve IDs and metrics)
     if let Some(models) = &req.models {
-        let existing_models: Vec<(i64, String)> = sqlx::query_as::<_, (i64, String)>(
-            "SELECT id, name FROM channel_models WHERE channel_id = ?",
-        )
-        .bind(req.id)
-        .fetch_all(&mut *tx)
-        .await?;
+        let existing_models: Vec<(i64, String)> =
+            sqlx::query_as::<_, (i64, String)>("SELECT id, name FROM channel_models WHERE channel_id = ?")
+                .bind(req.id)
+                .fetch_all(&mut *tx)
+                .await?;
 
         let mut req_model_names = std::collections::HashSet::new();
 
@@ -217,14 +222,12 @@ pub async fn update_channel(state: &AppState, req: &ChannelUpdateRequest) -> Res
                     .execute(&mut *tx)
                     .await?;
             } else {
-                sqlx::query(
-                    "INSERT INTO channel_models (channel_id, name, source) VALUES (?, ?, ?)",
-                )
-                .bind(req.id)
-                .bind(&model.name)
-                .bind(model.source.as_str())
-                .execute(&mut *tx)
-                .await?;
+                sqlx::query("INSERT INTO channel_models (channel_id, name, source) VALUES (?, ?, ?)")
+                    .bind(req.id)
+                    .bind(&model.name)
+                    .bind(model.source.as_str())
+                    .execute(&mut *tx)
+                    .await?;
             }
         }
 
@@ -271,9 +274,10 @@ pub async fn delete_channel(state: &AppState, id: i64) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
+
     use super::*;
     use crate::db::init_db;
-    use std::path::PathBuf;
     async fn setup_test_state() -> (AppState, PathBuf) {
         let rnd = nanoid::nanoid!(12);
         let db_path = std::env::temp_dir().join(format!("octopus_test_{}.db", rnd));
@@ -308,17 +312,22 @@ mod tests {
 
         create_channel(&state, &mut ch).await.unwrap();
         let initial_channel = get_channel(&state, ch.id).unwrap();
-        let gpt4o_id = initial_channel.models.iter().find(|m| m.name == "gpt-4o").unwrap().id;
+        let gpt4o_id = initial_channel
+            .models
+            .iter()
+            .find(|m| m.name == "gpt-4o")
+            .unwrap()
+            .id;
 
         // Update channel models: keep gpt-4o, remove gpt-4o-mini, add o1-preview
         let update_req = ChannelUpdateRequest {
-            id: ch.id,
-            name: None,
-            channel_type: None,
-            enabled: None,
-            base_url: None,
-            key: None,
-            models: Some(vec![
+            id:             ch.id,
+            name:           None,
+            channel_type:   None,
+            enabled:        None,
+            base_url:       None,
+            key:            None,
+            models:         Some(vec![
                 ChannelModel {
                     name: "gpt-4o".to_string(),
                     source: ChannelModelSource::Manual,
@@ -330,18 +339,32 @@ mod tests {
                     ..Default::default()
                 },
             ]),
-            auto_sync: None,
-            custom_header: None,
+            auto_sync:      None,
+            custom_header:  None,
             param_override: None,
-            match_regex: None,
+            match_regex:    None,
         };
 
         let updated_channel = update_channel(&state, &update_req).await.unwrap();
-        let new_gpt4o = updated_channel.models.iter().find(|m| m.name == "gpt-4o").unwrap();
+        let new_gpt4o = updated_channel
+            .models
+            .iter()
+            .find(|m| m.name == "gpt-4o")
+            .unwrap();
         assert_eq!(new_gpt4o.id, gpt4o_id, "Existing model ID should be preserved");
 
-        assert!(updated_channel.models.iter().any(|m| m.name == "o1-preview"));
-        assert!(!updated_channel.models.iter().any(|m| m.name == "gpt-4o-mini"));
+        assert!(
+            updated_channel
+                .models
+                .iter()
+                .any(|m| m.name == "o1-preview")
+        );
+        assert!(
+            !updated_channel
+                .models
+                .iter()
+                .any(|m| m.name == "gpt-4o-mini")
+        );
 
         // Verify foreign key cascade delete on channel deletion
         delete_channel(&state, ch.id).await.unwrap();
@@ -350,6 +373,9 @@ mod tests {
             .fetch_one(&state.db)
             .await
             .unwrap();
-        assert_eq!(count.0, 0, "Channel models must be cascade deleted when channel is deleted");
+        assert_eq!(
+            count.0, 0,
+            "Channel models must be cascade deleted when channel is deleted"
+        );
     }
 }

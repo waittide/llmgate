@@ -3,25 +3,24 @@ pub mod handlers;
 pub mod middleware;
 pub mod resp;
 
-use crate::{
-    op::AppState,
-    server::{
-        handlers::{
-            apikey, channel, group, log, model, relay, setting, static_files, stats, user,
-        },
-        middleware::{admin_auth_middleware, api_key_auth_middleware},
-    },
-};
 use axum::{
+    Router,
     extract::DefaultBodyLimit,
     middleware::from_fn_with_state,
     routing::{delete, get, post},
-    Router,
 };
 use tower_http::{
     compression::CompressionLayer,
     cors::{Any, CorsLayer},
     trace::TraceLayer,
+};
+
+use crate::{
+    op::AppState,
+    server::{
+        handlers::{apikey, channel, group, log, model, relay, setting, static_files, stats, user},
+        middleware::{admin_auth_middleware, api_key_auth_middleware},
+    },
 };
 
 pub fn build_router(state: AppState) -> Router {

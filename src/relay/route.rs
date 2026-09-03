@@ -1,23 +1,25 @@
-use crate::model::{Group, GroupItem, GroupMode};
+use std::{collections::HashMap, sync::Arc};
+
 use dashmap::DashMap;
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
-use std::{collections::HashMap, sync::Arc};
 use tokio::sync::broadcast;
+
+use crate::model::{Group, GroupItem, GroupMode};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RouteState {
-    pub group_id: i64,
+    pub group_id:        i64,
     pub current_item_id: i64,
-    pub affinity_until: i64,
-    pub cooldowns: HashMap<i64, i64>,
+    pub affinity_until:  i64,
+    pub cooldowns:       HashMap<i64, i64>,
     #[serde(skip)]
-    pub affinity_armed: bool,
+    pub affinity_armed:  bool,
 }
 
 pub struct RouteManager {
     routes: DashMap<i64, Arc<Mutex<RouteState>>>,
-    tx: broadcast::Sender<RouteState>,
+    tx:     broadcast::Sender<RouteState>,
 }
 
 impl RouteManager {
@@ -98,9 +100,11 @@ impl RouteManager {
         }
 
         // If all items are temporarily in cooldown, probe the one with the earliest expiring cooldown
-        if let Some(item) = group.items.iter().min_by_key(|item| {
-            route.cooldowns.get(&item.id).copied().unwrap_or(0)
-        }) {
+        if let Some(item) = group
+            .items
+            .iter()
+            .min_by_key(|item| route.cooldowns.get(&item.id).copied().unwrap_or(0))
+        {
             if route.current_item_id != item.id {
                 route.current_item_id = item.id;
                 route.affinity_armed = true;
@@ -118,8 +122,7 @@ impl RouteManager {
         route.cooldowns.remove(&item_id);
 
         if route.affinity_armed && affinity_seconds > 0 {
-            route.affinity_until =
-                chrono::Utc::now().timestamp_millis() + affinity_seconds * 1000;
+            route.affinity_until = chrono::Utc::now().timestamp_millis() + affinity_seconds * 1000;
             route.affinity_armed = false;
         }
         self.notify_change(&route);

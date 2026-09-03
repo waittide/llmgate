@@ -1,15 +1,16 @@
-use crate::{
-    model::StatsDaily,
-    op::{stats, AppState},
-    server::resp::{error, success},
-};
 use axum::{extract::State, http::StatusCode, response::Response};
 use serde::Serialize;
+
+use crate::{
+    model::StatsDaily,
+    op::{AppState, stats},
+    server::resp::{error, success},
+};
 
 #[derive(Serialize)]
 pub struct StatsDailyResponse {
     pub max_request_count: i64,
-    pub items: Vec<StatsDaily>,
+    pub items:             Vec<StatsDaily>,
 }
 
 pub async fn get_stats_today(State(state): State<AppState>) -> Response {
