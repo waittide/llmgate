@@ -106,7 +106,16 @@ impl RequestStateManager {
             recent.insert(0, id);
             if recent.len() > 100 {
                 let dropped_id = recent.pop().unwrap();
-                self.requests.remove(&dropped_id);
+                // Never evict a still-running stream: removing it would orphan
+                // its in-flight state updates and lose final metrics/logs.
+                let is_running = self
+                    .requests
+                    .get(&dropped_id)
+                    .map(|r| r.read().overview.status == "running")
+                    .unwrap_or(false);
+                if !is_running {
+                    self.requests.remove(&dropped_id);
+                }
             }
         }
 
@@ -175,7 +184,7 @@ impl RequestStateManager {
         error: Option<String>,
         rounds: Vec<crate::model::RoundLog>,
     ) {
-        if let Some(req) = self.requests.get(&id) {
+        let finished = self.requests.get(&id).is_some_and(|req| {
             let mut lock = req.write();
             lock.overview.duration = lock.started_instant.elapsed().as_millis() as i64;
             lock.overview.status = status.to_string();
@@ -188,6 +197,14 @@ impl RequestStateManager {
                 lock.overview.rounds = rounds;
             }
             let _ = self.tx.send(lock.overview.clone());
+            true
+        });
+
+        // A long-running stream that was evicted from the recency window while
+        // still in flight is kept in `requests`; once it finishes, its log is
+        // already persisted by the caller, so drop it from memory now.
+        if finished && !self.recent_ids.read().contains(&id) {
+            self.requests.remove(&id);
         }
     }
 
@@ -204,20 +221,17 @@ impl RequestStateManager {
     }
 
     pub fn clear(&self) {
-        let mut recent = self.recent_ids.write();
-        let running_ids: Vec<u64> = recent
+        // Retain every still-running stream even if it already fell out of the
+        // recency window (e.g. >100 newer requests arrived while it was in
+        // flight). Only finished requests are dropped from memory here.
+        let running_ids: Vec<u64> = self
+            .requests
             .iter()
-            .filter(|&&id| {
-                if let Some(r) = self.requests.get(&id) {
-                    r.read().overview.status == "running"
-                } else {
-                    false
-                }
-            })
-            .copied()
+            .filter(|entry| entry.value().read().overview.status == "running")
+            .map(|entry| *entry.key())
             .collect();
 
         self.requests.retain(|id, _| running_ids.contains(id));
-        *recent = running_ids;
+        *self.recent_ids.write() = running_ids;
     }
 }
