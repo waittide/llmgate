@@ -118,7 +118,65 @@ pub async fn delete_api_key(state: &AppState, id: i64) -> Result<()> {
         .bind(id)
         .execute(&state.db)
         .await?;
-
+    state.stats_api_keys.remove(&id);
     refresh_apikey_cache(state).await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use super::*;
+    use crate::{db::init_db, op::stats::flush_stats_to_db};
+
+    async fn setup_test_state() -> (AppState, PathBuf) {
+        let rnd = nanoid::nanoid!(12);
+        let db_path = std::env::temp_dir().join(format!("octopus_apikey_test_{}.db", rnd));
+        let pool = init_db(&db_path).await.unwrap();
+        let state = AppState::init(pool).await.unwrap();
+        (state, db_path)
+    }
+
+    #[tokio::test]
+    async fn test_delete_api_key_cleans_memory_stats_cache() {
+        let (state, db_path) = setup_test_state().await;
+
+        let mut key = APIKey {
+            name: "test-delete-key".to_string(),
+            ..Default::default()
+        };
+        create_api_key(&state, &mut key).await.unwrap();
+        let key_id = key.id;
+
+        // Simulate metrics in memory cache
+        state.stats_api_keys.insert(
+            key_id,
+            crate::model::StatsAPIKey {
+                api_key_id: key_id,
+                metrics:    crate::model::StatsMetrics {
+                    input_token: 100,
+                    ..Default::default()
+                },
+            },
+        );
+
+        // Delete API key
+        delete_api_key(&state, key_id).await.unwrap();
+
+        // Verify removed from in-memory stats cache
+        assert!(!state.stats_api_keys.contains_key(&key_id));
+
+        // Flush to DB and verify it does NOT resurrect in stats_api_keys table
+        flush_stats_to_db(&state).await.unwrap();
+
+        let row_count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM stats_api_keys WHERE api_key_id = ?")
+            .bind(key_id)
+            .fetch_one(&state.db)
+            .await
+            .unwrap();
+        assert_eq!(row_count.0, 0);
+
+        let _ = std::fs::remove_file(db_path);
+    }
 }
