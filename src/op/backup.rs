@@ -387,7 +387,7 @@ mod tests {
     use super::*;
     use crate::{
         db::init_db,
-        model::{Channel, ChannelModel, ChannelModelSource, ChannelProvider, Group, GroupItem, GroupMode},
+        model::{Channel, ChannelModel, ChannelModelSource, ChannelProvider, Group, GroupMode},
     };
 
     async fn setup_test_state() -> (AppState, PathBuf) {

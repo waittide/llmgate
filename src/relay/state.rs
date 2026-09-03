@@ -264,9 +264,9 @@ mod tests {
             .get_cancel_receiver(req_id)
             .expect("receiver exists");
 
-        assert_eq!(*rx.borrow(), false);
+        assert!(!*rx.borrow());
         assert!(manager.interrupt(req_id));
-        assert_eq!(*rx.borrow(), true);
+        assert!(*rx.borrow());
 
         // Non-existent id returns false
         assert!(!manager.interrupt(99999));
