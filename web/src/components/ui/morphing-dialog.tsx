@@ -42,13 +42,19 @@ function useMorphingDialog() {
 export type MorphingDialogProviderProps = {
   children: React.ReactNode;
   transition?: Transition;
+  isOpen?: boolean;
+  setIsOpen?: React.Dispatch<React.SetStateAction<boolean>>;
 };
 
 function MorphingDialogProvider({
   children,
   transition,
+  isOpen: controlledIsOpen,
+  setIsOpen: controlledSetIsOpen,
 }: MorphingDialogProviderProps) {
-  const [isOpen, setIsOpen] = useState(false);
+  const [internalIsOpen, setInternalIsOpen] = useState(false);
+  const isOpen = controlledIsOpen !== undefined ? controlledIsOpen : internalIsOpen;
+  const setIsOpen = controlledSetIsOpen !== undefined ? controlledSetIsOpen : setInternalIsOpen;
   const uniqueId = useId();
   const triggerRef = useRef<HTMLDivElement>(null!);
 
@@ -59,7 +65,7 @@ function MorphingDialogProvider({
       uniqueId,
       triggerRef,
     }),
-    [isOpen, uniqueId]
+    [isOpen, setIsOpen, uniqueId]
   );
 
   return (
@@ -72,11 +78,13 @@ function MorphingDialogProvider({
 export type MorphingDialogProps = {
   children: React.ReactNode;
   transition?: Transition;
+  isOpen?: boolean;
+  setIsOpen?: React.Dispatch<React.SetStateAction<boolean>>;
 };
 
-function MorphingDialog({ children, transition }: MorphingDialogProps) {
+function MorphingDialog({ children, transition, isOpen, setIsOpen }: MorphingDialogProps) {
   return (
-    <MorphingDialogProvider>
+    <MorphingDialogProvider transition={transition} isOpen={isOpen} setIsOpen={setIsOpen}>
       <MotionConfig transition={transition}>{children}</MotionConfig>
     </MorphingDialogProvider>
   );
@@ -262,18 +270,20 @@ export type MorphingDialogContainerProps = {
 function MorphingDialogContainer({ children }: MorphingDialogContainerProps) {
   const { isOpen, uniqueId } = useMorphingDialog();
   const [mounted, setMounted] = useState(false);
+  const [hasOpened, setHasOpened] = useState(false);
 
   useEffect(() => {
-    // Schedule state update for next tick to avoid synchronous update warning
-    const timer = setTimeout(() => setMounted(true), 0);
-    return () => {
-      clearTimeout(timer);
-      setMounted(false);
-    };
+    setMounted(true);
+    return () => setMounted(false);
   }, []);
 
-  if (!mounted) return null;
+  useEffect(() => {
+    if (isOpen && !hasOpened) {
+      setHasOpened(true);
+    }
+  }, [isOpen, hasOpened]);
 
+  if (!mounted || (!isOpen && !hasOpened)) return null;
   return createPortal(
     <AnimatePresence initial={false} mode='sync'>
       {isOpen && (
