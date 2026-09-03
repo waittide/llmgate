@@ -431,15 +431,14 @@ pub async fn forward_relay(
             .update_round(req_id, round, ch.name.clone(), channel_model.name.clone(), true);
 
         let timeout_secs = if metadata.stream {
-            current_group
-                .relay_config
-                .member_stream_first_event_timeout_seconds
-                .max(10) as u64
+            None
         } else {
-            current_group
-                .relay_config
-                .member_non_stream_response_timeout_seconds
-                .max(10) as u64
+            Some(
+                current_group
+                    .relay_config
+                    .member_non_stream_response_timeout_seconds
+                    .max(10) as u64,
+            )
         };
 
         let req_builder = match build_upstream_request(client, &ch, target_endpoint, Some(final_body), timeout_secs) {

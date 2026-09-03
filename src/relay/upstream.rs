@@ -28,7 +28,7 @@ pub fn build_upstream_request(
     channel: &Channel,
     endpoint: &str, // e.g. "/chat/completions", "/messages", "/models"
     body: Option<Vec<u8>>,
-    timeout_secs: u64,
+    timeout_secs: Option<u64>,
 ) -> Result<RequestBuilder> {
     let base_url = normalize_base_url(&channel.base_url);
     let target_url = format!("{}{}", base_url, endpoint);
@@ -41,9 +41,11 @@ pub fn build_upstream_request(
         client.get(&target_url)
     };
 
-    req_builder = req_builder
-        .headers(headers)
-        .timeout(Duration::from_secs(timeout_secs));
+    req_builder = req_builder.headers(headers);
+
+    if let Some(timeout_secs) = timeout_secs {
+        req_builder = req_builder.timeout(Duration::from_secs(timeout_secs));
+    }
 
     if let Some(b) = body {
         req_builder = req_builder.body(b);
