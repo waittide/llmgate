@@ -745,6 +745,138 @@ pub fn convert_openai_to_gemini(val: &Value) -> Value {
     Value::Object(gemini_obj)
 }
 
+fn gemini_finish_reason(reason: &str) -> &str {
+    match reason {
+        "MAX_TOKENS" => "length",
+        "STOP" => "stop",
+        _ => "stop",
+    }
+}
+
+/// Converts a native Gemini generateContent response into an OpenAI Chat Completion response.
+pub fn convert_gemini_to_openai_chat_response(val: &Value, model_name: &str) -> Value {
+    let candidate = val.pointer("/candidates/0");
+    let parts = candidate
+        .and_then(|c| c.pointer("/content/parts"))
+        .and_then(Value::as_array);
+    let text = parts
+        .map(|parts| {
+            parts
+                .iter()
+                .filter_map(|part| part.get("text").and_then(Value::as_str))
+                .collect::<String>()
+        })
+        .unwrap_or_default();
+    let tool_calls: Vec<Value> = parts
+        .into_iter()
+        .flatten()
+        .filter_map(|part| {
+            let call = part.get("functionCall")?;
+            let name = call.get("name").and_then(Value::as_str)?;
+            let arguments = call
+                .get("args")
+                .cloned()
+                .unwrap_or_else(|| serde_json::json!({}));
+            Some(serde_json::json!({
+                "id": format!("call_{}", nanoid::nanoid!(20)),
+                "type": "function",
+                "function": {
+                    "name": name,
+                    "arguments": serde_json::to_string(&arguments).unwrap_or_else(|_| "{}".to_string())
+                }
+            }))
+        })
+        .collect();
+
+    let mut message = serde_json::json!({
+        "role": "assistant",
+        "content": text
+    });
+    if !tool_calls.is_empty() {
+        message["tool_calls"] = Value::Array(tool_calls);
+    }
+
+    let finish_reason = candidate
+        .and_then(|c| c.get("finishReason"))
+        .and_then(Value::as_str)
+        .map(gemini_finish_reason);
+    let prompt_tokens = val
+        .pointer("/usageMetadata/promptTokenCount")
+        .and_then(Value::as_i64)
+        .unwrap_or(0);
+    let completion_tokens = val
+        .pointer("/usageMetadata/candidatesTokenCount")
+        .and_then(Value::as_i64)
+        .unwrap_or(0);
+    let total_tokens = val
+        .pointer("/usageMetadata/totalTokenCount")
+        .and_then(Value::as_i64)
+        .unwrap_or(prompt_tokens + completion_tokens);
+
+    serde_json::json!({
+        "id": format!("chatcmpl-{}", nanoid::nanoid!(24)),
+        "object": "chat.completion",
+        "created": chrono::Utc::now().timestamp(),
+        "model": model_name,
+        "choices": [{
+            "index": 0,
+            "message": message,
+            "finish_reason": finish_reason
+        }],
+        "usage": {
+            "prompt_tokens": prompt_tokens,
+            "completion_tokens": completion_tokens,
+            "total_tokens": total_tokens
+        }
+    })
+}
+
+/// Translates one native Gemini SSE event into an OpenAI Chat Completion SSE chunk.
+pub fn gemini_sse_event_to_openai_chunk(
+    event_str: &str,
+    model_name: &str,
+    created: i64,
+    chatcmpl_id: &str,
+) -> Option<String> {
+    let data = event_str
+        .lines()
+        .find_map(|line| line.trim().strip_prefix("data:").map(str::trim))?;
+    let val: Value = serde_json::from_str(data).ok()?;
+    let candidate = val.pointer("/candidates/0")?;
+    let parts = candidate
+        .pointer("/content/parts")
+        .and_then(Value::as_array);
+    let text = parts
+        .map(|parts| {
+            parts
+                .iter()
+                .filter_map(|part| part.get("text").and_then(Value::as_str))
+                .collect::<String>()
+        })
+        .unwrap_or_default();
+    let finish_reason = candidate
+        .get("finishReason")
+        .and_then(Value::as_str)
+        .map(gemini_finish_reason);
+
+    if text.is_empty() && finish_reason.is_none() {
+        return None;
+    }
+
+    let chunk = serde_json::json!({
+        "id": chatcmpl_id,
+        "object": "chat.completion.chunk",
+        "created": created,
+        "model": model_name,
+        "choices": [{
+            "index": 0,
+            "delta": if text.is_empty() { serde_json::json!({}) } else { serde_json::json!({ "content": text }) },
+            "finish_reason": finish_reason
+        }]
+    });
+    Some(format!("data: {}\n\n", serde_json::to_string(&chunk).unwrap_or_default()))
+}
+
 pub fn calculate_cost(prompt_tokens: i64, completion_tokens: i64, price: Option<&LLMPrice>) -> f64 {
     match price {
         Some(p) => {
@@ -944,6 +1076,33 @@ mod tests {
         );
     }
 
+
+    #[test]
+    fn test_convert_gemini_to_openai_chat_response() {
+        let gemini = serde_json::json!({
+            "candidates": [{
+                "content": { "role": "model", "parts": [{ "text": "Hello from Gemini" }] },
+                "finishReason": "STOP"
+            }],
+            "usageMetadata": {
+                "promptTokenCount": 4,
+                "candidatesTokenCount": 3,
+                "totalTokenCount": 7
+            }
+        });
+        let openai = convert_gemini_to_openai_chat_response(&gemini, "gemini-2.5-pro");
+        assert_eq!(openai.pointer("/choices/0/message/content").unwrap(), "Hello from Gemini");
+        assert_eq!(openai.pointer("/choices/0/finish_reason").unwrap(), "stop");
+        assert_eq!(openai.pointer("/usage/total_tokens").unwrap(), 7);
+    }
+
+    #[test]
+    fn test_gemini_sse_event_to_openai_chunk() {
+        let event = "data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"Hello\"}]}}]}\n\n";
+        let chunk = gemini_sse_event_to_openai_chunk(event, "gemini-2.5-pro", 1700000000, "chatcmpl-test").unwrap();
+        assert!(chunk.contains("chat.completion.chunk"));
+        assert!(chunk.contains("Hello"));
+    }
     #[test]
     fn test_convert_anthropic_vision() {
         let openai_req = serde_json::json!({

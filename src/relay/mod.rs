@@ -4,6 +4,7 @@ pub mod state;
 pub mod upstream;
 
 use std::{
+    collections::VecDeque,
     pin::Pin,
     sync::Arc,
     task::{Context, Poll},
@@ -266,30 +267,34 @@ where
     }
 }
 
-/// Adapts an Anthropic SSE byte stream into standard OpenAI Chat Completion SSE chunks.
-struct AnthropicToOpenaiStream<S> {
+type SseChunkConverter = fn(&str, &str, i64, &str) -> Option<String>;
+
+/// Adapts a provider-native SSE byte stream into standard OpenAI Chat Completion SSE chunks.
+struct ProviderToOpenaiStream<S> {
     inner:          S,
     buffer:         Vec<u8>,
-    pending_chunks: Vec<Bytes>,
+    pending_chunks: VecDeque<Bytes>,
     model:          String,
     chatcmpl_id:    String,
     done_emitted:   bool,
+    convert_event:  SseChunkConverter,
 }
 
-impl<S> AnthropicToOpenaiStream<S> {
-    pub fn new(inner: S, model: String) -> Self {
+impl<S> ProviderToOpenaiStream<S> {
+    pub fn new(inner: S, model: String, convert_event: SseChunkConverter) -> Self {
         Self {
             inner,
             buffer: Vec::new(),
-            pending_chunks: Vec::new(),
+            pending_chunks: VecDeque::new(),
             model,
             chatcmpl_id: format!("chatcmpl-{}", nanoid::nanoid!(24)),
             done_emitted: false,
+            convert_event,
         }
     }
 }
 
-impl<S> Stream for AnthropicToOpenaiStream<S>
+impl<S> Stream for ProviderToOpenaiStream<S>
 where
     S: Stream<Item = Result<Bytes, std::io::Error>> + Unpin,
 {
@@ -298,8 +303,7 @@ where
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let this = self.as_mut().get_mut();
 
-        if !this.pending_chunks.is_empty() {
-            let chunk = this.pending_chunks.remove(0);
+        if let Some(chunk) = this.pending_chunks.pop_front() {
             if chunk.as_ref() == b"data: [DONE]\n\n" {
                 this.done_emitted = true;
             }
@@ -312,19 +316,18 @@ where
                 let created = chrono::Utc::now().timestamp();
                 while let Some(end) = sse_event_end(&this.buffer) {
                     let event_str = String::from_utf8_lossy(&this.buffer[..end]).to_string();
-                    if let Some(chunk) = protocol::anthropic_sse_event_to_openai_chunk(
+                    if let Some(chunk) = (this.convert_event)(
                         &event_str,
                         &this.model,
                         created,
                         &this.chatcmpl_id,
                     ) {
-                        this.pending_chunks.push(Bytes::from(chunk));
+                        this.pending_chunks.push_back(Bytes::from(chunk));
                     }
                     this.buffer.drain(..end);
                 }
 
-                if !this.pending_chunks.is_empty() {
-                    let chunk = this.pending_chunks.remove(0);
+                if let Some(chunk) = this.pending_chunks.pop_front() {
                     if chunk.as_ref() == b"data: [DONE]\n\n" {
                         this.done_emitted = true;
                     }
@@ -377,9 +380,24 @@ fn validate_relay_request(
     Ok((metadata, group_obj))
 }
 
+fn gemini_endpoint(ch: &Channel, model: &str, stream: bool) -> String {
+    let model = model.strip_prefix("models/").unwrap_or(model);
+    let version_prefix = if normalize_base_url(&ch.base_url).ends_with("/v1beta") {
+        ""
+    } else {
+        "/v1beta"
+    };
+    if stream {
+        format!("{version_prefix}/models/{model}:streamGenerateContent?alt=sse")
+    } else {
+        format!("{version_prefix}/models/{model}:generateContent")
+    }
+}
+
 fn prepare_upstream_payload(
     format: ApiFormat,
     default_endpoint: &'static str,
+    stream: bool,
     body_bytes: &Bytes,
     ch: &Channel,
     channel_model: &ChannelModel,
@@ -413,9 +431,9 @@ fn prepare_upstream_payload(
             if let Ok(val) = serde_json::from_slice::<serde_json::Value>(&rewritten_body) {
                 let converted = protocol::convert_openai_to_gemini(&val);
                 let bytes = serde_json::to_vec(&converted).unwrap_or(rewritten_body);
-                (default_endpoint.to_string(), bytes)
+                (gemini_endpoint(ch, &channel_model.name, stream), bytes)
             } else {
-                (default_endpoint.to_string(), rewritten_body)
+                (gemini_endpoint(ch, &channel_model.name, stream), rewritten_body)
             }
         }
         // Downstream Responses -> Upstream Gemini
@@ -424,9 +442,9 @@ fn prepare_upstream_payload(
                 let completions_val = protocol::convert_responses_to_chat_completions(&val);
                 let converted = protocol::convert_openai_to_gemini(&completions_val);
                 let bytes = serde_json::to_vec(&converted).unwrap_or(rewritten_body);
-                (default_endpoint.to_string(), bytes)
+                (gemini_endpoint(ch, &channel_model.name, stream), bytes)
             } else {
-                (default_endpoint.to_string(), rewritten_body)
+                (gemini_endpoint(ch, &channel_model.name, stream), rewritten_body)
             }
         }
         // Downstream Responses -> Upstream Chat Completions channel (e.g. DeepSeek, Synora)
@@ -455,7 +473,7 @@ fn prepare_upstream_payload(
                 ChannelProvider::Anthropic => "/messages",
                 ChannelProvider::OpenaiResponses => "/responses",
                 ChannelProvider::OpenaiCompletion => "/chat/completions",
-                ChannelProvider::Gemini => default_endpoint,
+                ChannelProvider::Gemini => return (gemini_endpoint(ch, &channel_model.name, stream), rewritten_body),
             };
             (endpoint.to_string(), rewritten_body)
         }
@@ -526,6 +544,7 @@ struct StreamSuccessContext<'a> {
     req_id: u64,
     request_id: i64,
     model: &'a str,
+    format: ApiFormat,
     channel: &'a Channel,
     channel_model: &'a ChannelModel,
     api_key_id: i64,
@@ -570,48 +589,42 @@ fn handle_successful_stream(
 
     let prompt_tokens = estimate_tokens(ctx.body_str);
 
-    let body = if ctx.channel.channel_type == ChannelProvider::Anthropic {
-        let adapted = AnthropicToOpenaiStream::new(mapped_stream, ctx.model.to_string());
-        let finalizer = StreamFinalizer {
-            inner: adapted,
-            state: state.clone(),
-            req_id: ctx.req_id,
-            api_key_id: ctx.api_key_id,
-            channel_id: ctx.channel.id,
-            channel_model_id: ctx.channel_model.id,
-            price: ctx.price_opt,
-            prompt_tokens,
-            buffer: Vec::new(),
-            output_bytes: 0,
-            usage: None,
-            start_time: ctx.start_time,
-            done: false,
-            log_template,
-            previous_rounds: ctx.rounds,
-            response_capture: Vec::new(),
-        };
-        Body::from_stream(finalizer)
-    } else {
-        let finalizer = StreamFinalizer {
-            inner: mapped_stream,
-            state: state.clone(),
-            req_id: ctx.req_id,
-            api_key_id: ctx.api_key_id,
-            channel_id: ctx.channel.id,
-            channel_model_id: ctx.channel_model.id,
-            price: ctx.price_opt,
-            prompt_tokens,
-            buffer: Vec::new(),
-            output_bytes: 0,
-            usage: None,
-            start_time: ctx.start_time,
-            done: false,
-            log_template,
-            previous_rounds: ctx.rounds,
-            response_capture: Vec::new(),
-        };
-        Body::from_stream(finalizer)
+    let output_stream = match ctx.channel.channel_type {
+        ChannelProvider::Anthropic if ctx.format != ApiFormat::AnthropicMessage => {
+            ProviderToOpenaiStream::new(
+                mapped_stream,
+                ctx.model.to_string(),
+                protocol::anthropic_sse_event_to_openai_chunk,
+            )
+            .boxed()
+        }
+        ChannelProvider::Gemini => ProviderToOpenaiStream::new(
+            mapped_stream,
+            ctx.model.to_string(),
+            protocol::gemini_sse_event_to_openai_chunk,
+        )
+        .boxed(),
+        _ => mapped_stream.boxed(),
     };
+    let finalizer = StreamFinalizer {
+        inner: output_stream,
+        state: state.clone(),
+        req_id: ctx.req_id,
+        api_key_id: ctx.api_key_id,
+        channel_id: ctx.channel.id,
+        channel_model_id: ctx.channel_model.id,
+        price: ctx.price_opt,
+        prompt_tokens,
+        buffer: Vec::new(),
+        output_bytes: 0,
+        usage: None,
+        start_time: ctx.start_time,
+        done: false,
+        log_template,
+        previous_rounds: ctx.rounds,
+        response_capture: Vec::new(),
+    };
+    let body = Body::from_stream(finalizer);
 
     Response::builder()
         .status(StatusCode::OK)
@@ -632,6 +645,7 @@ struct JsonSuccessContext<'a> {
     req_id: u64,
     request_id: i64,
     model: &'a str,
+    format: ApiFormat,
     channel: &'a Channel,
     channel_model: &'a ChannelModel,
     api_key_id: i64,
@@ -654,20 +668,22 @@ async fn handle_successful_json(
 ) -> Response {
     let response_headers = serialize_headers(upstream_resp.headers());
     let raw_bytes = upstream_resp.bytes().await.unwrap_or_default();
-    let (resp_bytes, resp_str) = if ctx.channel.channel_type == ChannelProvider::Anthropic {
-        if let Ok(val) = serde_json::from_slice::<serde_json::Value>(&raw_bytes) {
-            let converted = protocol::convert_anthropic_to_openai_chat_response(&val, ctx.model);
-            let b = serde_json::to_vec(&converted).unwrap_or_else(|_| raw_bytes.to_vec());
-            let s = String::from_utf8_lossy(&b).to_string();
-            (Bytes::from(b), s)
-        } else {
-            let s = String::from_utf8_lossy(&raw_bytes).to_string();
-            (raw_bytes, s)
-        }
-    } else {
-        let s = String::from_utf8_lossy(&raw_bytes).to_string();
-        (raw_bytes, s)
-    };
+    let converted = serde_json::from_slice::<serde_json::Value>(&raw_bytes)
+        .ok()
+        .and_then(|val| match ctx.channel.channel_type {
+            ChannelProvider::Anthropic if ctx.format != ApiFormat::AnthropicMessage => {
+                Some(protocol::convert_anthropic_to_openai_chat_response(&val, ctx.model))
+            }
+            ChannelProvider::Gemini => {
+                Some(protocol::convert_gemini_to_openai_chat_response(&val, ctx.model))
+            }
+            _ => None,
+        });
+    let resp_bytes = converted
+        .and_then(|val| serde_json::to_vec(&val).ok())
+        .map(Bytes::from)
+        .unwrap_or(raw_bytes);
+    let resp_str = String::from_utf8_lossy(&resp_bytes).to_string();
 
     let usage = match serde_json::from_slice::<serde_json::Value>(&resp_bytes) {
         Ok(val) => extract_usage_from_json(&val).unwrap_or(Usage {
@@ -959,8 +975,14 @@ pub async fn forward_relay(
             }
         };
 
-        let (target_endpoint, final_body) =
-            prepare_upstream_payload(format, default_endpoint, &body_bytes, &ch, &channel_model);
+        let (target_endpoint, final_body) = prepare_upstream_payload(
+            format,
+            default_endpoint,
+            metadata.stream,
+            &body_bytes,
+            &ch,
+            &channel_model,
+        );
         let target_req_url = format!("{}{}", normalize_base_url(&ch.base_url), target_endpoint);
         let channel_req_headers = upstream::build_upstream_headers(&ch)
             .map(|h| serialize_headers(&h))
@@ -1027,6 +1049,7 @@ pub async fn forward_relay(
                                 req_id,
                                 request_id,
                                 model: &metadata.model,
+                                format,
                                 channel: &ch,
                                 channel_model: &channel_model,
                                 api_key_id: auth_ctx.api_key.id,
@@ -1050,6 +1073,7 @@ pub async fn forward_relay(
                                 req_id,
                                 request_id,
                                 model: &metadata.model,
+                                format,
                                 channel: &ch,
                                 channel_model: &channel_model,
                                 api_key_id: auth_ctx.api_key.id,
