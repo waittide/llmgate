@@ -67,11 +67,7 @@ struct StreamFinalizer<S> {
     done:             bool,
     log_template:     RequestLog,
     previous_rounds:  Vec<crate::model::RoundLog>,
-    response_capture:    Vec<u8>,
-    adapt_anthropic_sse: bool,
-    chatcmpl_id:         String,
-    pending_chunks:      Vec<Bytes>,
-    done_emitted:        bool,
+    response_capture: Vec<u8>,
 }
 
 /// Drains complete SSE events from `buffer`, accumulating any `usage` found.
@@ -241,82 +237,106 @@ where
     S: Stream<Item = Result<Bytes, std::io::Error>> + Unpin,
 {
     type Item = Result<Bytes, std::io::Error>;
-
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         if self.done {
             return Poll::Ready(None);
         }
         let this = self.as_mut().get_mut();
-
-        if this.adapt_anthropic_sse && !this.pending_chunks.is_empty() {
-            let chunk = this.pending_chunks.remove(0);
-            if chunk.as_ref() == b"data: [DONE]\n\n" {
-                this.done_emitted = true;
-            }
-            return Poll::Ready(Some(Ok(chunk)));
-        }
         match Pin::new(&mut this.inner).poll_next(cx) {
             Poll::Ready(Some(Ok(bytes))) => {
                 this.output_bytes += bytes.len();
                 this.buffer.extend_from_slice(&bytes);
-
+                this.extract_usage_from_sse();
                 if this.response_capture.len() < RESPONSE_CAPTURE_LIMIT {
                     let take = (RESPONSE_CAPTURE_LIMIT - this.response_capture.len()).min(bytes.len());
                     this.response_capture.extend_from_slice(&bytes[..take]);
                 }
-
-                if this.adapt_anthropic_sse {
-                    let created = chrono::Utc::now().timestamp();
-                    while let Some(end) = sse_event_end(&this.buffer) {
-                        let event_str = String::from_utf8_lossy(&this.buffer[..end]).to_string();
-                        if this.buffer[..end].windows(7).any(|w| w == b"\"usage\"") {
-                            for line in event_str.lines() {
-                                if let Some(data) = line.strip_prefix("data:") {
-                                    let trimmed = data.trim();
-                                    if !trimmed.is_empty() && trimmed != "[DONE]" {
-                                        if let Ok(val) = serde_json::from_str::<serde_json::Value>(trimmed)
-                                            && let Some(u) = extract_usage_from_json(&val)
-                                        {
-                                            this.usage = Some(u);
-                                        }
-                                    }
-                                }
-                            }
-                        }
-
-                        if let Some(chunk) = protocol::anthropic_sse_event_to_openai_chunk(
-                            &event_str,
-                            &this.log_template.model,
-                            created,
-                            &this.chatcmpl_id,
-                        ) {
-                            this.pending_chunks.push(Bytes::from(chunk));
-                        }
-                        this.buffer.drain(..end);
-                    }
-                    if !this.pending_chunks.is_empty() {
-                        let chunk = this.pending_chunks.remove(0);
-                        if chunk.as_ref() == b"data: [DONE]\n\n" {
-                            this.done_emitted = true;
-                        }
-                        Poll::Ready(Some(Ok(chunk)))
-                    } else {
-                        cx.waker().wake_by_ref();
-                        Poll::Pending
-                    }
-                } else {
-                    this.extract_usage_from_sse();
-                    Poll::Ready(Some(Ok(bytes)))
-                }
+                Poll::Ready(Some(Ok(bytes)))
             }
             Poll::Ready(Some(Err(e))) => {
                 this.finalize(false);
                 Poll::Ready(Some(Err(e)))
             }
             Poll::Ready(None) => {
-                let was_done = this.done;
                 this.finalize(true);
-                if this.adapt_anthropic_sse && !was_done && !this.done_emitted {
+                Poll::Ready(None)
+            }
+            Poll::Pending => Poll::Pending,
+        }
+    }
+}
+
+/// Adapts an Anthropic SSE byte stream into standard OpenAI Chat Completion SSE chunks.
+struct AnthropicToOpenaiStream<S> {
+    inner:          S,
+    buffer:         Vec<u8>,
+    pending_chunks: Vec<Bytes>,
+    model:          String,
+    chatcmpl_id:    String,
+    done_emitted:   bool,
+}
+
+impl<S> AnthropicToOpenaiStream<S> {
+    pub fn new(inner: S, model: String) -> Self {
+        Self {
+            inner,
+            buffer: Vec::new(),
+            pending_chunks: Vec::new(),
+            model,
+            chatcmpl_id: format!("chatcmpl-{}", nanoid::nanoid!(24)),
+            done_emitted: false,
+        }
+    }
+}
+
+impl<S> Stream for AnthropicToOpenaiStream<S>
+where
+    S: Stream<Item = Result<Bytes, std::io::Error>> + Unpin,
+{
+    type Item = Result<Bytes, std::io::Error>;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let this = self.as_mut().get_mut();
+
+        if !this.pending_chunks.is_empty() {
+            let chunk = this.pending_chunks.remove(0);
+            if chunk.as_ref() == b"data: [DONE]\n\n" {
+                this.done_emitted = true;
+            }
+            return Poll::Ready(Some(Ok(chunk)));
+        }
+
+        match Pin::new(&mut this.inner).poll_next(cx) {
+            Poll::Ready(Some(Ok(bytes))) => {
+                this.buffer.extend_from_slice(&bytes);
+                let created = chrono::Utc::now().timestamp();
+                while let Some(end) = sse_event_end(&this.buffer) {
+                    let event_str = String::from_utf8_lossy(&this.buffer[..end]).to_string();
+                    if let Some(chunk) = protocol::anthropic_sse_event_to_openai_chunk(
+                        &event_str,
+                        &this.model,
+                        created,
+                        &this.chatcmpl_id,
+                    ) {
+                        this.pending_chunks.push(Bytes::from(chunk));
+                    }
+                    this.buffer.drain(..end);
+                }
+
+                if !this.pending_chunks.is_empty() {
+                    let chunk = this.pending_chunks.remove(0);
+                    if chunk.as_ref() == b"data: [DONE]\n\n" {
+                        this.done_emitted = true;
+                    }
+                    Poll::Ready(Some(Ok(chunk)))
+                } else {
+                    cx.waker().wake_by_ref();
+                    Poll::Pending
+                }
+            }
+            Poll::Ready(Some(Err(e))) => Poll::Ready(Some(Err(e))),
+            Poll::Ready(None) => {
+                if !this.done_emitted {
                     this.done_emitted = true;
                     Poll::Ready(Some(Ok(Bytes::from_static(b"data: [DONE]\n\n"))))
                 } else {
@@ -549,27 +569,48 @@ fn handle_successful_stream(
     });
 
     let prompt_tokens = estimate_tokens(ctx.body_str);
-    let finalizer = StreamFinalizer {
-        inner: mapped_stream,
-        state: state.clone(),
-        req_id: ctx.req_id,
-        api_key_id: ctx.api_key_id,
-        channel_id: ctx.channel.id,
-        channel_model_id: ctx.channel_model.id,
-        price: ctx.price_opt,
-        prompt_tokens,
-        buffer: Vec::new(),
-        output_bytes: 0,
-        usage: None,
-        start_time: ctx.start_time,
-        done: false,
-        log_template,
-        previous_rounds: ctx.rounds,
-        response_capture: Vec::new(),
-        adapt_anthropic_sse: ctx.channel.channel_type == ChannelProvider::Anthropic,
-        chatcmpl_id: format!("chatcmpl-{}", nanoid::nanoid!(24)),
-        pending_chunks: Vec::new(),
-        done_emitted: false,
+
+    let body = if ctx.channel.channel_type == ChannelProvider::Anthropic {
+        let adapted = AnthropicToOpenaiStream::new(mapped_stream, ctx.model.to_string());
+        let finalizer = StreamFinalizer {
+            inner: adapted,
+            state: state.clone(),
+            req_id: ctx.req_id,
+            api_key_id: ctx.api_key_id,
+            channel_id: ctx.channel.id,
+            channel_model_id: ctx.channel_model.id,
+            price: ctx.price_opt,
+            prompt_tokens,
+            buffer: Vec::new(),
+            output_bytes: 0,
+            usage: None,
+            start_time: ctx.start_time,
+            done: false,
+            log_template,
+            previous_rounds: ctx.rounds,
+            response_capture: Vec::new(),
+        };
+        Body::from_stream(finalizer)
+    } else {
+        let finalizer = StreamFinalizer {
+            inner: mapped_stream,
+            state: state.clone(),
+            req_id: ctx.req_id,
+            api_key_id: ctx.api_key_id,
+            channel_id: ctx.channel.id,
+            channel_model_id: ctx.channel_model.id,
+            price: ctx.price_opt,
+            prompt_tokens,
+            buffer: Vec::new(),
+            output_bytes: 0,
+            usage: None,
+            start_time: ctx.start_time,
+            done: false,
+            log_template,
+            previous_rounds: ctx.rounds,
+            response_capture: Vec::new(),
+        };
+        Body::from_stream(finalizer)
     };
 
     Response::builder()
@@ -577,7 +618,7 @@ fn handle_successful_stream(
         .header(header::CONTENT_TYPE, "text/event-stream")
         .header(header::CACHE_CONTROL, "no-cache")
         .header(header::CONNECTION, "keep-alive")
-        .body(Body::from_stream(finalizer))
+        .body(body)
         .unwrap_or_else(|e| {
             tracing::error!("Failed to build SSE response: {}", e);
             Response::builder()
