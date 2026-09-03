@@ -102,76 +102,145 @@ pub fn convert_responses_to_chat_completions(val: &Value) -> Value {
 
     if let Some(input) = obj.remove("input") {
         let mut messages: Vec<Value> = Vec::new();
+        // Accumulate consecutive assistant output items (message text + function calls)
+        // into a single Chat Completions assistant message, so tool calls stay
+        // attached to the assistant turn that produced them.
+        let mut current_assistant: Option<serde_json::Map<String, Value>> = None;
+        // Generated function_call identifiers, keyed by the item's raw id when
+        // `call_id` is absent; reused for the matching `function_call_output`.
+        let mut call_lookup: Vec<(String, String)> = Vec::new();
+
         if let Some(items) = input.as_array() {
             for item in items {
                 let item_type = item.get("type").and_then(Value::as_str).unwrap_or("");
-                if item_type == "function_call" {
-                    let call = serde_json::json!({
-                        "id": item.get("call_id").cloned().unwrap_or(Value::String(String::new())),
-                        "type": "function",
-                        "function": {
-                            "name": item.get("name").cloned().unwrap_or(Value::String(String::new())),
-                            "arguments": item.get("arguments").cloned().unwrap_or(Value::String("{}".to_string()))
+                match item_type {
+                    "function_call" => {
+                        let call_id = item
+                            .get("call_id")
+                            .and_then(Value::as_str)
+                            .map(str::to_string)
+                            .or_else(|| item.get("id").and_then(Value::as_str).map(str::to_string))
+                            .unwrap_or_else(|| format!("call_{}", nanoid::nanoid!(20)));
+                        let raw_id = item.get("id").and_then(Value::as_str).unwrap_or("").to_string();
+                        call_lookup.push((raw_id, call_id.clone()));
+                        let name = item.get("name").and_then(Value::as_str).unwrap_or("").to_string();
+                        let arguments = item
+                            .get("arguments")
+                            .cloned()
+                            .unwrap_or(Value::String("{}".to_string()));
+                        let call = serde_json::json!({
+                            "id": call_id,
+                            "type": "function",
+                            "function": { "name": name, "arguments": arguments }
+                        });
+
+                        let entry = current_assistant.get_or_insert_with(serde_json::Map::new);
+                        entry.insert("role".to_string(), Value::String("assistant".to_string()));
+                        if !entry.contains_key("content") {
+                            entry.insert("content".to_string(), Value::Null);
                         }
-                    });
-                    if let Some(last) = messages.last_mut()
-                        && last.get("role").and_then(Value::as_str) == Some("assistant")
-                        && last.get("tool_calls").and_then(Value::as_array).is_some()
-                    {
-                        if let Some(calls) = last["tool_calls"].as_array_mut() { calls.push(call) }
-                    } else {
+                        let calls = entry
+                            .entry("tool_calls".to_string())
+                            .or_insert_with(|| Value::Array(vec![]));
+                        if let Some(arr) = calls.as_array_mut() {
+                            arr.push(call);
+                        }
+                    }
+                    "function_call_output" => {
+                        // A tool result terminates the current assistant turn.
+                        if let Some(assistant) = current_assistant.take() {
+                            messages.push(Value::Object(assistant));
+                        }
+                        let call_id = item
+                            .get("call_id")
+                            .and_then(Value::as_str)
+                            .map(str::to_string)
+                            .or_else(|| item.get("id").and_then(Value::as_str).map(str::to_string))
+                            .or_else(|| call_lookup.pop().map(|(_, used)| used));
+                        let content = match item.get("output").cloned() {
+                            Some(Value::String(s)) => Value::String(s),
+                            Some(other) => Value::String(serde_json::to_string(&other).unwrap_or_default()),
+                            None => Value::String(String::new()),
+                        };
                         messages.push(serde_json::json!({
-                            "role": "assistant",
-                            "content": null,
-                            "tool_calls": [call]
+                            "role": "tool",
+                            "tool_call_id": call_id.unwrap_or_default(),
+                            "content": content
                         }));
                     }
-                    continue;
-                }
-                if item_type == "function_call_output" {
-                    messages.push(serde_json::json!({
-                        "role": "tool",
-                        "tool_call_id": item.get("call_id").cloned().unwrap_or(Value::String(String::new())),
-                        "content": item.get("output").cloned().unwrap_or(Value::String(String::new()))
-                    }));
-                    continue;
-                }
-                let role = item.get("role").and_then(|r| r.as_str()).unwrap_or("user");
-                let content_val = match item.get("content") {
-                    Some(Value::Array(parts)) => {
-                        let mut converted_parts = Vec::new();
-                        for part in parts {
-                            let ptype = part.get("type").and_then(|t| t.as_str()).unwrap_or("");
-                            if ptype == "input_text" || ptype == "text" || ptype == "output_text" {
-                                if let Some(text) = part.get("text") {
-                                    converted_parts.push(serde_json::json!({
-                                        "type": "text",
-                                        "text": text
-                                    }));
+                    _ => {
+                        let role = item.get("role").and_then(|r| r.as_str()).unwrap_or("user");
+                        let content_val = match item.get("content") {
+                            Some(Value::Array(parts)) => {
+                                let mut converted_parts = Vec::new();
+                                for part in parts {
+                                    let ptype = part.get("type").and_then(|t| t.as_str()).unwrap_or("");
+                                    if ptype == "input_text" || ptype == "text" || ptype == "output_text" {
+                                        if let Some(text) = part.get("text") {
+                                            converted_parts.push(serde_json::json!({
+                                                "type": "text",
+                                                "text": text
+                                            }));
+                                        }
+                                    } else if (ptype == "input_image" || ptype == "image_url")
+                                        && let Some(url) = part.get("image_url") {
+                                            converted_parts.push(serde_json::json!({
+                                                "type": "image_url",
+                                                "image_url": url
+                                            }));
+                                        }
                                 }
-                            } else if (ptype == "input_image" || ptype == "image_url")
-                                && let Some(url) = part.get("image_url") {
-                                    converted_parts.push(serde_json::json!({
-                                        "type": "image_url",
-                                        "image_url": url
-                                    }));
+                                if converted_parts.len() == 1 && converted_parts[0].get("type").and_then(|t| t.as_str()) == Some("text") {
+                                    converted_parts[0].get("text").cloned().unwrap_or(Value::Array(converted_parts))
+                                } else {
+                                    Value::Array(converted_parts)
                                 }
-                        }
-                        if converted_parts.len() == 1 && converted_parts[0].get("type").and_then(|t| t.as_str()) == Some("text") {
-                            converted_parts[0].get("text").cloned().unwrap_or(Value::Array(converted_parts))
+                            }
+                            Some(other) => other.clone(),
+                            None => Value::String(String::new()),
+                        };
+
+                        if role == "assistant" {
+                            // Assistant output text belongs to the current assistant
+                            // turn; merge it into the ongoing assistant message so
+                            // text and following tool calls stay in one message.
+                            let entry = current_assistant.get_or_insert_with(serde_json::Map::new);
+                            entry.insert("role".to_string(), Value::String("assistant".to_string()));
+                            match entry.get("content") {
+                                Some(Value::Null) => {
+                                    entry.insert("content".to_string(), content_val);
+                                }
+                                Some(_) => {
+                                    // Append to existing text content.
+                                    let existing = entry.get("content").and_then(Value::as_str).unwrap_or("");
+                                    let combined = if existing.is_empty() {
+                                        content_val.as_str().unwrap_or("").to_string()
+                                    } else {
+                                        format!("{existing}{}", content_val.as_str().unwrap_or(""))
+                                    };
+                                    entry.insert("content".to_string(), Value::String(combined));
+                                }
+                                None => {
+                                    entry.insert("content".to_string(), content_val);
+                                }
+                            }
                         } else {
-                            Value::Array(converted_parts)
+                            // A user message (or non-assistant item) terminates the
+                            // current assistant turn.
+                            if let Some(assistant) = current_assistant.take() {
+                                messages.push(Value::Object(assistant));
+                            }
+                            messages.push(serde_json::json!({
+                                "role": role,
+                                "content": content_val
+                            }));
                         }
                     }
-                    Some(other) => other.clone(),
-                    None => Value::String(String::new()),
-                };
-
-                messages.push(serde_json::json!({
-                    "role": role,
-                    "content": content_val
-                }));
+                }
             }
+        }
+        if let Some(assistant) = current_assistant.take() {
+            messages.push(Value::Object(assistant));
         }
         obj.insert("messages".to_string(), Value::Array(messages));
     }
@@ -1482,6 +1551,54 @@ mod tests {
         assert_eq!(chat.pointer("/tools/0/function/parameters/type").unwrap(), "object");
         assert_eq!(chat.pointer("/tool_choice/function/name").unwrap(), "read_file");
         assert!(chat.pointer("/tools/0/name").is_none());
+    }
+
+    #[test]
+    fn test_convert_responses_tool_calls_aggregate_into_single_assistant() {
+        let responses_req = serde_json::json!({
+            "model": "test-model",
+            "input": [
+                { "role": "user", "content": [{ "type": "input_text", "text": "Hi" }] },
+                { "type": "message", "role": "assistant",
+                  "content": [{ "type": "output_text", "text": "Let me check." }] },
+                { "type": "function_call", "call_id": "call_1", "name": "read_file",
+                  "arguments": "{\"path\":\"/etc/hosts\"}" },
+                { "type": "function_call_output", "call_id": "call_1", "output": "127.0.0.1 localhost" }
+            ]
+        });
+        let chat = convert_responses_to_chat_completions(&responses_req);
+        let messages = chat.get("messages").unwrap().as_array().unwrap();
+        // user + single assistant (text + tool_calls) + tool
+        assert_eq!(messages.len(), 3);
+        assert_eq!(messages[0].get("role").unwrap(), "user");
+        assert_eq!(messages[1].get("role").unwrap(), "assistant");
+        assert_eq!(messages[1].get("content").unwrap(), "Let me check.");
+        assert_eq!(messages[1].pointer("/tool_calls/0/function/name").unwrap(), "read_file");
+        assert_eq!(messages[1].pointer("/tool_calls/0/id").unwrap(), "call_1");
+        assert_eq!(messages[2].get("role").unwrap(), "tool");
+        assert_eq!(messages[2].get("tool_call_id").unwrap(), "call_1");
+        assert_eq!(messages[2].get("content").unwrap(), "127.0.0.1 localhost");
+    }
+
+    #[test]
+    fn test_convert_responses_missing_call_id_generates_stable_fallback() {
+        let responses_req = serde_json::json!({
+            "model": "test-model",
+            "input": [
+                { "type": "message", "role": "assistant", "content": [] },
+                { "type": "function_call", "id": "fc_abc", "name": "read_file",
+                  "arguments": "{\"path\":\"/etc/hosts\"}" },
+                { "type": "function_call_output", "id": "fc_abc", "output": { "ok": true } }
+            ]
+        });
+        let chat = convert_responses_to_chat_completions(&responses_req);
+        let messages = chat.get("messages").unwrap().as_array().unwrap();
+        let call_id = messages[0].pointer("/tool_calls/0/id").unwrap().as_str().unwrap();
+        assert!(!call_id.is_empty());
+        assert_eq!(messages[1].get("tool_call_id").unwrap(), call_id);
+        // object output should be serialized to a JSON string
+        let content = messages[1].get("content").unwrap().as_str().unwrap();
+        assert!(content.contains("\"ok\""));
     }
 
     #[test]
