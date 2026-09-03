@@ -170,6 +170,35 @@ pub fn calculate_cost(prompt_tokens: i64, completion_tokens: i64, price: Option<
     }
 }
 
+pub fn extract_usage_from_json(val: &Value) -> Option<Usage> {
+    if let Some(usage_obj) = val.get("usage") {
+        let prompt_tokens = usage_obj
+            .get("prompt_tokens")
+            .or_else(|| usage_obj.get("input_tokens"))
+            .and_then(|v| v.as_i64())
+            .unwrap_or(0);
+
+        let completion_tokens = usage_obj
+            .get("completion_tokens")
+            .or_else(|| usage_obj.get("output_tokens"))
+            .and_then(|v| v.as_i64())
+            .unwrap_or(0);
+
+        let total_tokens = usage_obj
+            .get("total_tokens")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(prompt_tokens + completion_tokens);
+
+        Some(Usage {
+            prompt_tokens,
+            completion_tokens,
+            total_tokens,
+        })
+    } else {
+        None
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -213,34 +242,5 @@ mod tests {
         let contents = gemini_req.get("contents").unwrap().as_array().unwrap();
         assert_eq!(contents.len(), 1);
         assert_eq!(contents[0].get("role").unwrap(), "user");
-    }
-}
-
-pub fn extract_usage_from_json(val: &Value) -> Option<Usage> {
-    if let Some(usage_obj) = val.get("usage") {
-        let prompt_tokens = usage_obj
-            .get("prompt_tokens")
-            .or_else(|| usage_obj.get("input_tokens"))
-            .and_then(|v| v.as_i64())
-            .unwrap_or(0);
-
-        let completion_tokens = usage_obj
-            .get("completion_tokens")
-            .or_else(|| usage_obj.get("output_tokens"))
-            .and_then(|v| v.as_i64())
-            .unwrap_or(0);
-
-        let total_tokens = usage_obj
-            .get("total_tokens")
-            .and_then(|v| v.as_i64())
-            .unwrap_or(prompt_tokens + completion_tokens);
-
-        Some(Usage {
-            prompt_tokens,
-            completion_tokens,
-            total_tokens,
-        })
-    } else {
-        None
     }
 }
