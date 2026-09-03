@@ -2,7 +2,9 @@ pub fn generate_api_key() -> String {
     format!("sk-octopus-{}", nanoid::nanoid!(32))
 }
 
-pub fn hash_password(password: &str) -> String {
+/// Passwords are stored in plaintext by design; this helper keeps the stored
+/// representation explicit at call sites.
+pub fn store_password(password: &str) -> String {
     password.to_string()
 }
 

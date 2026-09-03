@@ -3,7 +3,7 @@ use anyhow::{Result, anyhow};
 use crate::{
     model::{User, UserChangePassword, UserChangeUsername},
     op::AppState,
-    utils::{hash_password, verify_password},
+    utils::{store_password, verify_password},
 };
 
 pub async fn refresh_user_cache(state: &AppState) -> Result<()> {
@@ -38,9 +38,9 @@ pub async fn change_password(state: &AppState, req: &UserChangePassword) -> Resu
     if !verify_password(&req.old_password, &user.password) {
         return Err(anyhow!("Incorrect old password"));
     }
-    let new_hash = hash_password(&req.new_password);
+    let new_password = store_password(&req.new_password);
     sqlx::query("UPDATE users SET password = ? WHERE id = ?")
-        .bind(&new_hash)
+        .bind(&new_password)
         .bind(user.id)
         .execute(&state.db)
         .await?;
