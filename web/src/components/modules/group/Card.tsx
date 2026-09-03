@@ -220,17 +220,16 @@ export const GroupCard = memo(function GroupCard({ group, now }: { group: Group;
 
                 <div className="flex items-center gap-1 shrink-0">
                     <MorphingDialog>
-                        <MorphingDialogTrigger className="p-1.5 rounded-lg transition-colors hover:bg-muted text-muted-foreground hover:text-foreground">
-                            <Tooltip>
-                                <TooltipTrigger asChild>
+                        <Tooltip>
+                            <TooltipTrigger asChild>
+                                <MorphingDialogTrigger className="p-1.5 rounded-lg transition-colors hover:bg-muted text-muted-foreground hover:text-foreground inline-flex items-center justify-center">
                                     <Pencil className="size-4" />
-                                </TooltipTrigger>
-                                <TooltipContent side="top" sideOffset={10} align="center">
-                                    {t('detail.actions.edit')}
-                                </TooltipContent>
-                            </Tooltip>
-                        </MorphingDialogTrigger>
-
+                                </MorphingDialogTrigger>
+                            </TooltipTrigger>
+                            <TooltipContent side="top" sideOffset={10} align="center">
+                                {t('detail.actions.edit')}
+                            </TooltipContent>
+                        </Tooltip>
                         <MorphingDialogContainer>
                             <MorphingDialogContent className="relative w-screen max-w-full md:max-w-4xl bg-card text-card-foreground px-6 py-4 rounded-3xl h-[calc(100vh-2rem)] flex flex-col overflow-hidden">
                                 <EditDialogContent
