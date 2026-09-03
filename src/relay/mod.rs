@@ -1012,6 +1012,12 @@ pub async fn forward_relay(
                         should_cooldown: true,
                     },
                 );
+                if round < max_attempts && current_group.relay_config.member_retry_interval_seconds > 0 {
+                    tokio::time::sleep(tokio::time::Duration::from_secs(
+                        current_group.relay_config.member_retry_interval_seconds as u64,
+                    ))
+                    .await;
+                }
                 continue;
             }
         };
@@ -1165,6 +1171,13 @@ pub async fn forward_relay(
                     },
                 );
             }
+        }
+
+        if round < max_attempts && current_group.relay_config.member_retry_interval_seconds > 0 {
+            tokio::time::sleep(tokio::time::Duration::from_secs(
+                current_group.relay_config.member_retry_interval_seconds as u64,
+            ))
+            .await;
         }
     }
 
