@@ -45,14 +45,18 @@ pub struct ApiKeyCache {
 #[derive(Clone)]
 pub struct AppState {
     pub db:                    DbPool,
-    pub channels:              DashMap<i64, Channel>,
-    pub channel_models:        DashMap<i64, ChannelModel>,
+    // NOTE: All caches below are Arc-wrapped so `AppState::clone()` shares the
+    // underlying storage across handlers, background tasks and router instances.
+    // A bare `DashMap`/`RwLock` would be deep-cloned on every clone and cause
+    // request paths to observe stale/inconsistent configuration.
+    pub channels:              Arc<DashMap<i64, Channel>>,
+    pub channel_models:        Arc<DashMap<i64, ChannelModel>>,
     pub groups:                Arc<RwLock<GroupCache>>,
     pub api_keys:              Arc<RwLock<ApiKeyCache>>,
-    pub llm_prices:            DashMap<String, LLMPrice>,
-    pub settings:              DashMap<String, String>,
+    pub llm_prices:            Arc<DashMap<String, LLMPrice>>,
+    pub settings:              Arc<DashMap<String, String>>,
     pub stats:                 Arc<RwLock<SystemStats>>,
-    pub stats_api_keys:        DashMap<i64, StatsAPIKey>,
+    pub stats_api_keys:        Arc<DashMap<i64, StatsAPIKey>>,
     pub route_manager:         Arc<RouteManager>,
     pub request_state_manager: Arc<RequestStateManager>,
     pub jwt_secret:            Arc<RwLock<String>>,
@@ -76,12 +80,12 @@ impl AppState {
 
         let state = Self {
             db:                    db.clone(),
-            channels:              DashMap::new(),
-            channel_models:        DashMap::new(),
+            channels:              Arc::new(DashMap::new()),
+            channel_models:        Arc::new(DashMap::new()),
             groups:                Arc::new(RwLock::new(GroupCache::default())),
             api_keys:              Arc::new(RwLock::new(ApiKeyCache::default())),
-            llm_prices:            DashMap::new(),
-            settings:              DashMap::new(),
+            llm_prices:            Arc::new(DashMap::new()),
+            settings:              Arc::new(DashMap::new()),
             stats:                 Arc::new(RwLock::new(SystemStats {
                 total: StatsTotal {
                     id:      1,
@@ -93,7 +97,7 @@ impl AppState {
                 },
                 hourly: default_hourlies,
             })),
-            stats_api_keys:        DashMap::new(),
+            stats_api_keys:        Arc::new(DashMap::new()),
             route_manager:         Arc::new(RouteManager::new()),
             request_state_manager: Arc::new(RequestStateManager::new()),
             jwt_secret:            Arc::new(RwLock::new("octopus-jwt-secret-default".to_string())),
