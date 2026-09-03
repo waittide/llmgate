@@ -10,6 +10,91 @@ use serde_json::{Value, json};
 
 use super::sse_event_end;
 
+/// Converts one provider-native SSE event into an OpenAI Chat Completion SSE chunk.
+pub type SseChunkConverter = fn(&str, &str, i64, &str) -> Option<String>;
+
+/// Adapts a provider-native SSE byte stream into standard OpenAI Chat Completion SSE chunks.
+pub struct ProviderToOpenaiStream<S> {
+    inner:          S,
+    buffer:         Vec<u8>,
+    pending_chunks: VecDeque<Bytes>,
+    model:          String,
+    chatcmpl_id:    String,
+    done_emitted:   bool,
+    convert_event:  SseChunkConverter,
+}
+
+impl<S> ProviderToOpenaiStream<S> {
+    pub fn new(inner: S, model: String, convert_event: SseChunkConverter) -> Self {
+        Self {
+            inner,
+            buffer: Vec::new(),
+            pending_chunks: VecDeque::new(),
+            model,
+            chatcmpl_id: format!("chatcmpl-{}", nanoid::nanoid!(24)),
+            done_emitted: false,
+            convert_event,
+        }
+    }
+}
+
+impl<S> Stream for ProviderToOpenaiStream<S>
+where
+    S: Stream<Item = Result<Bytes, std::io::Error>> + Unpin,
+{
+    type Item = Result<Bytes, std::io::Error>;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let this = self.as_mut().get_mut();
+
+        if let Some(chunk) = this.pending_chunks.pop_front() {
+            if chunk.as_ref() == b"data: [DONE]\n\n" {
+                this.done_emitted = true;
+            }
+            return Poll::Ready(Some(Ok(chunk)));
+        }
+
+        match Pin::new(&mut this.inner).poll_next(cx) {
+            Poll::Ready(Some(Ok(bytes))) => {
+                this.buffer.extend_from_slice(&bytes);
+                let created = chrono::Utc::now().timestamp();
+                while let Some(end) = sse_event_end(&this.buffer) {
+                    let event_str = String::from_utf8_lossy(&this.buffer[..end]).to_string();
+                    if let Some(chunk) = (this.convert_event)(
+                        &event_str,
+                        &this.model,
+                        created,
+                        &this.chatcmpl_id,
+                    ) {
+                        this.pending_chunks.push_back(Bytes::from(chunk));
+                    }
+                    this.buffer.drain(..end);
+                }
+
+                if let Some(chunk) = this.pending_chunks.pop_front() {
+                    if chunk.as_ref() == b"data: [DONE]\n\n" {
+                        this.done_emitted = true;
+                    }
+                    Poll::Ready(Some(Ok(chunk)))
+                } else {
+                    cx.waker().wake_by_ref();
+                    Poll::Pending
+                }
+            }
+            Poll::Ready(Some(Err(e))) => Poll::Ready(Some(Err(e))),
+            Poll::Ready(None) => {
+                if !this.done_emitted {
+                    this.done_emitted = true;
+                    Poll::Ready(Some(Ok(Bytes::from_static(b"data: [DONE]\n\n"))))
+                } else {
+                    Poll::Ready(None)
+                }
+            }
+            Poll::Pending => Poll::Pending,
+        }
+    }
+}
+
 #[derive(Default)]
 struct ToolCallState {
     item_id: String,
