@@ -1,8 +1,10 @@
-use std::sync::{
-    Arc,
-    atomic::{AtomicU64, Ordering},
+use std::{
+    collections::VecDeque,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
 };
-
 use dashmap::DashMap;
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
@@ -48,7 +50,7 @@ pub struct RequestStateInternal {
 pub struct RequestStateManager {
     counter:    AtomicU64,
     requests:   DashMap<u64, Arc<RwLock<RequestStateInternal>>>,
-    recent_ids: Arc<RwLock<Vec<u64>>>,
+    recent_ids: Arc<RwLock<VecDeque<u64>>>,
     tx:         broadcast::Sender<RequestOverview>,
 }
 
@@ -58,7 +60,7 @@ impl RequestStateManager {
         Self {
             counter: AtomicU64::new(1),
             requests: DashMap::new(),
-            recent_ids: Arc::new(RwLock::new(Vec::new())),
+            recent_ids: Arc::new(RwLock::new(VecDeque::new())),
             tx,
         }
     }
@@ -68,7 +70,7 @@ impl RequestStateManager {
     }
 
     pub fn get_recent_overviews(&self) -> Vec<RequestOverview> {
-        let ids = self.recent_ids.read().clone();
+        let ids: Vec<u64> = self.recent_ids.read().iter().copied().collect();
         ids.into_iter()
             .filter_map(|id| self.requests.get(&id).map(|r| r.read().overview.clone()))
             .collect()
@@ -103,17 +105,20 @@ impl RequestStateManager {
         self.requests.insert(id, internal);
         {
             let mut recent = self.recent_ids.write();
-            recent.insert(0, id);
+            recent.push_front(id);
             if recent.len() > 100 {
-                let dropped_id = recent.pop().unwrap();
-                // Never evict a still-running stream: removing it would orphan
-                // its in-flight state updates and lose final metrics/logs.
-                let is_running = self
+                let dropped_id = recent.pop_back().unwrap();
+                // Never evict an in-flight stream (running or committed): removing it
+                // would orphan its in-flight state updates and lose final metrics/logs.
+                let is_in_flight = self
                     .requests
                     .get(&dropped_id)
-                    .map(|r| r.read().overview.status == "running")
+                    .map(|r| {
+                        let s = &r.read().overview.status;
+                        s == "running" || s == "committed"
+                    })
                     .unwrap_or(false);
-                if !is_running {
+                if !is_in_flight {
                     self.requests.remove(&dropped_id);
                 }
             }
@@ -224,14 +229,17 @@ impl RequestStateManager {
         // Retain every still-running stream even if it already fell out of the
         // recency window (e.g. >100 newer requests arrived while it was in
         // flight). Only finished requests are dropped from memory here.
-        let running_ids: Vec<u64> = self
+        let in_flight_ids: Vec<u64> = self
             .requests
             .iter()
-            .filter(|entry| entry.value().read().overview.status == "running")
+            .filter(|entry| {
+                let s = &entry.value().read().overview.status;
+                s == "running" || s == "committed"
+            })
             .map(|entry| *entry.key())
             .collect();
 
-        self.requests.retain(|id, _| running_ids.contains(id));
-        *self.recent_ids.write() = running_ids;
+        self.requests.retain(|id, _| in_flight_ids.contains(id));
+        *self.recent_ids.write() = in_flight_ids.into();
     }
 }
