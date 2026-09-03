@@ -1015,8 +1015,24 @@ pub async fn forward_relay(
                 continue;
             }
         };
+        let send_future = req_builder.send();
+        let send_res = if metadata.stream {
+            let first_event_timeout_secs = current_group
+                .relay_config
+                .member_stream_first_event_timeout_seconds
+                .max(5) as u64;
+            match tokio::time::timeout(std::time::Duration::from_secs(first_event_timeout_secs), send_future).await {
+                Ok(res) => res.map_err(|e| e.to_string()),
+                Err(_) => Err(format!(
+                    "upstream stream response timeout after {}s waiting for initial headers",
+                    first_event_timeout_secs
+                )),
+            }
+        } else {
+            send_future.await.map_err(|e| e.to_string())
+        };
 
-        match req_builder.send().await {
+        match send_res {
             Ok(upstream_resp) => {
                 let status = upstream_resp.status();
                 if status.is_success() {
@@ -1114,14 +1130,17 @@ pub async fn forward_relay(
                     }
                 }
             }
-            Err(e) => {
-                let err_msg = format!("upstream request error: {}", e);
+            Err(err_msg) => {
                 let round_duration_ms = round_start_time.elapsed().as_millis() as i64;
                 last_target_channel = ch.name.clone();
                 last_target_model = channel_model.name.clone();
                 last_response_url = target_req_url.clone();
                 last_response_headers = String::new();
-                last_status = StatusCode::BAD_GATEWAY;
+                last_status = if err_msg.contains("timeout") {
+                    StatusCode::GATEWAY_TIMEOUT
+                } else {
+                    StatusCode::BAD_GATEWAY
+                };
                 last_error_body = err_msg.clone();
 
                 record_round_failure(
