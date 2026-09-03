@@ -7,12 +7,13 @@ mod server;
 mod task;
 mod utils;
 
+use std::net::SocketAddr;
+
 use anyhow::Result;
 use conf::Config;
 use op::AppState;
-use std::net::SocketAddr;
 use tracing::info;
-use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
+use tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitExt};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -26,8 +27,7 @@ async fn main() -> Result<()> {
             .unwrap_or_else(|_| EnvFilter::new("info,tower_http=info,octopus=info"))
     };
 
-    let fmt_layer = tracing_subscriber::fmt::layer()
-        .with_target(false);
+    let fmt_layer = tracing_subscriber::fmt::layer().with_target(false);
 
     tracing_subscriber::registry()
         .with(env_filter)
