@@ -122,8 +122,8 @@ pub async fn import_backup(state: &AppState, backup: BackupData) -> Result<DBImp
     let mut channel_count = 0;
     for ch in &backup.channels {
         let custom_header_json = serde_json::to_string(&ch.custom_header).unwrap_or_else(|_| "[]".to_string());
-        let res = if ch.id > 0 {
-            sqlx::query(
+        let (res, inserted_id) = if ch.id > 0 {
+            let r = sqlx::query(
                 r#"
                 INSERT INTO channels (id, name, type, enabled, base_url, key, auto_sync, custom_header, param_override, input_token, output_token, input_cost, output_cost, wait_time, request_success, request_failed)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -162,9 +162,10 @@ pub async fn import_backup(state: &AppState, backup: BackupData) -> Result<DBImp
             .bind(ch.metrics.request_success)
             .bind(ch.metrics.request_failed)
             .execute(&mut *tx)
-            .await
+            .await;
+            (r, ch.id)
         } else {
-            sqlx::query(
+            let r = sqlx::query(
                 r#"
                 INSERT INTO channels (name, type, enabled, base_url, key, auto_sync, custom_header, param_override)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)
@@ -179,24 +180,27 @@ pub async fn import_backup(state: &AppState, backup: BackupData) -> Result<DBImp
             .bind(&custom_header_json)
             .bind(&ch.param_override)
             .execute(&mut *tx)
-            .await
+            .await;
+            let id = r.as_ref().map(|res| res.last_insert_rowid()).unwrap_or(0);
+            (r, id)
         };
 
         if res.is_ok() {
             channel_count += 1;
         }
 
-        // Also insert nested channel models if present
-        for cm in &ch.models {
-            let ch_id = if cm.channel_id > 0 { cm.channel_id } else { ch.id };
-            let _ = sqlx::query(
-                "INSERT INTO channel_models (channel_id, name, source) VALUES (?, ?, ?) ON CONFLICT(channel_id, name) DO NOTHING",
-            )
-            .bind(ch_id)
-            .bind(&cm.name)
-            .bind(cm.source.as_str())
-            .execute(&mut *tx)
-            .await;
+        // Also insert nested channel models if present with correct channel_id
+        if inserted_id > 0 {
+            for cm in &ch.models {
+                let _ = sqlx::query(
+                    "INSERT INTO channel_models (channel_id, name, source) VALUES (?, ?, ?) ON CONFLICT(channel_id, name) DO NOTHING",
+                )
+                .bind(inserted_id)
+                .bind(&cm.name)
+                .bind(cm.source.as_str())
+                .execute(&mut *tx)
+                .await;
+            }
         }
     }
     rows_affected.insert("channels".to_string(), channel_count);
@@ -255,8 +259,8 @@ pub async fn import_backup(state: &AppState, backup: BackupData) -> Result<DBImp
     let mut group_count = 0;
     for grp in &backup.groups {
         let relay_config_json = serde_json::to_string(&grp.relay_config).unwrap_or_else(|_| "{}".to_string());
-        let res = if grp.id > 0 {
-            sqlx::query(
+        let (res, inserted_id) = if grp.id > 0 {
+            let r = sqlx::query(
                 r#"
                 INSERT INTO groups (id, name, mode, active_item_id, relay_config)
                 VALUES (?, ?, ?, ?, ?)
@@ -273,32 +277,36 @@ pub async fn import_backup(state: &AppState, backup: BackupData) -> Result<DBImp
             .bind(grp.active_item_id)
             .bind(&relay_config_json)
             .execute(&mut *tx)
-            .await
+            .await;
+            (r, grp.id)
         } else {
-            sqlx::query("INSERT INTO groups (name, mode, active_item_id, relay_config) VALUES (?, ?, ?, ?)")
+            let r = sqlx::query("INSERT INTO groups (name, mode, active_item_id, relay_config) VALUES (?, ?, ?, ?)")
                 .bind(&grp.name)
                 .bind(grp.mode.as_str())
                 .bind(grp.active_item_id)
                 .bind(&relay_config_json)
                 .execute(&mut *tx)
-                .await
+                .await;
+            let id = r.as_ref().map(|res| res.last_insert_rowid()).unwrap_or(0);
+            (r, id)
         };
 
         if res.is_ok() {
             group_count += 1;
         }
 
-        // Also insert nested group items
-        for item in &grp.items {
-            let g_id = if item.group_id > 0 { item.group_id } else { grp.id };
-            let _ = sqlx::query(
-                "INSERT INTO group_items (group_id, channel_model_id, priority) VALUES (?, ?, ?) ON CONFLICT(group_id, channel_model_id) DO NOTHING",
-            )
-            .bind(g_id)
-            .bind(item.channel_model_id)
-            .bind(item.priority)
-            .execute(&mut *tx)
-            .await;
+        // Also insert nested group items with correct group_id
+        if inserted_id > 0 {
+            for item in &grp.items {
+                let _ = sqlx::query(
+                    "INSERT INTO group_items (group_id, channel_model_id, priority) VALUES (?, ?, ?) ON CONFLICT(group_id, channel_model_id) DO NOTHING",
+                )
+                .bind(inserted_id)
+                .bind(item.channel_model_id)
+                .bind(item.priority)
+                .execute(&mut *tx)
+                .await;
+            }
         }
     }
     rows_affected.insert("groups".to_string(), group_count);
@@ -370,4 +378,70 @@ pub async fn import_backup(state: &AppState, backup: BackupData) -> Result<DBImp
     tx.commit().await?;
     state.refresh_all_caches().await?;
     Ok(DBImportResult { rows_affected })
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use super::*;
+    use crate::{
+        db::init_db,
+        model::{Channel, ChannelModel, ChannelModelSource, ChannelProvider, Group, GroupItem, GroupMode},
+    };
+
+    async fn setup_test_state() -> (AppState, PathBuf) {
+        let rnd = nanoid::nanoid!(12);
+        let db_path = std::env::temp_dir().join(format!("octopus_backup_test_{}.db", rnd));
+        let pool = init_db(&db_path).await.unwrap();
+        let state = AppState::init(pool).await.unwrap();
+        (state, db_path)
+    }
+
+    #[tokio::test]
+    async fn test_import_backup_channels_and_groups_with_zero_id() {
+        let (state, db_path) = setup_test_state().await;
+
+        let backup = BackupData {
+            channels: vec![Channel {
+                id: 0, // Zero id import
+                name: "imported-channel".to_string(),
+                channel_type: ChannelProvider::OpenaiCompletion,
+                enabled: true,
+                base_url: "https://api.openai.com".to_string(),
+                key: "sk-import".to_string(),
+                models: vec![ChannelModel {
+                    id:         0,
+                    channel_id: 0,
+                    name:       "gpt-4o".to_string(),
+                    source:     ChannelModelSource::Manual,
+                    metrics:    Default::default(),
+                }],
+                ..Default::default()
+            }],
+            groups: vec![Group {
+                id:             0, // Zero id import
+                name:           "imported-group".to_string(),
+                mode:           GroupMode::Manual,
+                active_item_id: 0,
+                relay_config:   Default::default(),
+                items:          Vec::new(),
+            }],
+            ..Default::default()
+        };
+
+        let res = import_backup(&state, backup).await.unwrap();
+        assert_eq!(res.rows_affected.get("channels").copied(), Some(1));
+        assert_eq!(res.rows_affected.get("groups").copied(), Some(1));
+
+        // Verify channel model was inserted with foreign key to newly created channel
+        let model_row: (i64, i64, String) =
+            sqlx::query_as("SELECT id, channel_id, name FROM channel_models WHERE name = 'gpt-4o'")
+                .fetch_one(&state.db)
+                .await
+                .unwrap();
+        assert!(model_row.1 > 0, "Nested channel model must have valid channel_id");
+
+        let _ = std::fs::remove_file(db_path);
+    }
 }

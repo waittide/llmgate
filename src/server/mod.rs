@@ -104,10 +104,38 @@ pub fn build_router(state: AppState) -> Router {
         .layer(from_fn_with_state(state.clone(), api_key_auth_middleware));
 
     // 6. CORS Configuration
-    let cors = CorsLayer::new()
-        .allow_origin(Any)
-        .allow_methods(Any)
-        .allow_headers(Any);
+    let cors = {
+        let origins_setting = state
+            .settings
+            .get("cors_allow_origins")
+            .map(|e| e.value().clone())
+            .unwrap_or_default();
+        let trimmed = origins_setting.trim();
+        if !trimmed.is_empty() {
+            let origins: Vec<axum::http::HeaderValue> = trimmed
+                .split(',')
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .filter_map(|s| s.parse().ok())
+                .collect();
+            if !origins.is_empty() {
+                CorsLayer::new()
+                    .allow_origin(origins)
+                    .allow_methods(Any)
+                    .allow_headers(Any)
+            } else {
+                CorsLayer::new()
+                    .allow_origin(Any)
+                    .allow_methods(Any)
+                    .allow_headers(Any)
+            }
+        } else {
+            CorsLayer::new()
+                .allow_origin(Any)
+                .allow_methods(Any)
+                .allow_headers(Any)
+        }
+    };
 
     // 7. Root Router with Fallback to SPA static files
     Router::new()
