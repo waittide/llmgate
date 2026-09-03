@@ -39,10 +39,33 @@ export function setAuthToken(value: string | null) {
 export function setAPIKey(value: string | null) {
     apiKey = value;
 }
+function getActiveBearer(): string | null {
+    if (apiKey || authToken) return apiKey || authToken;
+    try {
+        if (typeof localStorage !== 'undefined') {
+            const raw = localStorage.getItem('auth-storage');
+            if (raw) {
+                const parsed = JSON.parse(raw);
+                const token = parsed?.state?.token;
+                if (token && typeof token === 'string') {
+                    if (parsed?.state?.isAPIKeyAuth) {
+                        apiKey = token;
+                    } else {
+                        authToken = token;
+                    }
+                    return token;
+                }
+            }
+        }
+    } catch {
+        // ignore storage parse error
+    }
+    return null;
+}
 
 export async function apiRequest<T>(path: string, options: RequestOptions = {}): Promise<T> {
     const headers = new Headers(options.body === undefined ? undefined : { 'Content-Type': 'application/json' });
-    const bearer = apiKey || authToken;
+    const bearer = getActiveBearer();
     if (bearer) headers.set('Authorization', `Bearer ${bearer}`);
 
     const response = await fetch(path, {
