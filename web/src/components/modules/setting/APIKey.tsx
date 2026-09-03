@@ -93,7 +93,8 @@ function APIKeyForm({ apiKey, isPending, submitLabel, onSubmit, onClose }: APIKe
         if (apiKey?.expire_at) {
             const d = new Date(apiKey.expire_at * 1000);
             if (!isNaN(d.getTime())) {
-                return `${d.getUTCHours().toString().padStart(2, '0')}:${d.getUTCMinutes().toString().padStart(2, '0')}`;
+                // toExpireAt 用本地时区写入, 这里也按本地时区读回, 避免时区偏移。
+                return `${d.getHours().toString().padStart(2, '0')}:${d.getMinutes().toString().padStart(2, '0')}`;
             }
         }
         return '00:00';
