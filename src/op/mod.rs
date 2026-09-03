@@ -20,7 +20,7 @@ use crate::{
     db::DbPool,
     model::{
         APIKey, Channel, ChannelModel, Group, LLMPrice, RequestLog, StatsAPIKey, StatsDaily, StatsHourly, StatsMetrics,
-        StatsTotal,
+        StatsTotal, SystemStats,
     },
     relay::{route::RouteManager, state::RequestStateManager},
 };
@@ -36,9 +36,7 @@ pub struct AppState {
     pub api_key_str_index:     DashMap<String, i64>,
     pub llm_prices:            DashMap<String, LLMPrice>,
     pub settings:              DashMap<String, String>,
-    pub stats_total:           Arc<RwLock<StatsTotal>>,
-    pub stats_daily:           Arc<RwLock<StatsDaily>>,
-    pub stats_hourly:          Arc<RwLock<[StatsHourly; 24]>>,
+    pub stats:                 Arc<RwLock<SystemStats>>,
     pub stats_api_keys:        DashMap<i64, StatsAPIKey>,
     pub route_manager:         Arc<RouteManager>,
     pub request_state_manager: Arc<RequestStateManager>,
@@ -65,15 +63,17 @@ impl AppState {
             api_key_str_index:     DashMap::new(),
             llm_prices:            DashMap::new(),
             settings:              DashMap::new(),
-            stats_total:           Arc::new(RwLock::new(StatsTotal {
-                id:      1,
-                metrics: StatsMetrics::default(),
+            stats:                 Arc::new(RwLock::new(SystemStats {
+                total: StatsTotal {
+                    id:      1,
+                    metrics: StatsMetrics::default(),
+                },
+                daily: StatsDaily {
+                    date:    now_date.clone(),
+                    metrics: StatsMetrics::default(),
+                },
+                hourly: default_hourlies,
             })),
-            stats_daily:           Arc::new(RwLock::new(StatsDaily {
-                date:    now_date.clone(),
-                metrics: StatsMetrics::default(),
-            })),
-            stats_hourly:          Arc::new(RwLock::new(default_hourlies)),
             stats_api_keys:        DashMap::new(),
             route_manager:         Arc::new(RouteManager::new()),
             request_state_manager: Arc::new(RequestStateManager::new()),

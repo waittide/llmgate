@@ -78,6 +78,13 @@ pub struct StatsDaily {
     pub metrics: StatsMetrics,
 }
 
+#[derive(Debug, Clone)]
+pub struct SystemStats {
+    pub total:  StatsTotal,
+    pub daily:  StatsDaily,
+    pub hourly: [StatsHourly; 24],
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize, sqlx::FromRow)]
 #[serde(default)]
 pub struct StatsAPIKey {

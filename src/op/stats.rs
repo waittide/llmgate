@@ -2,7 +2,7 @@ use anyhow::Result;
 use sqlx::Row;
 
 use crate::{
-    model::{StatsAPIKey, StatsDaily, StatsHourly, StatsMetrics, StatsTotal},
+    model::{StatsAPIKey, StatsDaily, StatsHourly, StatsMetrics, StatsTotal, SystemStats},
     op::AppState,
 };
 
@@ -10,44 +10,53 @@ pub async fn refresh_stats_cache(state: &AppState) -> Result<()> {
     let now_date = chrono::Local::now().format("%Y%m%d").to_string();
 
     // 1. Total stats
-    let total_row = sqlx::query("SELECT * FROM stats_totals WHERE id = 1")
+    let total = if let Some(row) = sqlx::query("SELECT * FROM stats_totals WHERE id = 1")
         .fetch_optional(&state.db)
-        .await?;
-    if let Some(row) = total_row {
-        let metrics = StatsMetrics {
-            input_token:     row.get("input_token"),
-            output_token:    row.get("output_token"),
-            input_cost:      row.get("input_cost"),
-            output_cost:     row.get("output_cost"),
-            wait_time:       row.get("wait_time"),
-            request_success: row.get("request_success"),
-            request_failed:  row.get("request_failed"),
-        };
-        let mut t = state.stats_total.write();
-        *t = StatsTotal { id: 1, metrics };
-    }
+        .await?
+    {
+        StatsTotal {
+            id:      1,
+            metrics: StatsMetrics {
+                input_token:     row.get("input_token"),
+                output_token:    row.get("output_token"),
+                input_cost:      row.get("input_cost"),
+                output_cost:     row.get("output_cost"),
+                wait_time:       row.get("wait_time"),
+                request_success: row.get("request_success"),
+                request_failed:  row.get("request_failed"),
+            },
+        }
+    } else {
+        StatsTotal {
+            id:      1,
+            metrics: StatsMetrics::default(),
+        }
+    };
 
     // 2. Today daily stats
-    let daily_row = sqlx::query("SELECT * FROM stats_dailies WHERE date = ?")
+    let daily = if let Some(row) = sqlx::query("SELECT * FROM stats_dailies WHERE date = ?")
         .bind(&now_date)
         .fetch_optional(&state.db)
-        .await?;
-    if let Some(row) = daily_row {
-        let metrics = StatsMetrics {
-            input_token:     row.get("input_token"),
-            output_token:    row.get("output_token"),
-            input_cost:      row.get("input_cost"),
-            output_cost:     row.get("output_cost"),
-            wait_time:       row.get("wait_time"),
-            request_success: row.get("request_success"),
-            request_failed:  row.get("request_failed"),
-        };
-        let mut d = state.stats_daily.write();
-        *d = StatsDaily {
-            date: now_date.clone(),
-            metrics,
-        };
-    }
+        .await?
+    {
+        StatsDaily {
+            date:    now_date.clone(),
+            metrics: StatsMetrics {
+                input_token:     row.get("input_token"),
+                output_token:    row.get("output_token"),
+                input_cost:      row.get("input_cost"),
+                output_cost:     row.get("output_cost"),
+                wait_time:       row.get("wait_time"),
+                request_success: row.get("request_success"),
+                request_failed:  row.get("request_failed"),
+            },
+        }
+    } else {
+        StatsDaily {
+            date:    now_date.clone(),
+            metrics: StatsMetrics::default(),
+        }
+    };
 
     // 3. Hourly stats for today
     let hourly_rows = sqlx::query("SELECT * FROM stats_hourlies WHERE date = ?")
@@ -79,10 +88,11 @@ pub async fn refresh_stats_cache(state: &AppState) -> Result<()> {
             };
         }
     }
-    {
-        let mut h = state.stats_hourly.write();
-        *h = hourlies;
-    }
+    *state.stats.write() = SystemStats {
+        total,
+        daily,
+        hourly: hourlies,
+    };
 
     // 4. API Key stats
     state.stats_api_keys.clear();
@@ -113,32 +123,24 @@ pub fn record_metrics(state: &AppState, api_key_id: i64, channel_id: i64, channe
     let now_date = now.format("%Y%m%d").to_string();
     let current_hour = now.format("%H").to_string().parse::<usize>().unwrap_or(0);
 
-    // 1. Total
+    // 1. Atomic update for Total + Daily + Hourly in a single lock
     {
-        let mut total = state.stats_total.write();
-        total.metrics.add(delta);
-    }
-
-    // 2. Daily
-    {
-        let mut daily = state.stats_daily.write();
-        if daily.date != now_date {
-            daily.date = now_date.clone();
-            daily.metrics = StatsMetrics::default();
+        let mut stats = state.stats.write();
+        stats.total.metrics.add(delta);
+        if stats.daily.date != now_date {
+            stats.daily.date = now_date.clone();
+            stats.daily.metrics = StatsMetrics::default();
         }
-        daily.metrics.add(delta);
-    }
+        stats.daily.metrics.add(delta);
 
-    // 3. Hourly
-    {
-        let mut hourlies = state.stats_hourly.write();
-        if hourlies[current_hour].date != now_date {
-            hourlies[current_hour].date = now_date;
-            hourlies[current_hour].metrics = StatsMetrics::default();
+        if current_hour < 24 {
+            if stats.hourly[current_hour].date != now_date {
+                stats.hourly[current_hour].date = now_date;
+                stats.hourly[current_hour].metrics = StatsMetrics::default();
+            }
+            stats.hourly[current_hour].metrics.add(delta);
         }
-        hourlies[current_hour].metrics.add(delta);
     }
-
     // 4. API Key
     if api_key_id > 0 {
         state
@@ -162,15 +164,15 @@ pub fn record_metrics(state: &AppState, api_key_id: i64, channel_id: i64, channe
 }
 
 pub fn get_stats_today(state: &AppState) -> StatsDaily {
-    state.stats_daily.read().clone()
+    state.stats.read().daily.clone()
 }
 
 pub fn get_stats_hourly(state: &AppState) -> [StatsHourly; 24] {
-    state.stats_hourly.read().clone()
+    state.stats.read().hourly.clone()
 }
 
 pub fn get_stats_total(state: &AppState) -> StatsTotal {
-    state.stats_total.read().clone()
+    state.stats.read().total.clone()
 }
 
 pub async fn get_stats_daily(state: &AppState) -> Result<Vec<StatsDaily>> {
@@ -195,7 +197,7 @@ pub async fn get_stats_daily(state: &AppState) -> Result<Vec<StatsDaily>> {
     }
 
     // Ensure today's in-memory is merged/represented
-    let today = state.stats_daily.read().clone();
+    let today = state.stats.read().daily.clone();
     if let Some(pos) = list.iter().position(|d| d.date == today.date) {
         list[pos] = today;
     } else {
@@ -228,7 +230,10 @@ pub async fn flush_stats_to_db(state: &AppState) -> Result<()> {
     let mut tx = state.db.begin().await?;
 
     // 1. Flush Total
-    let total = state.stats_total.read().clone();
+    let (total, daily, hourlies) = {
+        let s = state.stats.read();
+        (s.total.clone(), s.daily.clone(), s.hourly.clone())
+    };
     sqlx::query(
         r#"
         INSERT INTO stats_totals (id, input_token, output_token, input_cost, output_cost, wait_time, request_success, request_failed)
@@ -254,7 +259,6 @@ pub async fn flush_stats_to_db(state: &AppState) -> Result<()> {
     .await?;
 
     // 2. Flush Daily
-    let daily = state.stats_daily.read().clone();
     sqlx::query(
         r#"
         INSERT INTO stats_dailies (date, input_token, output_token, input_cost, output_cost, wait_time, request_success, request_failed)
@@ -281,7 +285,6 @@ pub async fn flush_stats_to_db(state: &AppState) -> Result<()> {
     .await?;
 
     // 3. Flush Hourlies
-    let hourlies = state.stats_hourly.read().clone();
     for h in &hourlies {
         sqlx::query(
             r#"
