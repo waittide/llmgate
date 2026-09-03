@@ -16,11 +16,10 @@ pub async fn serve_static(uri: Uri) -> Response<Body> {
 
     match Asset::get(&path) {
         Some(content) => {
-            let mime = mime_guess::from_path(&path).first_or_octet_stream();
+            let mime = guess_mime_type(&path);
             let mut response = Response::builder()
                 .status(StatusCode::OK)
-                .header(header::CONTENT_TYPE, HeaderValue::from_str(mime.as_ref()).unwrap());
-
+                .header(header::CONTENT_TYPE, HeaderValue::from_static(mime));
             if path.starts_with("assets/") {
                 response = response.header(
                     header::CACHE_CONTROL,
@@ -51,5 +50,26 @@ pub async fn serve_static(uri: Uri) -> Response<Body> {
                     .unwrap()
             }
         }
+    }
+}
+
+fn guess_mime_type(path: &str) -> &'static str {
+    let ext = path.rsplit('.').next().unwrap_or("");
+    match ext {
+        "html" => "text/html; charset=utf-8",
+        "js" | "mjs" => "text/javascript; charset=utf-8",
+        "css" => "text/css; charset=utf-8",
+        "json" | "webmanifest" => "application/json",
+        "svg" => "image/svg+xml",
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "webp" => "image/webp",
+        "gif" => "image/gif",
+        "ico" => "image/x-icon",
+        "woff2" => "font/woff2",
+        "woff" => "font/woff",
+        "ttf" => "font/ttf",
+        "wasm" => "application/wasm",
+        _ => "application/octet-stream",
     }
 }
