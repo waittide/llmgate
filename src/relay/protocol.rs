@@ -860,7 +860,7 @@ pub fn anthropic_sse_event_to_openai_chunk(
         }
         "message_delta" => {
             let finish_reason = val.pointer("/delta/stop_reason").and_then(|s| s.as_str()).unwrap_or("stop");
-            let chunk = serde_json::json!({
+            let mut chunk = serde_json::json!({
                 "id": chatcmpl_id,
                 "object": "chat.completion.chunk",
                 "created": created,
@@ -871,6 +871,14 @@ pub fn anthropic_sse_event_to_openai_chunk(
                     "finish_reason": finish_reason
                 }]
             });
+            // Preserve Anthropic output_tokens so the StreamFinalizer can recover
+            // real completion token counts instead of falling back to estimates.
+            if let Some(usage) = val.get("usage") {
+                let output_tokens = usage.get("output_tokens").and_then(Value::as_i64).unwrap_or(0);
+                if output_tokens > 0 {
+                    chunk["usage"] = serde_json::json!({ "completion_tokens": output_tokens });
+                }
+            }
             return Some(format!("data: {}\n\n", serde_json::to_string(&chunk).unwrap_or_default()));
         }
         "message_stop" => {
@@ -1226,7 +1234,7 @@ pub fn gemini_sse_event_to_openai_chunk(
         return None;
     }
 
-    let chunk = serde_json::json!({
+    let mut chunk = serde_json::json!({
         "id": chatcmpl_id,
         "object": "chat.completion.chunk",
         "created": created,
@@ -1237,6 +1245,19 @@ pub fn gemini_sse_event_to_openai_chunk(
             "finish_reason": finish_reason
         }]
     });
+    // Preserve Gemini usageMetadata so the StreamFinalizer can recover real token
+    // counts instead of falling back to estimates.
+    if let Some(usage) = val.get("usageMetadata") {
+        let prompt_tokens = usage.get("promptTokenCount").and_then(Value::as_i64).unwrap_or(0);
+        let completion_tokens = usage.get("candidatesTokenCount").and_then(Value::as_i64).unwrap_or(0);
+        let total_tokens = usage.get("totalTokenCount").and_then(Value::as_i64)
+            .unwrap_or(prompt_tokens + completion_tokens);
+        chunk["usage"] = serde_json::json!({
+            "prompt_tokens": prompt_tokens,
+            "completion_tokens": completion_tokens,
+            "total_tokens": total_tokens
+        });
+    }
     Some(format!("data: {}\n\n", serde_json::to_string(&chunk).unwrap_or_default()))
 }
 
@@ -1253,32 +1274,58 @@ pub fn calculate_cost(prompt_tokens: i64, completion_tokens: i64, price: Option<
 }
 
 pub fn extract_usage_from_json(val: &Value) -> Option<Usage> {
+    // OpenAI-style `usage` object: prompt_tokens / completion_tokens / total_tokens
+    // (also accepted via the Responses aliases input_tokens / output_tokens).
     if let Some(usage_obj) = val.get("usage") {
         let prompt_tokens = usage_obj
             .get("prompt_tokens")
             .or_else(|| usage_obj.get("input_tokens"))
+            .or_else(|| usage_obj.get("promptTokenCount"))
             .and_then(|v| v.as_i64())
             .unwrap_or(0);
 
         let completion_tokens = usage_obj
             .get("completion_tokens")
             .or_else(|| usage_obj.get("output_tokens"))
+            .or_else(|| usage_obj.get("candidatesTokenCount"))
             .and_then(|v| v.as_i64())
             .unwrap_or(0);
 
         let total_tokens = usage_obj
             .get("total_tokens")
+            .or_else(|| usage_obj.get("totalTokenCount"))
             .and_then(|v| v.as_i64())
             .unwrap_or(prompt_tokens + completion_tokens);
 
-        Some(Usage {
+        return Some(Usage {
             prompt_tokens,
             completion_tokens,
             total_tokens,
-        })
-    } else {
-        None
+        });
     }
+
+    // Gemini-style top-level `usageMetadata` object.
+    if let Some(usage_obj) = val.get("usageMetadata") {
+        let prompt_tokens = usage_obj
+            .get("promptTokenCount")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(0);
+        let completion_tokens = usage_obj
+            .get("candidatesTokenCount")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(0);
+        let total_tokens = usage_obj
+            .get("totalTokenCount")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(prompt_tokens + completion_tokens);
+        return Some(Usage {
+            prompt_tokens,
+            completion_tokens,
+            total_tokens,
+        });
+    }
+
+    None
 }
 
 #[cfg(test)]

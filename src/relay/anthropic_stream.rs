@@ -8,6 +8,9 @@ use bytes::Bytes;
 use futures::Stream;
 use serde_json::{Value, json};
 
+use crate::relay::protocol::extract_usage_from_json;
+use crate::relay::state::Usage;
+
 use super::sse_event_end;
 
 #[derive(Clone, Copy)]
@@ -34,6 +37,7 @@ pub struct OpenaiToAnthropicStream<S> {
     next_block_index: usize,
     tools: BTreeMap<String, ToolState>,
     completed: bool,
+    usage: Option<Usage>,
 }
 
 impl<S> OpenaiToAnthropicStream<S> {
@@ -49,6 +53,7 @@ impl<S> OpenaiToAnthropicStream<S> {
             next_block_index: 0,
             tools: BTreeMap::new(),
             completed: false,
+            usage: None,
         };
         stream.push(
             "message_start",
@@ -134,6 +139,11 @@ impl<S> OpenaiToAnthropicStream<S> {
         let Ok(value) = serde_json::from_str::<Value>(data) else {
             return;
         };
+        // Carry real usage into the Anthropic message_delta usage field instead of
+        // emitting hard-coded zeros.
+        if let Some(u) = extract_usage_from_json(&value) {
+            self.usage = Some(u);
+        }
         let Some(choice) = value.pointer("/choices/0") else {
             return;
         };

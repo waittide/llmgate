@@ -102,9 +102,20 @@ fn extract_usage_from_sse_buffer(buffer: &mut Vec<u8>, usage: &mut Option<Usage>
                     if !trimmed.is_empty() && trimmed != "[DONE]"
                         && let Ok(val) = serde_json::from_str::<serde_json::Value>(trimmed)
                             && let Some(u) = extract_usage_from_json(&val)
-                        {
-                            *usage = Some(u);
-                        }
+                    {
+                        // Merge across events (e.g. Anthropic message_start carries
+                        // input_tokens while message_delta carries output_tokens).
+                        // Keep any already-recorded non-zero counts.
+                        let merged = match usage {
+                            Some(existing) => Usage {
+                                prompt_tokens: if existing.prompt_tokens > 0 { existing.prompt_tokens } else { u.prompt_tokens },
+                                completion_tokens: if existing.completion_tokens > 0 { existing.completion_tokens } else { u.completion_tokens },
+                                total_tokens: if existing.total_tokens > 0 { existing.total_tokens } else { u.total_tokens },
+                            },
+                            None => u,
+                        };
+                        *usage = Some(merged);
+                    }
                 }
             }
         }

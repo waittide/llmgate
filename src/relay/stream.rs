@@ -9,6 +9,8 @@ use futures::Stream;
 use serde_json::{Value, json};
 
 use super::sse_event_end;
+use crate::relay::protocol::extract_usage_from_json;
+use crate::relay::state::Usage;
 
 /// Converts one provider-native SSE event into an OpenAI Chat Completion SSE chunk.
 pub type SseChunkConverter = fn(&str, &str, i64, &str) -> Option<String>;
@@ -119,6 +121,7 @@ pub struct ChatCompletionsToResponsesStream<S> {
     completed: bool,
     text: String,
     tools: BTreeMap<usize, ToolCallState>,
+    usage: Option<Usage>,
 }
 
 impl<S> ChatCompletionsToResponsesStream<S> {
@@ -137,6 +140,7 @@ impl<S> ChatCompletionsToResponsesStream<S> {
             completed: false,
             text: String::new(),
             tools: BTreeMap::new(),
+            usage: None,
         }
     }
 
@@ -213,6 +217,11 @@ impl<S> ChatCompletionsToResponsesStream<S> {
         let Ok(value) = serde_json::from_str::<Value>(data) else {
             return;
         };
+        // Carry real usage (e.g. from a ChatGPT chunk) into the Responses
+        // response.completed event instead of emitting hard-coded zeros.
+        if let Some(u) = extract_usage_from_json(&value) {
+            self.usage = Some(u);
+        }
         let Some(choice) = value.pointer("/choices/0") else {
             return;
         };
@@ -383,11 +392,21 @@ impl<S> ChatCompletionsToResponsesStream<S> {
                     "output": output,
                     "error": null,
                     "incomplete_details": null,
-                    "usage": {
-                        "input_tokens": 0,
-                        "output_tokens": 0,
-                        "total_tokens": 0
-                    }
+                    "usage": self
+                        .usage
+                        .as_ref()
+                        .map(|u| {
+                            json!({
+                                "input_tokens": u.prompt_tokens,
+                                "output_tokens": u.completion_tokens,
+                                "total_tokens": u.total_tokens
+                            })
+                        })
+                        .unwrap_or_else(|| json!({
+                            "input_tokens": 0,
+                            "output_tokens": 0,
+                            "total_tokens": 0
+                        }))
                 }
             }),
         );
