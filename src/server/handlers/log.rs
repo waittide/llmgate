@@ -169,12 +169,12 @@ pub async fn get_response_body(State(state): State<AppState>, Path(id): Path<u64
     }
 }
 
-pub async fn interrupt_round(
-    State(_state): State<AppState>,
-    Path((_request_id, _round)): Path<(u64, i64)>,
-) -> Response {
-    // Interruption signal handling
-    success_msg("interrupted")
+pub async fn interrupt_round(State(state): State<AppState>, Path((request_id, _round)): Path<(u64, i64)>) -> Response {
+    if state.request_state_manager.interrupt(request_id) {
+        success_msg("interrupted successfully")
+    } else {
+        error(StatusCode::NOT_FOUND, "request not found or already finished")
+    }
 }
 
 pub async fn clear_log(State(state): State<AppState>) -> Response {

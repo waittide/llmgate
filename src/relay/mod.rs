@@ -72,6 +72,8 @@ struct StreamFinalizer<S> {
     log_template:     RequestLog,
     previous_rounds:  Vec<crate::model::RoundLog>,
     response_capture: Vec<u8>,
+    cancel_rx:        Option<tokio::sync::watch::Receiver<bool>>,
+    interrupted:      bool,
 }
 
 /// Drains complete SSE events from `buffer`, accumulating any `usage` found.
@@ -197,9 +199,19 @@ impl<S> StreamFinalizer<S> {
             self.channel_model_id,
             &delta,
         );
+        let status_str = if self.interrupted {
+            "interrupted"
+        } else if completed {
+            "success"
+        } else {
+            "stream_error"
+        };
+
         let response_body_str = String::from_utf8_lossy(&self.response_capture).to_string();
         let error_opt = if completed {
             None
+        } else if self.interrupted {
+            Some("stream interrupted by user".to_string())
         } else if !response_body_str.is_empty() {
             Some(response_body_str.clone())
         } else {
@@ -224,7 +236,7 @@ impl<S> StreamFinalizer<S> {
 
         self.state.request_state_manager.finish(
             self.req_id,
-            if completed { "success" } else { "stream_error" },
+            status_str,
             Usage {
                 prompt_tokens,
                 completion_tokens,
@@ -238,11 +250,7 @@ impl<S> StreamFinalizer<S> {
 
         // Persist the completed request/response log.
         let mut req_log = self.log_template.clone();
-        req_log.status = if completed {
-            "success".to_string()
-        } else {
-            "stream_error".to_string()
-        };
+        req_log.status = status_str.to_string();
         req_log.response_body = response_body_str;
         req_log.prompt_tokens = prompt_tokens;
         req_log.completion_tokens = completion_tokens;
@@ -266,6 +274,13 @@ where
             return Poll::Ready(None);
         }
         let this = self.as_mut().get_mut();
+        if let Some(rx) = &this.cancel_rx
+            && *rx.borrow()
+        {
+            this.interrupted = true;
+            this.finalize(false);
+            return Poll::Ready(None);
+        }
         match Pin::new(&mut this.inner).poll_next(cx) {
             Poll::Ready(Some(Ok(bytes))) => {
                 this.output_bytes += bytes.len();
@@ -613,6 +628,8 @@ fn handle_successful_stream(state: &AppState, upstream_resp: reqwest::Response, 
         log_template,
         previous_rounds: ctx.rounds,
         response_capture: Vec::new(),
+        cancel_rx: state.request_state_manager.get_cancel_receiver(ctx.req_id),
+        interrupted: false,
     };
     let body = Body::from_stream(finalizer);
 
@@ -920,6 +937,14 @@ pub async fn forward_relay(
     let mut rounds: Vec<crate::model::RoundLog> = Vec::new();
 
     while round < max_attempts {
+        let cancel_rx = state.request_state_manager.get_cancel_receiver(req_id);
+        if let Some(rx) = &cancel_rx
+            && *rx.borrow()
+        {
+            last_error_body = "request interrupted".to_string();
+            last_status = StatusCode::from_u16(499).unwrap_or(StatusCode::BAD_REQUEST);
+            break;
+        }
         round += 1;
         let round_start_time = Instant::now();
 
@@ -1174,10 +1199,25 @@ pub async fn forward_relay(
         }
 
         if round < max_attempts && current_group.relay_config.member_retry_interval_seconds > 0 {
-            tokio::time::sleep(tokio::time::Duration::from_secs(
-                current_group.relay_config.member_retry_interval_seconds as u64,
-            ))
-            .await;
+            if let Some(mut rx) = cancel_rx.clone() {
+                tokio::select! {
+                    _ = rx.changed() => {
+                        if *rx.borrow() {
+                            last_error_body = "request interrupted".to_string();
+                            last_status = StatusCode::from_u16(499).unwrap_or(StatusCode::BAD_REQUEST);
+                            break;
+                        }
+                    }
+                    _ = tokio::time::sleep(tokio::time::Duration::from_secs(
+                        current_group.relay_config.member_retry_interval_seconds as u64,
+                    )) => {}
+                }
+            } else {
+                tokio::time::sleep(tokio::time::Duration::from_secs(
+                    current_group.relay_config.member_retry_interval_seconds as u64,
+                ))
+                .await;
+            }
         }
     }
 

@@ -46,6 +46,7 @@ pub struct RequestStateInternal {
     pub request_body:    String,
     pub response_body:   String,
     pub started_instant: std::time::Instant,
+    pub cancel_tx:       tokio::sync::watch::Sender<bool>,
 }
 
 pub struct RequestStateManager {
@@ -96,11 +97,14 @@ impl RequestStateManager {
             rounds: Vec::new(),
         };
 
+        let (cancel_tx, _) = tokio::sync::watch::channel(false);
+
         let internal = RequestStateInternal {
-            overview:        overview.clone(),
-            request_body:    body,
-            response_body:   String::new(),
+            overview: overview.clone(),
+            request_body: body,
+            response_body: String::new(),
             started_instant: std::time::Instant::now(),
+            cancel_tx,
         };
 
         self.requests.insert(id, internal);
@@ -213,6 +217,18 @@ impl RequestStateManager {
         self.requests.get(&id).map(|r| r.request_body.clone())
     }
 
+    pub fn interrupt(&self, id: u64) -> bool {
+        if let Some(entry) = self.requests.get(&id) {
+            let _ = entry.cancel_tx.send(true);
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn get_cancel_receiver(&self, id: u64) -> Option<tokio::sync::watch::Receiver<bool>> {
+        self.requests.get(&id).map(|r| r.cancel_tx.subscribe())
+    }
     pub fn get_response_body(&self, id: u64) -> Option<String> {
         self.requests.get(&id).map(|r| r.response_body.clone())
     }
@@ -233,5 +249,26 @@ impl RequestStateManager {
 
         self.requests.retain(|id, _| in_flight_ids.contains(id));
         *self.recent_ids.write() = in_flight_ids.into();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_request_state_manager_interrupt() {
+        let manager = RequestStateManager::new();
+        let req_id = manager.new_request("test-model".to_string(), "{}".to_string());
+        let rx = manager
+            .get_cancel_receiver(req_id)
+            .expect("receiver exists");
+
+        assert_eq!(*rx.borrow(), false);
+        assert!(manager.interrupt(req_id));
+        assert_eq!(*rx.borrow(), true);
+
+        // Non-existent id returns false
+        assert!(!manager.interrupt(99999));
     }
 }
