@@ -104,13 +104,38 @@ pub fn convert_responses_to_chat_completions(val: &Value) -> Value {
         let mut messages = Vec::new();
         if let Some(items) = input.as_array() {
             for item in items {
+                let item_type = item.get("type").and_then(Value::as_str).unwrap_or("");
+                if item_type == "function_call" {
+                    let arguments = item.get("arguments").and_then(Value::as_str).unwrap_or("{}");
+                    messages.push(serde_json::json!({
+                        "role": "assistant",
+                        "content": null,
+                        "tool_calls": [{
+                            "id": item.get("call_id").cloned().unwrap_or(Value::String(String::new())),
+                            "type": "function",
+                            "function": {
+                                "name": item.get("name").cloned().unwrap_or(Value::String(String::new())),
+                                "arguments": arguments
+                            }
+                        }]
+                    }));
+                    continue;
+                }
+                if item_type == "function_call_output" {
+                    messages.push(serde_json::json!({
+                        "role": "tool",
+                        "tool_call_id": item.get("call_id").cloned().unwrap_or(Value::String(String::new())),
+                        "content": item.get("output").cloned().unwrap_or(Value::String(String::new()))
+                    }));
+                    continue;
+                }
                 let role = item.get("role").and_then(|r| r.as_str()).unwrap_or("user");
                 let content_val = match item.get("content") {
                     Some(Value::Array(parts)) => {
                         let mut converted_parts = Vec::new();
                         for part in parts {
                             let ptype = part.get("type").and_then(|t| t.as_str()).unwrap_or("");
-                            if ptype == "input_text" || ptype == "text" {
+                            if ptype == "input_text" || ptype == "text" || ptype == "output_text" {
                                 if let Some(text) = part.get("text") {
                                     converted_parts.push(serde_json::json!({
                                         "type": "text",
@@ -124,8 +149,6 @@ pub fn convert_responses_to_chat_completions(val: &Value) -> Value {
                                         "image_url": url
                                     }));
                                 }
-                            } else {
-                                converted_parts.push(part.clone());
                             }
                         }
                         if converted_parts.len() == 1 && converted_parts[0].get("type").and_then(|t| t.as_str()) == Some("text") {
@@ -149,6 +172,7 @@ pub fn convert_responses_to_chat_completions(val: &Value) -> Value {
 
     Value::Object(obj)
 }
+
 
 /// Converts an OpenAI Chat Completions payload (containing `messages: [...]`)
 /// into an OpenAI Responses payload (containing `input: [...]`).
