@@ -101,24 +101,31 @@ pub fn convert_responses_to_chat_completions(val: &Value) -> Value {
     }
 
     if let Some(input) = obj.remove("input") {
-        let mut messages = Vec::new();
+        let mut messages: Vec<Value> = Vec::new();
         if let Some(items) = input.as_array() {
             for item in items {
                 let item_type = item.get("type").and_then(Value::as_str).unwrap_or("");
                 if item_type == "function_call" {
-                    let arguments = item.get("arguments").and_then(Value::as_str).unwrap_or("{}");
-                    messages.push(serde_json::json!({
-                        "role": "assistant",
-                        "content": null,
-                        "tool_calls": [{
-                            "id": item.get("call_id").cloned().unwrap_or(Value::String(String::new())),
-                            "type": "function",
-                            "function": {
-                                "name": item.get("name").cloned().unwrap_or(Value::String(String::new())),
-                                "arguments": arguments
-                            }
-                        }]
-                    }));
+                    let call = serde_json::json!({
+                        "id": item.get("call_id").cloned().unwrap_or(Value::String(String::new())),
+                        "type": "function",
+                        "function": {
+                            "name": item.get("name").cloned().unwrap_or(Value::String(String::new())),
+                            "arguments": item.get("arguments").cloned().unwrap_or(Value::String("{}".to_string()))
+                        }
+                    });
+                    if let Some(last) = messages.last_mut()
+                        && last.get("role").and_then(Value::as_str) == Some("assistant")
+                        && last.get("tool_calls").and_then(Value::as_array).is_some()
+                    {
+                        last["tool_calls"].as_array_mut().map(|calls| calls.push(call));
+                    } else {
+                        messages.push(serde_json::json!({
+                            "role": "assistant",
+                            "content": null,
+                            "tool_calls": [call]
+                        }));
+                    }
                     continue;
                 }
                 if item_type == "function_call_output" {
