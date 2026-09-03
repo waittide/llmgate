@@ -46,8 +46,20 @@ pub fn start_log_worker(db: crate::db::DbPool, mut rx: tokio::sync::mpsc::Receiv
 }
 
 async fn flush_log_batch(db: &crate::db::DbPool, batch: &mut Vec<RequestLog>) {
+    // Wrap the whole batch in one explicit transaction: a single commit/fsync
+    // per flush instead of one per row, which removes the per-row synchronous
+    // I/O stall from the log worker path.
+    let mut tx = match db.begin().await {
+        Ok(tx) => tx,
+        Err(e) => {
+            tracing::error!("failed to begin log batch transaction: {:?}", e);
+            batch.clear();
+            return;
+        }
+    };
+
     for entry in batch.drain(..) {
-        let _ = sqlx::query(
+        if let Err(e) = sqlx::query(
             r#"
             INSERT INTO request_logs (
                 request_id, status, model, target_channel, target_model,
@@ -78,8 +90,17 @@ async fn flush_log_batch(db: &crate::db::DbPool, batch: &mut Vec<RequestLog>) {
         .bind(&entry.error)
         .bind(&entry.rounds_detail)
         .bind(entry.created_at)
-        .execute(db)
-        .await;
+        .execute(&mut *tx)
+        .await
+        {
+            // One malformed row aborts the transaction; roll back the rest.
+            tracing::error!("failed to insert request log in batch: {:?}", e);
+            return;
+        }
+    }
+
+    if let Err(e) = tx.commit().await {
+        tracing::error!("failed to commit log batch transaction: {:?}", e);
     }
 }
 
