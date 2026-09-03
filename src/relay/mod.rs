@@ -447,6 +447,38 @@ fn prepare_upstream_payload(
                 (gemini_endpoint(ch, &channel_model.name, stream), rewritten_body)
             }
         }
+        // Downstream Anthropic -> Upstream Chat Completions
+        (ApiFormat::AnthropicMessage, ChannelProvider::OpenaiCompletion) => {
+            if let Ok(val) = serde_json::from_slice::<serde_json::Value>(&rewritten_body) {
+                let converted = protocol::convert_anthropic_to_openai_chat_request(&val);
+                let bytes = serde_json::to_vec(&converted).unwrap_or(rewritten_body);
+                ("/chat/completions".to_string(), bytes)
+            } else {
+                ("/chat/completions".to_string(), rewritten_body)
+            }
+        }
+        // Downstream Anthropic -> Upstream Responses
+        (ApiFormat::AnthropicMessage, ChannelProvider::OpenaiResponses) => {
+            if let Ok(val) = serde_json::from_slice::<serde_json::Value>(&rewritten_body) {
+                let chat = protocol::convert_anthropic_to_openai_chat_request(&val);
+                let converted = protocol::convert_chat_completions_to_responses(&chat);
+                let bytes = serde_json::to_vec(&converted).unwrap_or(rewritten_body);
+                ("/responses".to_string(), bytes)
+            } else {
+                ("/responses".to_string(), rewritten_body)
+            }
+        }
+        // Downstream Anthropic -> Upstream Gemini
+        (ApiFormat::AnthropicMessage, ChannelProvider::Gemini) => {
+            if let Ok(val) = serde_json::from_slice::<serde_json::Value>(&rewritten_body) {
+                let chat = protocol::convert_anthropic_to_openai_chat_request(&val);
+                let converted = protocol::convert_openai_to_gemini(&chat);
+                let bytes = serde_json::to_vec(&converted).unwrap_or(rewritten_body);
+                (gemini_endpoint(ch, &channel_model.name, stream), bytes)
+            } else {
+                (gemini_endpoint(ch, &channel_model.name, stream), rewritten_body)
+            }
+        }
         // Downstream Responses -> Upstream Chat Completions channel (e.g. DeepSeek, Synora)
         (ApiFormat::OpenAIResponse, ChannelProvider::OpenaiCompletion) => {
             if let Ok(val) = serde_json::from_slice::<serde_json::Value>(&rewritten_body) {

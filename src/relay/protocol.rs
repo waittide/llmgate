@@ -164,6 +164,122 @@ pub fn convert_chat_completions_to_responses(val: &Value) -> Value {
 
     Value::Object(obj)
 }
+
+/// Converts an Anthropic Messages request into an OpenAI Chat Completions request.
+pub fn convert_anthropic_to_openai_chat_request(val: &Value) -> Value {
+    let mut obj = match val.as_object() {
+        Some(obj) => obj.clone(),
+        None => return val.clone(),
+    };
+    let mut messages = Vec::new();
+
+    if let Some(system) = obj.remove("system") {
+        let text = extract_text_content(&system);
+        if !text.is_empty() {
+            messages.push(serde_json::json!({ "role": "system", "content": text }));
+        }
+    }
+
+    if let Some(Value::Array(input_messages)) = obj.remove("messages") {
+        for message in input_messages {
+            let role = message.get("role").and_then(Value::as_str).unwrap_or("user");
+            let content = message.get("content").unwrap_or(&Value::Null);
+            if let Some(parts) = content.as_array() {
+                let mut normal_parts = Vec::new();
+                let mut tool_calls = Vec::new();
+                let mut tool_results = Vec::new();
+                for part in parts {
+                    match part.get("type").and_then(Value::as_str) {
+                        Some("text") => normal_parts.push(serde_json::json!({
+                            "type": "text",
+                            "text": part.get("text").cloned().unwrap_or(Value::String(String::new()))
+                        })),
+                        Some("image") => {
+                            if let Some(source) = part.get("source") {
+                                let url = if source.get("type").and_then(Value::as_str) == Some("base64") {
+                                    format!(
+                                        "data:{};base64,{}",
+                                        source.get("media_type").and_then(Value::as_str).unwrap_or("image/png"),
+                                        source.get("data").and_then(Value::as_str).unwrap_or("")
+                                    )
+                                } else {
+                                    source.get("url").and_then(Value::as_str).unwrap_or("").to_string()
+                                };
+                                normal_parts.push(serde_json::json!({
+                                    "type": "image_url",
+                                    "image_url": { "url": url }
+                                }));
+                            }
+                        }
+                        Some("tool_use") => tool_calls.push(serde_json::json!({
+                            "id": part.get("id").cloned().unwrap_or(Value::String(String::new())),
+                            "type": "function",
+                            "function": {
+                                "name": part.get("name").cloned().unwrap_or(Value::String(String::new())),
+                                "arguments": serde_json::to_string(part.get("input").unwrap_or(&Value::Null)).unwrap_or_else(|_| "{}".to_string())
+                            }
+                        })),
+                        Some("tool_result") => tool_results.push(serde_json::json!({
+                            "role": "tool",
+                            "tool_call_id": part.get("tool_use_id").cloned().unwrap_or(Value::String(String::new())),
+                            "content": part.get("content").cloned().unwrap_or(Value::String(String::new()))
+                        })),
+                        _ => {}
+                    }
+                }
+
+                if !normal_parts.is_empty() || !tool_calls.is_empty() {
+                    let content = if normal_parts.len() == 1
+                        && normal_parts[0].get("type").and_then(Value::as_str) == Some("text")
+                    {
+                        normal_parts[0].get("text").cloned().unwrap_or(Value::String(String::new()))
+                    } else {
+                        Value::Array(normal_parts)
+                    };
+                    let mut converted = serde_json::json!({ "role": role, "content": content });
+                    if !tool_calls.is_empty() {
+                        converted["tool_calls"] = Value::Array(tool_calls);
+                    }
+                    messages.push(converted);
+                }
+                messages.extend(tool_results);
+            } else {
+                messages.push(serde_json::json!({ "role": role, "content": content }));
+            }
+        }
+    }
+    obj.insert("messages".to_string(), Value::Array(messages));
+
+    if let Some(tools) = obj.get_mut("tools").and_then(Value::as_array_mut) {
+        *tools = tools
+            .iter()
+            .filter_map(|tool| {
+                let name = tool.get("name")?.clone();
+                Some(serde_json::json!({
+                    "type": "function",
+                    "function": {
+                        "name": name,
+                        "description": tool.get("description").cloned().unwrap_or(Value::String(String::new())),
+                        "parameters": tool.get("input_schema").cloned().unwrap_or_else(|| serde_json::json!({ "type": "object", "properties": {} }))
+                    }
+                }))
+            })
+            .collect();
+    }
+    if let Some(choice) = obj.get_mut("tool_choice") {
+        match choice.get("type").and_then(Value::as_str) {
+            Some("tool") => {
+                let name = choice.get("name").cloned().unwrap_or(Value::String(String::new()));
+                *choice = serde_json::json!({ "type": "function", "function": { "name": name } });
+            }
+            Some("any") => *choice = Value::String("required".to_string()),
+            Some("none") => *choice = Value::String("none".to_string()),
+            _ => *choice = Value::String("auto".to_string()),
+        }
+    }
+
+    Value::Object(obj)
+}
 /// Extracts plain text from an OpenAI `content` value (string or content array).
 fn extract_text_content(content: &Value) -> String {
     match content {
@@ -1240,5 +1356,27 @@ mod tests {
         assert_eq!(choices[0].pointer("/message/content").unwrap(), "Hi from Claude");
         assert_eq!(openai.pointer("/usage/prompt_tokens").unwrap(), 12);
         assert_eq!(openai.pointer("/usage/completion_tokens").unwrap(), 8);
+    }
+
+    #[test]
+    fn test_convert_anthropic_to_openai_chat_request() {
+        let anthropic = serde_json::json!({
+            "model": "claude-3-5-sonnet",
+            "system": "Follow instructions",
+            "messages": [{
+                "role": "user",
+                "content": [{ "type": "text", "text": "Hello" }]
+            }],
+            "tools": [{
+                "name": "read_file",
+                "description": "Read a file",
+                "input_schema": { "type": "object", "properties": { "path": { "type": "string" } } }
+            }]
+        });
+        let openai = convert_anthropic_to_openai_chat_request(&anthropic);
+        assert_eq!(openai.pointer("/messages/0/role").unwrap(), "system");
+        assert_eq!(openai.pointer("/messages/1/content").unwrap(), "Hello");
+        assert_eq!(openai.pointer("/tools/0/function/name").unwrap(), "read_file");
+        assert_eq!(openai.pointer("/tools/0/function/parameters/type").unwrap(), "object");
     }
 }
