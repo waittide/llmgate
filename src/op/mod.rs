@@ -25,6 +25,11 @@ use crate::{
     relay::{route::RouteManager, state::RequestStateManager},
 };
 
+pub struct LogShutdown {
+    pub shutdown_tx: tokio::sync::oneshot::Sender<()>,
+    pub join_handle: tokio::task::JoinHandle<()>,
+}
+
 #[derive(Clone)]
 pub struct AppState {
     pub db:                    DbPool,
@@ -42,6 +47,7 @@ pub struct AppState {
     pub request_state_manager: Arc<RequestStateManager>,
     pub jwt_secret:            Arc<RwLock<String>>,
     pub log_sender:            mpsc::Sender<RequestLog>,
+    pub log_shutdown:          Arc<parking_lot::Mutex<Option<LogShutdown>>>,
 }
 
 impl AppState {
@@ -52,6 +58,11 @@ impl AppState {
             date:    now_date.clone(),
             metrics: StatsMetrics::default(),
         });
+
+        let (tx, rx) = mpsc::channel(2048);
+        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+        let join_handle = crate::op::log::start_log_worker(db.clone(), rx, shutdown_rx);
+        let log_shutdown = Arc::new(parking_lot::Mutex::new(Some(LogShutdown { shutdown_tx, join_handle })));
 
         let state = Self {
             db:                    db.clone(),
@@ -78,11 +89,8 @@ impl AppState {
             route_manager:         Arc::new(RouteManager::new()),
             request_state_manager: Arc::new(RequestStateManager::new()),
             jwt_secret:            Arc::new(RwLock::new("octopus-jwt-secret-default".to_string())),
-            log_sender:            {
-                let (tx, rx) = mpsc::channel(2048);
-                crate::op::log::start_log_worker(db.clone(), rx);
-                tx
-            },
+            log_sender:            tx,
+            log_shutdown,
         };
 
         state.refresh_all_caches().await?;
@@ -99,5 +107,13 @@ impl AppState {
         llm::refresh_llm_cache(self).await?;
         stats::refresh_stats_cache(self).await?;
         Ok(())
+    }
+
+    pub async fn flush_and_stop_log_worker(&self) {
+        let shutdown = self.log_shutdown.lock().take();
+        if let Some(s) = shutdown {
+            let _ = s.shutdown_tx.send(());
+            let _ = s.join_handle.await;
+        }
     }
 }

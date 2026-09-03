@@ -17,7 +17,11 @@ pub fn get_log_retention_days(state: &AppState) -> i64 {
 }
 
 /// Worker that receives request logs from a bounded channel and batches writes to SQLite.
-pub fn start_log_worker(db: crate::db::DbPool, mut rx: tokio::sync::mpsc::Receiver<RequestLog>) {
+pub fn start_log_worker(
+    db: crate::db::DbPool,
+    mut rx: tokio::sync::mpsc::Receiver<RequestLog>,
+    mut shutdown_rx: tokio::sync::oneshot::Receiver<()>,
+) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let mut batch = Vec::with_capacity(64);
         let mut interval = tokio::time::interval(std::time::Duration::from_millis(200));
@@ -25,6 +29,9 @@ pub fn start_log_worker(db: crate::db::DbPool, mut rx: tokio::sync::mpsc::Receiv
         loop {
             tokio::select! {
                 biased;
+                _ = &mut shutdown_rx => {
+                    break;
+                }
                 Some(log) = rx.recv() => {
                     batch.push(log);
                     if batch.len() >= 64 {
@@ -39,10 +46,19 @@ pub fn start_log_worker(db: crate::db::DbPool, mut rx: tokio::sync::mpsc::Receiv
                 else => break,
             }
         }
+
+        // Drain any remaining logs queued in rx before shutdown completes
+        while let Ok(log) = rx.try_recv() {
+            batch.push(log);
+            if batch.len() >= 64 {
+                flush_log_batch(&db, &mut batch).await;
+            }
+        }
+
         if !batch.is_empty() {
             flush_log_batch(&db, &mut batch).await;
         }
-    });
+    })
 }
 
 async fn flush_log_batch(db: &crate::db::DbPool, batch: &mut Vec<RequestLog>) {
