@@ -125,3 +125,76 @@ pub async fn cleanup_ghosts(state: &AppState) -> Result<()> {
     refresh_llm_cache(state).await?;
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use super::*;
+    use crate::db::init_db;
+
+    async fn setup_test_state() -> (AppState, PathBuf) {
+        let rnd = nanoid::nanoid!(12);
+        let db_path = std::env::temp_dir().join(format!("octopus_llm_test_{}.db", rnd));
+        let pool = init_db(&db_path).await.unwrap();
+        let state = AppState::init(pool).await.unwrap();
+        (state, db_path)
+    }
+
+    #[tokio::test]
+    async fn test_cleanup_ghosts_removes_ghosts_from_db_and_cache() {
+        let (state, db_path) = setup_test_state().await;
+
+        // Insert a valid model price and a ghost model price
+        let infos = vec![
+            LLMInfo {
+                name:  "valid-model".to_string(),
+                price: LLMPrice {
+                    input: 1.0,
+                    output: 2.0,
+                    ..Default::default()
+                },
+            },
+            LLMInfo {
+                name:  "ghost-model".to_string(),
+                price: LLMPrice {
+                    input: 3.0,
+                    output: 4.0,
+                    ..Default::default()
+                },
+            },
+        ];
+        batch_create_llm_infos(&state, infos).await.unwrap();
+        assert!(state.llm_prices.contains_key("ghost-model"));
+        assert!(state.llm_prices.contains_key("valid-model"));
+
+        // Simulate a channel model pointing to "valid-model"
+        let ch_res = sqlx::query(
+            "INSERT INTO channels (name, type, base_url, key) VALUES ('c1', 'openai', 'https://api.openai.com', 'k1')",
+        )
+        .execute(&state.db)
+        .await
+        .unwrap();
+        let ch_id = ch_res.last_insert_rowid();
+        sqlx::query("INSERT INTO channel_models (channel_id, name, source) VALUES (?, 'valid-model', 'manual')")
+            .bind(ch_id)
+            .execute(&state.db)
+            .await
+            .unwrap();
+
+        // Clean up ghosts
+        cleanup_ghosts(&state).await.unwrap();
+
+        // Ghost should be deleted from DB and in-memory cache
+        assert!(!state.llm_prices.contains_key("ghost-model"));
+        assert!(state.llm_prices.contains_key("valid-model"));
+
+        let count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM llm_infos WHERE name = 'ghost-model'")
+            .fetch_one(&state.db)
+            .await
+            .unwrap();
+        assert_eq!(count.0, 0);
+
+        let _ = std::fs::remove_file(db_path);
+    }
+}
