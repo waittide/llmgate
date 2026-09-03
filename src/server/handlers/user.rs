@@ -9,14 +9,12 @@ use crate::{
 use axum::{
     extract::State,
     http::StatusCode,
-    response::{IntoResponse, Response},
+    response::Response,
     Json,
 };
-use axum_extra::extract::cookie::{Cookie, CookieJar, SameSite};
 
 pub async fn login(
     State(state): State<AppState>,
-    jar: CookieJar,
     Json(payload): Json<UserLogin>,
 ) -> Response {
     match user::verify_user(&state, &payload.username, &payload.password).await {
@@ -24,15 +22,11 @@ pub async fn login(
             let secret = state.jwt_secret.read().clone();
             match generate_jwt(&payload.username, &secret, payload.expire) {
                 Ok((token, max_age)) => {
-                    let cookie = Cookie::build(("auth", token))
-                        .path("/")
-                        .http_only(true)
-                        .same_site(SameSite::Lax)
-                        .max_age(time::Duration::seconds(max_age as i64))
-                        .build();
-
-                    let updated_jar = jar.add(cookie);
-                    (updated_jar, success_msg("login successfully")).into_response()
+                    let data = serde_json::json!({
+                        "token": token,
+                        "max_age": max_age,
+                    });
+                    crate::server::resp::success(data)
                 }
                 Err(e) => error(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
             }
@@ -70,28 +64,25 @@ mod tests {
     use super::*;
     use crate::db::init_db;
     use axum::http::header;
-
     #[tokio::test]
     async fn test_login_headers() {
-        let rnd: u64 = rand::random();
+        let rnd = nanoid::nanoid!(12);
         let db_path = std::env::temp_dir().join(format!("octopus_login_test_{}.db", rnd));
         let pool = init_db(&db_path).await.unwrap();
         let state = AppState::init(pool).await.unwrap();
 
-        let jar = CookieJar::new();
         let payload = Json(UserLogin {
             username: "admin".to_string(),
             password: "admin".to_string(),
             expire: 3600,
         });
 
-        let resp = login(State(state), jar, payload).await;
+        let resp = login(State(state), payload).await;
         assert_eq!(resp.status(), StatusCode::OK);
         assert!(resp.headers().contains_key(header::CONTENT_TYPE), "Content-Type must be present");
         assert_eq!(
             resp.headers().get(header::CONTENT_TYPE).unwrap(),
             "application/json"
         );
-        assert!(resp.headers().contains_key(header::SET_COOKIE), "Set-Cookie must be present");
     }
 }

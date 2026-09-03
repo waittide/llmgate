@@ -29,7 +29,12 @@ export class ApiError extends Error {
 
 export const apiUnauthorizedEvent = 'api:unauthorized';
 
+let authToken: string | null = null;
 let apiKey: string | null = null;
+
+export function setAuthToken(value: string | null) {
+    authToken = value;
+}
 
 export function setAPIKey(value: string | null) {
     apiKey = value;
@@ -37,7 +42,8 @@ export function setAPIKey(value: string | null) {
 
 export async function apiRequest<T>(path: string, options: RequestOptions = {}): Promise<T> {
     const headers = new Headers(options.body === undefined ? undefined : { 'Content-Type': 'application/json' });
-    if (apiKey) headers.set('Authorization', `Bearer ${apiKey}`);
+    const bearer = apiKey || authToken;
+    if (bearer) headers.set('Authorization', `Bearer ${bearer}`);
 
     const response = await fetch(path, {
         method: options.method ?? 'GET',

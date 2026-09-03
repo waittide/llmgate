@@ -2,7 +2,7 @@ import { useEffect } from 'react';
 import { useMutation } from '@tanstack/react-query';
 import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
-import { apiRequest, apiUnauthorizedEvent, setAPIKey } from './client';
+import { apiRequest, apiUnauthorizedEvent, setAPIKey, setAuthToken } from './client';
 
 /**
  * 用户登录请求
@@ -23,7 +23,7 @@ interface AuthState {
     token: string | null;
 
     // Actions
-    setAuth: () => void;
+    setAuth: (jwtToken: string) => void;
     setAPIKeyAuth: (apiKey: string) => void;
     checkAuth: () => Promise<void>;
     logout: () => void;
@@ -40,18 +40,20 @@ export const useAuthStore = create<AuthState>()(
             isAPIKeyAuth: false,
             token: null,
 
-            setAuth: () => {
+            setAuth: (jwtToken: string) => {
                 setAPIKey(null);
+                setAuthToken(jwtToken);
                 set({
                     isAuthenticated: true,
                     isAPIKeyAuth: false,
-                    token: null,
+                    token: jwtToken,
                     isLoading: false
                 });
             },
 
             setAPIKeyAuth: (apiKey: string) => {
                 setAPIKey(apiKey);
+                setAuthToken(null);
                 set({
                     isAuthenticated: true,
                     isAPIKeyAuth: true,
@@ -62,9 +64,15 @@ export const useAuthStore = create<AuthState>()(
 
             checkAuth: async () => {
                 const { token, isAPIKeyAuth } = get();
-                setAPIKey(isAPIKeyAuth ? token : null);
+                if (isAPIKeyAuth) {
+                    setAPIKey(token);
+                    setAuthToken(null);
+                } else {
+                    setAPIKey(null);
+                    setAuthToken(token);
+                }
 
-                if (isAPIKeyAuth && !token) {
+                if (!token) {
                     set({ isAuthenticated: false, isLoading: false });
                     return;
                 }
@@ -75,7 +83,7 @@ export const useAuthStore = create<AuthState>()(
                     set({
                         isAuthenticated: true,
                         isLoading: false,
-                        token: isAPIKeyAuth ? token : null
+                        token
                     });
                 } catch {
                     get().logout();
@@ -84,15 +92,13 @@ export const useAuthStore = create<AuthState>()(
 
             logout: () => {
                 setAPIKey(null);
+                setAuthToken(null);
                 set({
                     isAuthenticated: false,
                     isAPIKeyAuth: false,
                     token: null,
                     isLoading: false
                 });
-                if (typeof document !== 'undefined') {
-                    document.cookie = 'auth=; Max-Age=0; Path=/; SameSite=Lax';
-                }
             }
         }),
         {
@@ -121,14 +127,17 @@ export function useLogin() {
     return useMutation({
         mutationFn: async (data: UserLoginRequest) => {
             setAPIKey(null);
-            return apiRequest<string>('/api/v1/user/login', {
+            setAuthToken(null);
+            return apiRequest<{ token: string; max_age: number }>('/api/v1/user/login', {
                 method: 'POST',
                 body: data,
                 dispatchUnauthorized: false,
             });
         },
-        onSuccess: () => {
-            setAuth();
+        onSuccess: (res) => {
+            if (res?.token) {
+                setAuth(res.token);
+            }
         },
     });
 }

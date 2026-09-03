@@ -9,7 +9,6 @@ use axum::{
     middleware::Next,
     response::Response,
 };
-use axum_extra::extract::cookie::CookieJar;
 use std::sync::Arc;
 
 #[derive(Clone, Debug)]
@@ -21,14 +20,12 @@ pub struct AuthContext {
 
 pub async fn admin_auth_middleware(
     State(state): State<AppState>,
-    jar: CookieJar,
     mut req: Request,
     next: Next,
 ) -> Response {
-    let mut token_opt = jar.get("auth").map(|c| c.value().to_string());
+    let mut token_opt = None;
 
-    if token_opt.is_none()
-        && let Some(auth_header) = req.headers().get(header::AUTHORIZATION)
+    if let Some(auth_header) = req.headers().get(header::AUTHORIZATION)
         && let Ok(auth_str) = auth_header.to_str()
         && let Some(stripped) = auth_str.strip_prefix("Bearer ")
     {
