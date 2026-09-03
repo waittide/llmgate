@@ -45,8 +45,37 @@ pub fn rewrite_request_body_in_json(body: &[u8], new_model: &str, param_override
     body.to_vec()
 }
 
+/// Converts a Responses API function tool into Chat Completions' nested shape.
+fn convert_responses_tool_to_chat(tool: &Value) -> Option<Value> {
+    let tool_type = tool.get("type").and_then(Value::as_str).unwrap_or("function");
+    if tool_type != "function" {
+        return None;
+    }
+
+    if tool.pointer("/function/name").is_some() {
+        return Some(tool.clone());
+    }
+
+    let name = tool.get("name").and_then(Value::as_str)?;
+    let mut function = serde_json::Map::new();
+    function.insert("name".to_string(), Value::String(name.to_string()));
+    if let Some(description) = tool.get("description") {
+        function.insert("description".to_string(), description.clone());
+    }
+    function.insert(
+        "parameters".to_string(),
+        tool.get("parameters")
+            .cloned()
+            .unwrap_or_else(|| serde_json::json!({ "type": "object", "properties": {} })),
+    );
+
+    Some(serde_json::json!({
+        "type": "function",
+        "function": function
+    }))
+}
+
 /// Converts an OpenAI Responses API payload (containing `input: [...]`)
-/// into an OpenAI Chat Completions payload (containing `messages: [...]`).
 pub fn convert_responses_to_chat_completions(val: &Value) -> Value {
     let mut obj = match val.as_object() {
         Some(o) => o.clone(),
@@ -55,6 +84,21 @@ pub fn convert_responses_to_chat_completions(val: &Value) -> Value {
 
     // Remove Responses API-only fields that cause 400 Bad Request on standard Chat Completions
     obj.remove("include");
+    if let Some(tools) = obj.get_mut("tools").and_then(Value::as_array_mut) {
+        *tools = tools
+            .iter()
+            .filter_map(convert_responses_tool_to_chat)
+            .collect();
+    }
+
+    if let Some(choice) = obj.get_mut("tool_choice")
+        && let Some(name) = choice.get("name").and_then(Value::as_str)
+    {
+        *choice = serde_json::json!({
+            "type": "function",
+            "function": { "name": name }
+        });
+    }
 
     if let Some(input) = obj.remove("input") {
         let mut messages = Vec::new();
@@ -956,6 +1000,18 @@ mod tests {
         let responses_req = serde_json::json!({
             "model": "deepseek-v4-flash",
             "include": ["reasoning.encrypted_content"],
+            "tools": [{
+                "type": "function",
+                "name": "read_file",
+                "description": "Read a file",
+                "parameters": {
+                    "type": "object",
+                    "properties": { "path": { "type": "string" } },
+                    "required": ["path"]
+                },
+                "strict": false
+            }],
+            "tool_choice": { "type": "function", "name": "read_file" },
             "input": [{
                 "role": "user",
                 "content": [{ "type": "input_text", "text": "Hello world" }]
@@ -968,6 +1024,10 @@ mod tests {
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].get("role").unwrap(), "user");
         assert_eq!(messages[0].get("content").unwrap(), "Hello world");
+        assert_eq!(chat.pointer("/tools/0/function/name").unwrap(), "read_file");
+        assert_eq!(chat.pointer("/tools/0/function/parameters/type").unwrap(), "object");
+        assert_eq!(chat.pointer("/tool_choice/function/name").unwrap(), "read_file");
+        assert!(chat.pointer("/tools/0/name").is_none());
     }
 
     #[test]
