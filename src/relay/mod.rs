@@ -77,7 +77,7 @@ struct StreamFinalizer<S> {
     price:            Option<LLMPrice>,
     prompt_tokens:    i64,
     buffer:           Vec<u8>,
-    output_chars:     usize,
+    output_bytes:     usize,
     usage:            Option<Usage>,
     start_time:       Instant,
     done:             bool,
@@ -104,19 +104,24 @@ fn sse_event_end(buf: &[u8]) -> Option<usize> {
 
 fn extract_usage_from_sse_buffer(buffer: &mut Vec<u8>, usage: &mut Option<Usage>) {
     while let Some(end) = sse_event_end(buffer) {
-        let event = buffer.drain(..end).collect::<Vec<u8>>();
-        let text = String::from_utf8_lossy(&event);
-        for line in text.lines() {
-            let data = line.strip_prefix("data:").unwrap_or(line).trim();
-            if data.is_empty() || data == "[DONE]" {
-                continue;
-            }
-            if let Ok(val) = serde_json::from_str::<serde_json::Value>(data)
-                && let Some(u) = extract_usage_from_json(&val)
-            {
-                *usage = Some(u);
+        let event_bytes = &buffer[..end];
+        // Fast path: skip string allocation and line parsing if the event doesn't contain "usage"
+        if event_bytes.windows(7).any(|w| w == b"\"usage\"") {
+            let text = String::from_utf8_lossy(event_bytes);
+            for line in text.lines() {
+                if let Some(data) = line.strip_prefix("data:") {
+                    let trimmed = data.trim();
+                    if !trimmed.is_empty() && trimmed != "[DONE]" {
+                        if let Ok(val) = serde_json::from_str::<serde_json::Value>(trimmed)
+                            && let Some(u) = extract_usage_from_json(&val)
+                        {
+                            *usage = Some(u);
+                        }
+                    }
+                }
             }
         }
+        buffer.drain(..end);
     }
     // Guard against malformed streams without event boundaries
     if buffer.len() > SSE_BUFFER_LIMIT {
@@ -148,7 +153,7 @@ impl<S> StreamFinalizer<S> {
         }
         self.done = true;
 
-        let est_completion = (self.output_chars as f64 / 3.0).ceil() as i64;
+        let est_completion = (self.output_bytes as f64 / 3.0).ceil() as i64;
         let (prompt_tokens, completion_tokens) = match &self.usage {
             Some(u) => (
                 if u.prompt_tokens > 0 {
@@ -270,7 +275,7 @@ where
         let this = self.as_mut().get_mut();
         match Pin::new(&mut this.inner).poll_next(cx) {
             Poll::Ready(Some(Ok(bytes))) => {
-                this.output_chars += bytes.iter().filter(|&&b| (b & 0xC0) != 0x80).count();
+                this.output_bytes += bytes.len();
                 this.buffer.extend_from_slice(&bytes);
                 this.extract_usage_from_sse();
                 if this.response_capture.len() < RESPONSE_CAPTURE_LIMIT {
@@ -469,7 +474,7 @@ fn handle_successful_stream(
         price: ctx.price_opt,
         prompt_tokens,
         buffer: Vec::new(),
-        output_chars: 0,
+        output_bytes: 0,
         usage: None,
         start_time: ctx.start_time,
         done: false,
