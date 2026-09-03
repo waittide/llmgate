@@ -32,6 +32,17 @@ pub async fn serve_static(uri: Uri) -> Response<Body> {
             response.body(Body::from(content.data)).unwrap()
         }
         None => {
+            // Do NOT fallback to SPA index.html for API routes or static asset paths
+            if uri.path().starts_with("/api/") || uri.path().starts_with("/v1/") || path.starts_with("assets/") {
+                return Response::builder()
+                    .status(StatusCode::NOT_FOUND)
+                    .header(header::CONTENT_TYPE, HeaderValue::from_static("application/json"))
+                    .body(Body::from(
+                        r#"{"error":{"message":"Not Found","type":"invalid_request_error","code":404}}"#,
+                    ))
+                    .unwrap_or_default();
+            }
+
             // SPA Fallback: serve index.html for any frontend client-side route
             if let Some(index_content) = Asset::get("index.html") {
                 Response::builder()
@@ -71,5 +82,32 @@ fn guess_mime_type(path: &str) -> &'static str {
         "ttf" => "font/ttf",
         "wasm" => "application/wasm",
         _ => "application/octet-stream",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_serve_static_api_routes_return_404_json() {
+        let res = serve_static("/v1/chat/invalid_route".parse().unwrap()).await;
+        assert_eq!(res.status(), StatusCode::NOT_FOUND);
+        assert_eq!(res.headers().get(header::CONTENT_TYPE).unwrap(), "application/json");
+        let bytes = axum::body::to_bytes(res.into_body(), 1024).await.unwrap();
+        assert!(String::from_utf8_lossy(&bytes).contains("Not Found"));
+        let res_api = serve_static("/api/v1/unknown".parse().unwrap()).await;
+        assert_eq!(res_api.status(), StatusCode::NOT_FOUND);
+        assert_eq!(res_api.headers().get(header::CONTENT_TYPE).unwrap(), "application/json");
+    }
+
+    #[tokio::test]
+    async fn test_serve_static_spa_route_returns_html() {
+        let res = serve_static("/dashboard/channels".parse().unwrap()).await;
+        assert_eq!(res.status(), StatusCode::OK);
+        assert_eq!(
+            res.headers().get(header::CONTENT_TYPE).unwrap(),
+            "text/html; charset=utf-8"
+        );
     }
 }
