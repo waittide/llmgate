@@ -1,4 +1,5 @@
 pub mod protocol;
+pub mod anthropic_stream;
 pub mod route;
 pub mod state;
 pub mod stream;
@@ -24,6 +25,7 @@ use crate::{
     model::{Channel, ChannelModel, ChannelProvider, Group, LLMPrice, RequestLog, StatsMetrics},
     op::{AppState, channel, group, llm, log, stats},
     relay::{
+        anthropic_stream::{OpenaiStreamFormat, OpenaiToAnthropicStream},
         protocol::{
             ApiFormat, calculate_cost, extract_usage_from_json, parse_request_metadata, rewrite_request_body_in_json,
         },
@@ -640,7 +642,16 @@ fn handle_successful_stream(
         .boxed(),
         _ => mapped_stream.boxed(),
     };
-    let output_stream = if ctx.format == ApiFormat::OpenAIResponse
+    let output_stream = if ctx.format == ApiFormat::AnthropicMessage
+        && ctx.channel.channel_type != ChannelProvider::Anthropic
+    {
+        let source_format = if ctx.channel.channel_type == ChannelProvider::OpenaiResponses {
+            OpenaiStreamFormat::Responses
+        } else {
+            OpenaiStreamFormat::ChatCompletions
+        };
+        OpenaiToAnthropicStream::new(output_stream, ctx.model.to_string(), source_format).boxed()
+    } else if ctx.format == ApiFormat::OpenAIResponse
         && ctx.channel.channel_type != ChannelProvider::OpenaiResponses
     {
         ChatCompletionsToResponsesStream::new(output_stream, ctx.model.to_string()).boxed()
@@ -699,7 +710,18 @@ async fn handle_successful_json(
         }
         _ => None,
     });
-    let converted = if ctx.format == ApiFormat::OpenAIResponse
+    let converted = if ctx.format == ApiFormat::AnthropicMessage
+        && ctx.channel.channel_type != ChannelProvider::Anthropic
+    {
+        parsed.as_ref().map(|val| {
+            if ctx.channel.channel_type == ChannelProvider::OpenaiResponses {
+                protocol::convert_responses_to_anthropic_response(val, ctx.model)
+            } else {
+                let chat = converted_to_chat.as_ref().unwrap_or(val);
+                protocol::convert_openai_chat_to_anthropic_response(chat, ctx.model)
+            }
+        })
+    } else if ctx.format == ApiFormat::OpenAIResponse
         && ctx.channel.channel_type != ChannelProvider::OpenaiResponses
     {
         converted_to_chat

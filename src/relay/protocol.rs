@@ -220,6 +220,104 @@ pub fn convert_openai_chat_to_responses_response(val: &Value, model_name: &str) 
     })
 }
 
+fn anthropic_stop_reason(reason: Option<&str>) -> &str {
+    match reason {
+        Some("length") => "max_tokens",
+        Some("tool_calls") => "tool_use",
+        _ => "end_turn",
+    }
+}
+
+/// Converts a non-streaming Chat Completion response into an Anthropic Message response.
+pub fn convert_openai_chat_to_anthropic_response(val: &Value, model_name: &str) -> Value {
+    let choice = val.pointer("/choices/0");
+    let message = choice.and_then(|choice| choice.get("message"));
+    let mut content = Vec::new();
+    if let Some(text) = message
+        .and_then(|message| message.get("content"))
+        .and_then(Value::as_str)
+        .filter(|text| !text.is_empty())
+    {
+        content.push(serde_json::json!({ "type": "text", "text": text }));
+    }
+    if let Some(tool_calls) = message
+        .and_then(|message| message.get("tool_calls"))
+        .and_then(Value::as_array)
+    {
+        for call in tool_calls {
+            let arguments = call
+                .pointer("/function/arguments")
+                .and_then(Value::as_str)
+                .and_then(|arguments| serde_json::from_str::<Value>(arguments).ok())
+                .unwrap_or_else(|| serde_json::json!({}));
+            content.push(serde_json::json!({
+                "type": "tool_use",
+                "id": call.get("id").cloned().unwrap_or(Value::String(format!("toolu_{}", nanoid::nanoid!(20)))),
+                "name": call.pointer("/function/name").cloned().unwrap_or(Value::String(String::new())),
+                "input": arguments
+            }));
+        }
+    }
+    let input_tokens = val.pointer("/usage/prompt_tokens").and_then(Value::as_i64).unwrap_or(0);
+    let output_tokens = val.pointer("/usage/completion_tokens").and_then(Value::as_i64).unwrap_or(0);
+    serde_json::json!({
+        "id": format!("msg_{}", nanoid::nanoid!(24)),
+        "type": "message",
+        "role": "assistant",
+        "model": model_name,
+        "content": content,
+        "stop_reason": anthropic_stop_reason(choice.and_then(|choice| choice.get("finish_reason")).and_then(Value::as_str)),
+        "stop_sequence": null,
+        "usage": { "input_tokens": input_tokens, "output_tokens": output_tokens }
+    })
+}
+
+/// Converts a non-streaming Responses response into an Anthropic Message response.
+pub fn convert_responses_to_anthropic_response(val: &Value, model_name: &str) -> Value {
+    let mut content = Vec::new();
+    if let Some(output) = val.get("output").and_then(Value::as_array) {
+        for item in output {
+            match item.get("type").and_then(Value::as_str) {
+                Some("message") => {
+                    if let Some(parts) = item.get("content").and_then(Value::as_array) {
+                        for part in parts {
+                            if let Some(text) = part.get("text").and_then(Value::as_str) {
+                                content.push(serde_json::json!({ "type": "text", "text": text }));
+                            }
+                        }
+                    }
+                }
+                Some("function_call") => {
+                    let input = item
+                        .get("arguments")
+                        .and_then(Value::as_str)
+                        .and_then(|arguments| serde_json::from_str::<Value>(arguments).ok())
+                        .unwrap_or_else(|| serde_json::json!({}));
+                    content.push(serde_json::json!({
+                        "type": "tool_use",
+                        "id": item.get("call_id").cloned().or_else(|| item.get("id").cloned()).unwrap_or(Value::String(format!("toolu_{}", nanoid::nanoid!(20)))),
+                        "name": item.get("name").cloned().unwrap_or(Value::String(String::new())),
+                        "input": input
+                    }));
+                }
+                _ => {}
+            }
+        }
+    }
+    let input_tokens = val.pointer("/usage/input_tokens").and_then(Value::as_i64).unwrap_or(0);
+    let output_tokens = val.pointer("/usage/output_tokens").and_then(Value::as_i64).unwrap_or(0);
+    serde_json::json!({
+        "id": format!("msg_{}", nanoid::nanoid!(24)),
+        "type": "message",
+        "role": "assistant",
+        "model": model_name,
+        "content": content,
+        "stop_reason": if content.iter().any(|item| item.get("type").and_then(Value::as_str) == Some("tool_use")) { "tool_use" } else { "end_turn" },
+        "stop_sequence": null,
+        "usage": { "input_tokens": input_tokens, "output_tokens": output_tokens }
+    })
+}
+
 /// Converts an Anthropic Messages request into an OpenAI Chat Completions request.
 pub fn convert_anthropic_to_openai_chat_request(val: &Value) -> Value {
     let mut obj = match val.as_object() {
@@ -1348,6 +1446,7 @@ mod tests {
             }]
         });
 
+
         let chat = convert_responses_to_chat_completions(&responses_req);
         assert!(chat.get("include").is_none());
         let messages = chat.get("messages").unwrap().as_array().unwrap();
@@ -1446,4 +1545,16 @@ mod tests {
         assert_eq!(response.pointer("/output/0/content/0/text").unwrap(), "Hello");
         assert_eq!(response.pointer("/usage/total_tokens").unwrap(), 3);
     }
+    #[test]
+    fn test_convert_openai_chat_to_anthropic_response() {
+        let chat = serde_json::json!({
+            "choices": [{ "message": { "content": "Hello" }, "finish_reason": "stop" }],
+            "usage": { "prompt_tokens": 2, "completion_tokens": 1 }
+        });
+        let response = convert_openai_chat_to_anthropic_response(&chat, "test-model");
+        assert_eq!(response.get("type").unwrap(), "message");
+        assert_eq!(response.pointer("/content/0/text").unwrap(), "Hello");
+        assert_eq!(response.get("stop_reason").unwrap(), "end_turn");
+    }
+
 }
