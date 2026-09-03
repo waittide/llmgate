@@ -49,7 +49,7 @@ pub struct RequestStateInternal {
 
 pub struct RequestStateManager {
     counter:    AtomicU64,
-    requests:   DashMap<u64, Arc<RwLock<RequestStateInternal>>>,
+    requests:   DashMap<u64, RequestStateInternal>,
     recent_ids: Arc<RwLock<VecDeque<u64>>>,
     tx:         broadcast::Sender<RequestOverview>,
 }
@@ -72,7 +72,7 @@ impl RequestStateManager {
     pub fn get_recent_overviews(&self) -> Vec<RequestOverview> {
         let ids: Vec<u64> = self.recent_ids.read().iter().copied().collect();
         ids.into_iter()
-            .filter_map(|id| self.requests.get(&id).map(|r| r.read().overview.clone()))
+            .filter_map(|id| self.requests.get(&id).map(|r| r.overview.clone()))
             .collect()
     }
 
@@ -95,12 +95,12 @@ impl RequestStateManager {
             rounds: Vec::new(),
         };
 
-        let internal = Arc::new(RwLock::new(RequestStateInternal {
+        let internal = RequestStateInternal {
             overview:        overview.clone(),
             request_body:    body,
             response_body:   String::new(),
             started_instant: std::time::Instant::now(),
-        }));
+        };
 
         self.requests.insert(id, internal);
         {
@@ -114,7 +114,7 @@ impl RequestStateManager {
                     .requests
                     .get(&dropped_id)
                     .map(|r| {
-                        let s = &r.read().overview.status;
+                        let s = &r.overview.status;
                         s == "running" || s == "committed"
                     })
                     .unwrap_or(false);
@@ -129,8 +129,7 @@ impl RequestStateManager {
     }
 
     pub fn update_round(&self, id: u64, round: i64, target_channel: String, target_model: String, sending: bool) {
-        if let Some(req) = self.requests.get(&id) {
-            let mut lock = req.write();
+        if let Some(mut lock) = self.requests.get_mut(&id) {
             lock.overview.round = round;
             lock.overview.target_channel = target_channel;
             lock.overview.target_model = target_model;
@@ -141,8 +140,7 @@ impl RequestStateManager {
     }
 
     pub fn update_round_error(&self, id: u64, round: i64, target_channel: String, target_model: String, error: String) {
-        if let Some(req) = self.requests.get(&id) {
-            let mut lock = req.write();
+        if let Some(mut lock) = self.requests.get_mut(&id) {
             lock.overview.round = round;
             lock.overview.target_channel = target_channel;
             lock.overview.target_model = target_model;
@@ -153,8 +151,7 @@ impl RequestStateManager {
     }
 
     pub fn mark_committed(&self, id: u64) {
-        if let Some(req) = self.requests.get(&id) {
-            let mut lock = req.write();
+        if let Some(mut lock) = self.requests.get_mut(&id) {
             lock.overview.status = "committed".to_string();
             lock.overview.sending = true;
             let _ = self.tx.send(lock.overview.clone());
@@ -162,8 +159,7 @@ impl RequestStateManager {
     }
 
     pub fn record_round_attempt(&self, id: u64, round_log: crate::model::RoundLog) {
-        if let Some(req) = self.requests.get(&id) {
-            let mut lock = req.write();
+        if let Some(mut lock) = self.requests.get_mut(&id) {
             if let Some(pos) = lock
                 .overview
                 .rounds
@@ -189,8 +185,7 @@ impl RequestStateManager {
         error: Option<String>,
         rounds: Vec<crate::model::RoundLog>,
     ) {
-        let finished = self.requests.get(&id).is_some_and(|req| {
-            let mut lock = req.write();
+        let finished = self.requests.get_mut(&id).is_some_and(|mut lock| {
             lock.overview.duration = lock.started_instant.elapsed().as_millis() as i64;
             lock.overview.status = status.to_string();
             lock.overview.usage = usage;
@@ -216,13 +211,13 @@ impl RequestStateManager {
     pub fn get_request_body(&self, id: u64) -> Option<String> {
         self.requests
             .get(&id)
-            .map(|r| r.read().request_body.clone())
+            .map(|r| r.request_body.clone())
     }
 
     pub fn get_response_body(&self, id: u64) -> Option<String> {
         self.requests
             .get(&id)
-            .map(|r| r.read().response_body.clone())
+            .map(|r| r.response_body.clone())
     }
 
     pub fn clear(&self) {
@@ -233,7 +228,7 @@ impl RequestStateManager {
             .requests
             .iter()
             .filter(|entry| {
-                let s = &entry.value().read().overview.status;
+                let s = &entry.value().overview.status;
                 s == "running" || s == "committed"
             })
             .map(|entry| *entry.key())

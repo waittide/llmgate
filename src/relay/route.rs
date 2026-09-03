@@ -1,7 +1,6 @@
-use std::{collections::HashMap, sync::Arc};
+use std::collections::HashMap;
 
 use dashmap::DashMap;
-use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast;
 
@@ -18,7 +17,7 @@ pub struct RouteState {
 }
 
 pub struct RouteManager {
-    routes: DashMap<i64, Arc<Mutex<RouteState>>>,
+    routes: DashMap<i64, RouteState>,
     tx:     broadcast::Sender<RouteState>,
 }
 
@@ -38,24 +37,18 @@ impl RouteManager {
     pub fn get_snapshot(&self) -> Vec<RouteState> {
         self.routes
             .iter()
-            .map(|entry| entry.value().lock().clone())
+            .map(|entry| entry.value().clone())
             .collect()
     }
 
-    fn get_or_create_route(&self, group_id: i64) -> Arc<Mutex<RouteState>> {
-        self.routes
-            .entry(group_id)
-            .or_insert_with(|| {
-                Arc::new(Mutex::new(RouteState {
-                    group_id,
-                    current_item_id: 0,
-                    affinity_until: 0,
-                    cooldowns: HashMap::new(),
-                    affinity_armed: false,
-                }))
-            })
-            .value()
-            .clone()
+    fn get_or_create_route_entry<'a>(&'a self, group_id: i64) -> dashmap::mapref::one::RefMut<'a, i64, RouteState> {
+        self.routes.entry(group_id).or_insert_with(|| RouteState {
+            group_id,
+            current_item_id: 0,
+            affinity_until: 0,
+            cooldowns: HashMap::new(),
+            affinity_armed: false,
+        })
     }
 
     pub fn pick_group_item(&self, group: &Group) -> Option<GroupItem> {
@@ -67,8 +60,8 @@ impl RouteManager {
                 .cloned();
         }
 
-        let route_arc = self.get_or_create_route(group.id);
-        let mut route = route_arc.lock();
+        let mut entry = self.get_or_create_route_entry(group.id);
+        let route = entry.value_mut();
         let now = chrono::Utc::now().timestamp_millis();
 
         if route.affinity_until <= now {
@@ -94,7 +87,7 @@ impl RouteManager {
             if route.current_item_id != item.id {
                 route.current_item_id = item.id;
                 route.affinity_armed = true;
-                self.notify_change(&route);
+                self.notify_change(route);
             }
             return Some(item.clone());
         }
@@ -108,7 +101,7 @@ impl RouteManager {
             if route.current_item_id != item.id {
                 route.current_item_id = item.id;
                 route.affinity_armed = true;
-                self.notify_change(&route);
+                self.notify_change(route);
             }
             return Some(item.clone());
         }
@@ -117,20 +110,20 @@ impl RouteManager {
     }
 
     pub fn report_success(&self, group_id: i64, item_id: i64, affinity_seconds: i64) {
-        let route_arc = self.get_or_create_route(group_id);
-        let mut route = route_arc.lock();
+        let mut entry = self.get_or_create_route_entry(group_id);
+        let route = entry.value_mut();
         route.cooldowns.remove(&item_id);
 
         if route.affinity_armed && affinity_seconds > 0 {
             route.affinity_until = chrono::Utc::now().timestamp_millis() + affinity_seconds * 1000;
             route.affinity_armed = false;
         }
-        self.notify_change(&route);
+        self.notify_change(route);
     }
 
     pub fn report_failure(&self, group_id: i64, item_id: i64, cooldown_seconds: i64) {
-        let route_arc = self.get_or_create_route(group_id);
-        let mut route = route_arc.lock();
+        let mut entry = self.get_or_create_route_entry(group_id);
+        let route = entry.value_mut();
         let now = chrono::Utc::now().timestamp_millis();
         route
             .cooldowns
@@ -141,7 +134,7 @@ impl RouteManager {
             route.affinity_until = 0;
             route.affinity_armed = false;
         }
-        self.notify_change(&route);
+        self.notify_change(route);
     }
 
     fn notify_change(&self, route: &RouteState) {
