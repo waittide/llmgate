@@ -302,29 +302,82 @@ fn prepare_upstream_payload(
     body_bytes: &Bytes,
     ch: &Channel,
     channel_model: &ChannelModel,
-) -> (&'static str, Vec<u8>) {
+) -> (String, Vec<u8>) {
     let rewritten_body =
         rewrite_request_body_in_json(body_bytes, &channel_model.name, ch.param_override.as_deref());
     match (format, &ch.channel_type) {
+        // Downstream Chat Completions -> Upstream Anthropic
         (ApiFormat::OpenaiCompletion, ChannelProvider::Anthropic) => {
             if let Ok(val) = serde_json::from_slice::<serde_json::Value>(&rewritten_body) {
                 let converted = protocol::convert_openai_to_anthropic(&val);
                 let bytes = serde_json::to_vec(&converted).unwrap_or(rewritten_body);
-                ("/messages", bytes)
+                ("/messages".to_string(), bytes)
             } else {
-                ("/chat/completions", rewritten_body)
+                ("/messages".to_string(), rewritten_body)
             }
         }
+        // Downstream Responses -> Upstream Anthropic
+        (ApiFormat::OpenAIResponse, ChannelProvider::Anthropic) => {
+            if let Ok(val) = serde_json::from_slice::<serde_json::Value>(&rewritten_body) {
+                let completions_val = protocol::convert_responses_to_chat_completions(&val);
+                let converted = protocol::convert_openai_to_anthropic(&completions_val);
+                let bytes = serde_json::to_vec(&converted).unwrap_or(rewritten_body);
+                ("/messages".to_string(), bytes)
+            } else {
+                ("/messages".to_string(), rewritten_body)
+            }
+        }
+        // Downstream Chat Completions -> Upstream Gemini
         (ApiFormat::OpenaiCompletion, ChannelProvider::Gemini) => {
             if let Ok(val) = serde_json::from_slice::<serde_json::Value>(&rewritten_body) {
                 let converted = protocol::convert_openai_to_gemini(&val);
                 let bytes = serde_json::to_vec(&converted).unwrap_or(rewritten_body);
-                (default_endpoint, bytes)
+                (default_endpoint.to_string(), bytes)
             } else {
-                (default_endpoint, rewritten_body)
+                (default_endpoint.to_string(), rewritten_body)
             }
         }
-        _ => (default_endpoint, rewritten_body),
+        // Downstream Responses -> Upstream Gemini
+        (ApiFormat::OpenAIResponse, ChannelProvider::Gemini) => {
+            if let Ok(val) = serde_json::from_slice::<serde_json::Value>(&rewritten_body) {
+                let completions_val = protocol::convert_responses_to_chat_completions(&val);
+                let converted = protocol::convert_openai_to_gemini(&completions_val);
+                let bytes = serde_json::to_vec(&converted).unwrap_or(rewritten_body);
+                (default_endpoint.to_string(), bytes)
+            } else {
+                (default_endpoint.to_string(), rewritten_body)
+            }
+        }
+        // Downstream Responses -> Upstream Chat Completions channel (e.g. DeepSeek, Synora)
+        (ApiFormat::OpenAIResponse, ChannelProvider::OpenaiCompletion) => {
+            if let Ok(val) = serde_json::from_slice::<serde_json::Value>(&rewritten_body) {
+                let converted = protocol::convert_responses_to_chat_completions(&val);
+                let bytes = serde_json::to_vec(&converted).unwrap_or(rewritten_body);
+                ("/chat/completions".to_string(), bytes)
+            } else {
+                ("/chat/completions".to_string(), rewritten_body)
+            }
+        }
+        // Downstream Chat Completions -> Upstream Responses channel (e.g. 帅api, MiniMax)
+        (ApiFormat::OpenaiCompletion, ChannelProvider::OpenaiResponses) => {
+            if let Ok(val) = serde_json::from_slice::<serde_json::Value>(&rewritten_body) {
+                let converted = protocol::convert_chat_completions_to_responses(&val);
+                let bytes = serde_json::to_vec(&converted).unwrap_or(rewritten_body);
+                ("/responses".to_string(), bytes)
+            } else {
+                ("/responses".to_string(), rewritten_body)
+            }
+        }
+        // Same-protocol or passthrough: always match channel's native endpoint
+        _ => {
+            let endpoint = match ch.channel_type {
+                ChannelProvider::Anthropic => "/messages",
+                ChannelProvider::OpenaiResponses => "/responses",
+                ChannelProvider::OpenaiCompletion => "/chat/completions",
+                ChannelProvider::Gemini => default_endpoint,
+            };
+            (endpoint.to_string(), rewritten_body)
+        }
     }
 }
 
@@ -804,7 +857,7 @@ pub async fn forward_relay(
         };
 
         let client = get_client();
-        let req_builder = match build_upstream_request(client, &ch, target_endpoint, Some(final_body), timeout_secs) {
+        let req_builder = match build_upstream_request(client, &ch, &target_endpoint, Some(final_body), timeout_secs) {
             Ok(rb) => rb,
             Err(e) => {
                 let err_msg = format!("Failed to build request for channel {}: {}", ch.name, e);

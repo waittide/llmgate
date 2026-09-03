@@ -44,6 +44,82 @@ pub fn rewrite_request_body_in_json(body: &[u8], new_model: &str, param_override
     }
     body.to_vec()
 }
+
+/// Converts an OpenAI Responses API payload (containing `input: [...]`)
+/// into an OpenAI Chat Completions payload (containing `messages: [...]`).
+pub fn convert_responses_to_chat_completions(val: &Value) -> Value {
+    let mut obj = match val.as_object() {
+        Some(o) => o.clone(),
+        None => return val.clone(),
+    };
+
+    // Remove Responses API-only fields that cause 400 Bad Request on standard Chat Completions
+    obj.remove("include");
+
+    if let Some(input) = obj.remove("input") {
+        let mut messages = Vec::new();
+        if let Some(items) = input.as_array() {
+            for item in items {
+                let role = item.get("role").and_then(|r| r.as_str()).unwrap_or("user");
+                let content_val = match item.get("content") {
+                    Some(Value::Array(parts)) => {
+                        let mut converted_parts = Vec::new();
+                        for part in parts {
+                            let ptype = part.get("type").and_then(|t| t.as_str()).unwrap_or("");
+                            if ptype == "input_text" || ptype == "text" {
+                                if let Some(text) = part.get("text") {
+                                    converted_parts.push(serde_json::json!({
+                                        "type": "text",
+                                        "text": text
+                                    }));
+                                }
+                            } else if ptype == "input_image" || ptype == "image_url" {
+                                if let Some(url) = part.get("image_url") {
+                                    converted_parts.push(serde_json::json!({
+                                        "type": "image_url",
+                                        "image_url": url
+                                    }));
+                                }
+                            } else {
+                                converted_parts.push(part.clone());
+                            }
+                        }
+                        if converted_parts.len() == 1 && converted_parts[0].get("type").and_then(|t| t.as_str()) == Some("text") {
+                            converted_parts[0].get("text").cloned().unwrap_or(Value::Array(converted_parts))
+                        } else {
+                            Value::Array(converted_parts)
+                        }
+                    }
+                    Some(other) => other.clone(),
+                    None => Value::String(String::new()),
+                };
+
+                messages.push(serde_json::json!({
+                    "role": role,
+                    "content": content_val
+                }));
+            }
+        }
+        obj.insert("messages".to_string(), Value::Array(messages));
+    }
+
+    Value::Object(obj)
+}
+
+/// Converts an OpenAI Chat Completions payload (containing `messages: [...]`)
+/// into an OpenAI Responses payload (containing `input: [...]`).
+pub fn convert_chat_completions_to_responses(val: &Value) -> Value {
+    let mut obj = match val.as_object() {
+        Some(o) => o.clone(),
+        None => return val.clone(),
+    };
+
+    if let Some(messages) = obj.remove("messages") {
+        obj.insert("input".to_string(), messages);
+    }
+
+    Value::Object(obj)
+}
 /// Extracts plain text from an OpenAI `content` value (string or content array).
 fn extract_text_content(content: &Value) -> String {
     match content {
@@ -770,5 +846,42 @@ mod tests {
         let parts = contents[0].get("parts").unwrap().as_array().unwrap();
         assert_eq!(parts[1].pointer("/inlineData/mimeType").unwrap(), "image/png");
         assert_eq!(parts[1].pointer("/inlineData/data").unwrap(), "iVBORw0KGgo=");
+    }
+
+    #[test]
+    fn test_convert_responses_to_chat_completions() {
+        let responses_req = serde_json::json!({
+            "model": "deepseek-v4-flash",
+            "include": ["reasoning.encrypted_content"],
+            "input": [{
+                "role": "user",
+                "content": [{ "type": "input_text", "text": "Hello world" }]
+            }]
+        });
+
+        let chat = convert_responses_to_chat_completions(&responses_req);
+        assert!(chat.get("include").is_none());
+        let messages = chat.get("messages").unwrap().as_array().unwrap();
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].get("role").unwrap(), "user");
+        assert_eq!(messages[0].get("content").unwrap(), "Hello world");
+    }
+
+    #[test]
+    fn test_convert_chat_completions_to_responses() {
+        let chat_req = serde_json::json!({
+            "model": "gpt-5.6-sol",
+            "messages": [{
+                "role": "user",
+                "content": "Hello world"
+            }]
+        });
+
+        let responses = convert_chat_completions_to_responses(&chat_req);
+        assert!(responses.get("messages").is_none());
+        let input = responses.get("input").unwrap().as_array().unwrap();
+        assert_eq!(input.len(), 1);
+        assert_eq!(input[0].get("role").unwrap(), "user");
+        assert_eq!(input[0].get("content").unwrap(), "Hello world");
     }
 }
