@@ -146,7 +146,11 @@ pub async fn create_channel(state: &AppState, channel: &mut Channel) -> Result<(
     let channel_id = result.last_insert_rowid();
     channel.id = channel_id;
 
+    let mut seen_models = std::collections::HashSet::new();
     for model in &mut channel.models {
+        if !seen_models.insert(model.name.clone()) {
+            continue;
+        }
         model.channel_id = channel_id;
         let m_res = sqlx::query("INSERT INTO channel_models (channel_id, name, source) VALUES (?, ?, ?)")
             .bind(channel_id)
@@ -207,8 +211,12 @@ pub async fn update_channel(state: &AppState, req: &ChannelUpdateRequest) -> Res
                 .await?;
 
         let mut req_model_names = std::collections::HashSet::new();
+        let mut seen = std::collections::HashSet::new();
 
         for model in models {
+            if !seen.insert(&model.name) {
+                continue;
+            }
             req_model_names.insert(&model.name);
             if let Some((existing_id, _)) = existing_models.iter().find(|(_, name)| name == &model.name) {
                 sqlx::query("UPDATE channel_models SET source = ? WHERE id = ?")
@@ -371,5 +379,65 @@ mod tests {
             count.0, 0,
             "Channel models must be cascade deleted when channel is deleted"
         );
+    }
+
+    #[tokio::test]
+    async fn test_channel_models_duplicate_names_handled_gracefully() {
+        let (state, _path) = setup_test_state().await;
+
+        let mut ch = Channel {
+            name: "test-dedup-channel".to_string(),
+            channel_type: ChannelProvider::OpenaiCompletion,
+            enabled: true,
+            base_url: "https://api.openai.com".to_string(),
+            key: "sk-test".to_string(),
+            models: vec![
+                ChannelModel {
+                    name: "gpt-4o".to_string(),
+                    source: ChannelModelSource::Manual,
+                    ..Default::default()
+                },
+                ChannelModel {
+                    name: "gpt-4o".to_string(), // Duplicate in create
+                    source: ChannelModelSource::Auto,
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+
+        // Creating channel with duplicate models must not fail with UNIQUE constraint
+        create_channel(&state, &mut ch).await.unwrap();
+        let initial = get_channel(&state, ch.id).unwrap();
+        assert_eq!(initial.models.len(), 1);
+
+        // Updating channel with duplicate models in update payload must also not fail
+        let update_req = ChannelUpdateRequest {
+            id:             ch.id,
+            name:           None,
+            channel_type:   None,
+            enabled:        None,
+            base_url:       None,
+            key:            None,
+            models:         Some(vec![
+                ChannelModel {
+                    name: "gpt-4o-mini".to_string(),
+                    source: ChannelModelSource::Manual,
+                    ..Default::default()
+                },
+                ChannelModel {
+                    name: "gpt-4o-mini".to_string(), // Duplicate in update
+                    source: ChannelModelSource::Auto,
+                    ..Default::default()
+                },
+            ]),
+            auto_sync:      None,
+            custom_header:  None,
+            param_override: None,
+        };
+
+        let updated = update_channel(&state, &update_req).await.unwrap();
+        assert_eq!(updated.models.len(), 1);
+        assert_eq!(updated.models[0].name, "gpt-4o-mini");
     }
 }
