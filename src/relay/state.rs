@@ -5,6 +5,7 @@ use std::{
         atomic::{AtomicU64, Ordering},
     },
 };
+
 use dashmap::DashMap;
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
@@ -209,15 +210,11 @@ impl RequestStateManager {
     }
 
     pub fn get_request_body(&self, id: u64) -> Option<String> {
-        self.requests
-            .get(&id)
-            .map(|r| r.request_body.clone())
+        self.requests.get(&id).map(|r| r.request_body.clone())
     }
 
     pub fn get_response_body(&self, id: u64) -> Option<String> {
-        self.requests
-            .get(&id)
-            .map(|r| r.response_body.clone())
+        self.requests.get(&id).map(|r| r.response_body.clone())
     }
 
     pub fn clear(&self) {

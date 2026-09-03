@@ -1,5 +1,5 @@
-pub mod protocol;
 pub mod anthropic_stream;
+pub mod protocol;
 pub mod route;
 pub mod state;
 pub mod stream;
@@ -99,18 +99,31 @@ fn extract_usage_from_sse_buffer(buffer: &mut Vec<u8>, usage: &mut Option<Usage>
             for line in text.lines() {
                 if let Some(data) = line.strip_prefix("data:") {
                     let trimmed = data.trim();
-                    if !trimmed.is_empty() && trimmed != "[DONE]"
+                    if !trimmed.is_empty()
+                        && trimmed != "[DONE]"
                         && let Ok(val) = serde_json::from_str::<serde_json::Value>(trimmed)
-                            && let Some(u) = extract_usage_from_json(&val)
+                        && let Some(u) = extract_usage_from_json(&val)
                     {
                         // Merge across events (e.g. Anthropic message_start carries
                         // input_tokens while message_delta carries output_tokens).
                         // Keep any already-recorded non-zero counts.
                         let merged = match usage {
                             Some(existing) => Usage {
-                                prompt_tokens: if existing.prompt_tokens > 0 { existing.prompt_tokens } else { u.prompt_tokens },
-                                completion_tokens: if existing.completion_tokens > 0 { existing.completion_tokens } else { u.completion_tokens },
-                                total_tokens: if existing.total_tokens > 0 { existing.total_tokens } else { u.total_tokens },
+                                prompt_tokens:     if existing.prompt_tokens > 0 {
+                                    existing.prompt_tokens
+                                } else {
+                                    u.prompt_tokens
+                                },
+                                completion_tokens: if existing.completion_tokens > 0 {
+                                    existing.completion_tokens
+                                } else {
+                                    u.completion_tokens
+                                },
+                                total_tokens:      if existing.total_tokens > 0 {
+                                    existing.total_tokens
+                                } else {
+                                    u.total_tokens
+                                },
                             },
                             None => u,
                         };
@@ -127,17 +140,14 @@ fn extract_usage_from_sse_buffer(buffer: &mut Vec<u8>, usage: &mut Option<Usage>
     }
 }
 
-/// Determine if an upstream error indicates a client issue (invalid payload, bad auth on client key, model not found, etc.)
-/// Client errors should not penalize the upstream channel with cooldown/failover.
+/// Determine if an upstream error indicates a client-side syntax/format issue.
+///
+/// Authentication/authorization (401/403), missing model/endpoint on upstream (404),
+/// rate-limits/quota exhaustion (429), and server errors (5xx) are upstream channel issues.
+/// They must trigger channel cooldown and failover to other healthy channels.
+/// Only 400 Bad Request and 422 Unprocessable Entity are considered non-retryable client errors.
 fn is_client_error(status: StatusCode) -> bool {
-    matches!(
-        status,
-        StatusCode::BAD_REQUEST
-            | StatusCode::UNAUTHORIZED
-            | StatusCode::FORBIDDEN
-            | StatusCode::NOT_FOUND
-            | StatusCode::UNPROCESSABLE_ENTITY
-    )
+    matches!(status, StatusCode::BAD_REQUEST | StatusCode::UNPROCESSABLE_ENTITY)
 }
 
 impl<S> StreamFinalizer<S> {
@@ -294,11 +304,19 @@ fn validate_relay_request(
 ) -> Result<(protocol::ChatRequestMetadata, Group), Box<Response>> {
     let metadata = match parse_request_metadata(body_bytes) {
         Some(m) if !m.model.trim().is_empty() => m,
-        _ => return Err(Box::new(error(StatusCode::BAD_REQUEST, "Invalid request: missing model"))),
+        _ => {
+            return Err(Box::new(error(
+                StatusCode::BAD_REQUEST,
+                "Invalid request: missing model",
+            )));
+        }
     };
 
     if !auth_ctx.supported_models.is_empty() && !auth_ctx.supported_models.contains(&metadata.model) {
-        return Err(Box::new(error(StatusCode::UNAUTHORIZED, "model not supported by this api key")));
+        return Err(Box::new(error(
+            StatusCode::UNAUTHORIZED,
+            "model not supported by this api key",
+        )));
     }
 
     let group_obj = match group::get_group_by_name(state, &metadata.model) {
@@ -330,8 +348,7 @@ fn prepare_upstream_payload(
     ch: &Channel,
     channel_model: &ChannelModel,
 ) -> (String, Vec<u8>) {
-    let rewritten_body =
-        rewrite_request_body_in_json(body_bytes, &channel_model.name, ch.param_override.as_deref());
+    let rewritten_body = rewrite_request_body_in_json(body_bytes, &channel_model.name, ch.param_override.as_deref());
     match (format, &ch.channel_type) {
         // Downstream Chat Completions -> Upstream Anthropic
         (ApiFormat::OpenaiCompletion, ChannelProvider::Anthropic) => {
@@ -441,17 +458,17 @@ fn prepare_upstream_payload(
 }
 
 struct RoundFailure<'a> {
-    round: i64,
-    channel_name: &'a str,
-    model_name: &'a str,
-    target_req_url: &'a str,
+    round:               i64,
+    channel_name:        &'a str,
+    model_name:          &'a str,
+    target_req_url:      &'a str,
     channel_req_headers: &'a str,
-    rewritten_body_str: &'a str,
-    response_headers: &'a str,
-    status: u16,
-    duration_ms: i64,
-    err_body: &'a str,
-    should_cooldown: bool,
+    rewritten_body_str:  &'a str,
+    response_headers:    &'a str,
+    status:              u16,
+    duration_ms:         i64,
+    err_body:            &'a str,
+    should_cooldown:     bool,
 }
 
 fn record_round_failure(
@@ -464,24 +481,28 @@ fn record_round_failure(
     fail: RoundFailure<'_>,
 ) {
     let round_log = crate::model::RoundLog {
-        round: fail.round,
-        channel_name: fail.channel_name.to_string(),
-        model_name: fail.model_name.to_string(),
-        request_url: fail.target_req_url.to_string(),
-        request_headers: fail.channel_req_headers.to_string(),
-        request_body: fail.rewritten_body_str.to_string(),
-        response_url: fail.target_req_url.to_string(),
+        round:            fail.round,
+        channel_name:     fail.channel_name.to_string(),
+        model_name:       fail.model_name.to_string(),
+        request_url:      fail.target_req_url.to_string(),
+        request_headers:  fail.channel_req_headers.to_string(),
+        request_body:     fail.rewritten_body_str.to_string(),
+        response_url:     fail.target_req_url.to_string(),
         response_headers: fail.response_headers.to_string(),
-        response_body: fail.err_body.to_string(),
-        status: fail.status,
-        duration_ms: fail.duration_ms,
-        error: Some(fail.err_body.to_string()),
+        response_body:    fail.err_body.to_string(),
+        status:           fail.status,
+        duration_ms:      fail.duration_ms,
+        error:            Some(fail.err_body.to_string()),
     };
     rounds.push(round_log.clone());
-    state.request_state_manager.record_round_attempt(req_id, round_log);
+    state
+        .request_state_manager
+        .record_round_attempt(req_id, round_log);
 
     if fail.should_cooldown {
-        state.route_manager.report_failure(group_id, item_id, cooldown_seconds);
+        state
+            .route_manager
+            .report_failure(group_id, item_id, cooldown_seconds);
     } else {
         tracing::warn!(
             "Upstream returned client error {} from channel {}: {}, not triggering cooldown",
@@ -501,30 +522,26 @@ fn record_round_failure(
 }
 
 struct SuccessContext<'a> {
-    req_id: u64,
-    request_id: i64,
-    model: &'a str,
-    format: ApiFormat,
-    channel: &'a Channel,
-    channel_model: &'a ChannelModel,
-    api_key_id: i64,
-    target_req_url: &'a str,
+    req_id:              u64,
+    request_id:          i64,
+    model:               &'a str,
+    format:              ApiFormat,
+    channel:             &'a Channel,
+    channel_model:       &'a ChannelModel,
+    api_key_id:          i64,
+    target_req_url:      &'a str,
     channel_req_headers: &'a str,
-    rewritten_body_str: &'a str,
-    body_str: &'a str,
-    started_at: i64,
-    round: i64,
-    round_start_time: Instant,
-    start_time: Instant,
-    price_opt: Option<LLMPrice>,
-    rounds: Vec<crate::model::RoundLog>,
+    rewritten_body_str:  &'a str,
+    body_str:            &'a str,
+    started_at:          i64,
+    round:               i64,
+    round_start_time:    Instant,
+    start_time:          Instant,
+    price_opt:           Option<LLMPrice>,
+    rounds:              Vec<crate::model::RoundLog>,
 }
 
-fn handle_successful_stream(
-    state: &AppState,
-    upstream_resp: reqwest::Response,
-    ctx: SuccessContext<'_>,
-) -> Response {
+fn handle_successful_stream(state: &AppState, upstream_resp: reqwest::Response, ctx: SuccessContext<'_>) -> Response {
     state.request_state_manager.mark_committed(ctx.req_id);
 
     let log_template = RequestLog {
@@ -551,14 +568,12 @@ fn handle_successful_stream(
     let prompt_tokens = estimate_tokens(ctx.body_str);
 
     let output_stream = match ctx.channel.channel_type {
-        ChannelProvider::Anthropic if ctx.format != ApiFormat::AnthropicMessage => {
-            ProviderToOpenaiStream::new(
-                mapped_stream,
-                ctx.model.to_string(),
-                protocol::anthropic_sse_event_to_openai_chunk,
-            )
-            .boxed()
-        }
+        ChannelProvider::Anthropic if ctx.format != ApiFormat::AnthropicMessage => ProviderToOpenaiStream::new(
+            mapped_stream,
+            ctx.model.to_string(),
+            protocol::anthropic_sse_event_to_openai_chunk,
+        )
+        .boxed(),
         ChannelProvider::Gemini => ProviderToOpenaiStream::new(
             mapped_stream,
             ctx.model.to_string(),
@@ -576,9 +591,7 @@ fn handle_successful_stream(
             OpenaiStreamFormat::ChatCompletions
         };
         OpenaiToAnthropicStream::new(output_stream, ctx.model.to_string(), source_format).boxed()
-    } else if ctx.format == ApiFormat::OpenAIResponse
-        && ctx.channel.channel_type != ChannelProvider::OpenaiResponses
-    {
+    } else if ctx.format == ApiFormat::OpenAIResponse && ctx.channel.channel_type != ChannelProvider::OpenaiResponses {
         ChatCompletionsToResponsesStream::new(output_stream, ctx.model.to_string()).boxed()
     } else {
         output_stream
@@ -626,15 +639,15 @@ async fn handle_successful_json(
     let response_headers = serialize_headers(upstream_resp.headers());
     let raw_bytes = upstream_resp.bytes().await.unwrap_or_default();
     let parsed = serde_json::from_slice::<serde_json::Value>(&raw_bytes).ok();
-    let converted_to_chat = parsed.as_ref().and_then(|val| match ctx.channel.channel_type {
-        ChannelProvider::Anthropic if ctx.format != ApiFormat::AnthropicMessage => {
-            Some(protocol::convert_anthropic_to_openai_chat_response(val, ctx.model))
-        }
-        ChannelProvider::Gemini => {
-            Some(protocol::convert_gemini_to_openai_chat_response(val, ctx.model))
-        }
-        _ => None,
-    });
+    let converted_to_chat = parsed
+        .as_ref()
+        .and_then(|val| match ctx.channel.channel_type {
+            ChannelProvider::Anthropic if ctx.format != ApiFormat::AnthropicMessage => {
+                Some(protocol::convert_anthropic_to_openai_chat_response(val, ctx.model))
+            }
+            ChannelProvider::Gemini => Some(protocol::convert_gemini_to_openai_chat_response(val, ctx.model)),
+            _ => None,
+        });
     let converted = if ctx.format == ApiFormat::AnthropicMessage
         && ctx.channel.channel_type != ChannelProvider::Anthropic
     {
@@ -646,9 +659,7 @@ async fn handle_successful_json(
                 protocol::convert_openai_chat_to_anthropic_response(chat, ctx.model)
             }
         })
-    } else if ctx.format == ApiFormat::OpenAIResponse
-        && ctx.channel.channel_type != ChannelProvider::OpenaiResponses
-    {
+    } else if ctx.format == ApiFormat::OpenAIResponse && ctx.channel.channel_type != ChannelProvider::OpenaiResponses {
         converted_to_chat
             .as_ref()
             .or(parsed.as_ref())
@@ -664,14 +675,14 @@ async fn handle_successful_json(
 
     let usage = match serde_json::from_slice::<serde_json::Value>(&resp_bytes) {
         Ok(val) => extract_usage_from_json(&val).unwrap_or(Usage {
-            prompt_tokens: estimate_tokens(ctx.body_str),
+            prompt_tokens:     estimate_tokens(ctx.body_str),
             completion_tokens: estimate_tokens(&resp_str),
-            total_tokens: estimate_tokens(ctx.body_str) + estimate_tokens(&resp_str),
+            total_tokens:      estimate_tokens(ctx.body_str) + estimate_tokens(&resp_str),
         }),
         Err(_) => Usage {
-            prompt_tokens: estimate_tokens(ctx.body_str),
+            prompt_tokens:     estimate_tokens(ctx.body_str),
             completion_tokens: estimate_tokens(&resp_str),
-            total_tokens: estimate_tokens(ctx.body_str) + estimate_tokens(&resp_str),
+            total_tokens:      estimate_tokens(ctx.body_str) + estimate_tokens(&resp_str),
         },
     };
 
@@ -680,21 +691,23 @@ async fn handle_successful_json(
     let round_duration_ms = ctx.round_start_time.elapsed().as_millis() as i64;
 
     let round_log = crate::model::RoundLog {
-        round: ctx.round,
-        channel_name: ctx.channel.name.clone(),
-        model_name: ctx.channel_model.name.clone(),
-        request_url: ctx.target_req_url.to_string(),
-        request_headers: ctx.channel_req_headers.to_string(),
-        request_body: ctx.rewritten_body_str.to_string(),
-        response_url: ctx.target_req_url.to_string(),
+        round:            ctx.round,
+        channel_name:     ctx.channel.name.clone(),
+        model_name:       ctx.channel_model.name.clone(),
+        request_url:      ctx.target_req_url.to_string(),
+        request_headers:  ctx.channel_req_headers.to_string(),
+        request_body:     ctx.rewritten_body_str.to_string(),
+        response_url:     ctx.target_req_url.to_string(),
         response_headers: response_headers.clone(),
-        response_body: resp_str.clone(),
-        status: 200,
-        duration_ms: round_duration_ms,
-        error: None,
+        response_body:    resp_str.clone(),
+        status:           200,
+        duration_ms:      round_duration_ms,
+        error:            None,
     };
     ctx.rounds.push(round_log.clone());
-    state.request_state_manager.record_round_attempt(ctx.req_id, round_log);
+    state
+        .request_state_manager
+        .record_round_attempt(ctx.req_id, round_log);
 
     log::record_request_log(
         state.clone(),
@@ -724,27 +737,21 @@ async fn handle_successful_json(
     );
 
     let delta = StatsMetrics {
-        input_token: usage.prompt_tokens,
-        output_token: usage.completion_tokens,
-        input_cost: (usage.prompt_tokens as f64 / 1_000_000.0)
+        input_token:     usage.prompt_tokens,
+        output_token:    usage.completion_tokens,
+        input_cost:      (usage.prompt_tokens as f64 / 1_000_000.0)
             * ctx.price_opt.as_ref().map(|p| p.input).unwrap_or(0.0),
-        output_cost: (usage.completion_tokens as f64 / 1_000_000.0)
+        output_cost:     (usage.completion_tokens as f64 / 1_000_000.0)
             * ctx.price_opt.as_ref().map(|p| p.output).unwrap_or(0.0),
-        wait_time: elapsed_ms,
+        wait_time:       elapsed_ms,
         request_success: 1,
-        request_failed: 0,
+        request_failed:  0,
     };
 
     stats::record_metrics(state, ctx.api_key_id, ctx.channel.id, ctx.channel_model.id, &delta);
-    state.request_state_manager.finish(
-        ctx.req_id,
-        "success",
-        usage,
-        cost,
-        resp_str,
-        None,
-        ctx.rounds,
-    );
+    state
+        .request_state_manager
+        .finish(ctx.req_id, "success", usage, cost, resp_str, None, ctx.rounds);
 
     Response::builder()
         .status(StatusCode::OK)
@@ -760,34 +767,34 @@ async fn handle_successful_json(
 }
 
 struct FailedRelayContext<'a> {
-    req_id: u64,
-    request_id: i64,
-    model: &'a str,
-    last_target_channel: String,
-    last_target_model: String,
-    request_url: String,
-    request_headers: String,
-    request_body: String,
-    last_response_url: String,
+    req_id:                u64,
+    request_id:            i64,
+    model:                 &'a str,
+    last_target_channel:   String,
+    last_target_model:     String,
+    request_url:           String,
+    request_headers:       String,
+    request_body:          String,
+    last_response_url:     String,
     last_response_headers: String,
-    last_status: StatusCode,
-    last_error_body: String,
-    rounds: Vec<crate::model::RoundLog>,
-    started_at: i64,
-    wait_time_ms: i64,
-    round: i64,
-    api_key_id: i64,
+    last_status:           StatusCode,
+    last_error_body:       String,
+    rounds:                Vec<crate::model::RoundLog>,
+    started_at:            i64,
+    wait_time_ms:          i64,
+    round:                 i64,
+    api_key_id:            i64,
 }
 
 fn build_failed_relay_response(state: &AppState, ctx: FailedRelayContext<'_>) -> Response {
     let failed_delta = StatsMetrics {
-        input_token: 0,
-        output_token: 0,
-        input_cost: 0.0,
-        output_cost: 0.0,
-        wait_time: ctx.wait_time_ms,
+        input_token:     0,
+        output_token:    0,
+        input_cost:      0.0,
+        output_cost:     0.0,
+        wait_time:       ctx.wait_time_ms,
         request_success: 0,
-        request_failed: 1,
+        request_failed:  1,
     };
     stats::record_metrics(state, ctx.api_key_id, 0, 0, &failed_delta);
 
@@ -859,11 +866,13 @@ fn build_failed_relay_response(state: &AppState, ctx: FailedRelayContext<'_>) ->
     };
 
     Response::builder()
-        .status(if ctx.last_status.is_client_error() || ctx.last_status.is_server_error() {
-            ctx.last_status
-        } else {
-            StatusCode::BAD_GATEWAY
-        })
+        .status(
+            if ctx.last_status.is_client_error() || ctx.last_status.is_server_error() {
+                ctx.last_status
+            } else {
+                StatusCode::BAD_GATEWAY
+            },
+        )
         .header(header::CONTENT_TYPE, "application/json")
         .body(Body::from(response_body_bytes))
         .unwrap_or_else(|e| {
@@ -933,7 +942,9 @@ pub async fn forward_relay(
         let channel_model = match state.channel_models.get(&item.channel_model_id) {
             Some(cm) => cm.clone(),
             None => {
-                state.route_manager.report_failure(current_group.id, item.id, 60);
+                state
+                    .route_manager
+                    .report_failure(current_group.id, item.id, 60);
                 continue;
             }
         };
@@ -941,30 +952,34 @@ pub async fn forward_relay(
         let ch = match channel::get_channel(&state, channel_model.channel_id) {
             Ok(c) if c.enabled => c,
             _ => {
-                state.route_manager.report_failure(current_group.id, item.id, 60);
+                state
+                    .route_manager
+                    .report_failure(current_group.id, item.id, 60);
                 continue;
             }
         };
 
-        let (target_endpoint, final_body) = prepare_upstream_payload(
-            format,
-            metadata.stream,
-            &body_bytes,
-            &ch,
-            &channel_model,
-        );
+        let (target_endpoint, final_body) =
+            prepare_upstream_payload(format, metadata.stream, &body_bytes, &ch, &channel_model);
         let target_req_url = format!("{}{}", normalize_base_url(&ch.base_url), target_endpoint);
         let channel_req_headers = upstream::build_upstream_headers(&ch)
             .map(|h| serialize_headers(&h))
             .unwrap_or_else(|_| request_headers.clone());
         let rewritten_body_str = String::from_utf8_lossy(&final_body).to_string();
 
-        state.request_state_manager.update_round(req_id, round, ch.name.clone(), channel_model.name.clone(), true);
+        state
+            .request_state_manager
+            .update_round(req_id, round, ch.name.clone(), channel_model.name.clone(), true);
 
         let timeout_secs = if metadata.stream {
             None
         } else {
-            Some(current_group.relay_config.member_non_stream_response_timeout_seconds.max(10) as u64)
+            Some(
+                current_group
+                    .relay_config
+                    .member_non_stream_response_timeout_seconds
+                    .max(10) as u64,
+            )
         };
 
         let client = get_client();
@@ -1005,10 +1020,9 @@ pub async fn forward_relay(
             Ok(upstream_resp) => {
                 let status = upstream_resp.status();
                 if status.is_success() {
-                    state.route_manager.report_success(
-                        current_group.id,
-                        item.id,
-                    );
+                    state
+                        .route_manager
+                        .report_success(current_group.id, item.id);
                     let price_opt = llm::get_llm_price(&state, &channel_model.name);
 
                     if metadata.stream {
@@ -1267,5 +1281,17 @@ mod tests {
         assert_eq!(val.get("model").unwrap().as_str().unwrap(), "gpt-4o-custom");
         assert_eq!(val.get("temperature").unwrap().as_f64().unwrap(), 0.2);
         assert_eq!(val.get("max_tokens").unwrap().as_i64().unwrap(), 1024);
+    }
+    #[test]
+    fn test_is_client_error() {
+        assert!(is_client_error(StatusCode::BAD_REQUEST));
+        assert!(is_client_error(StatusCode::UNPROCESSABLE_ENTITY));
+        // Upstream auth failure / channel issues should NOT be classified as client errors
+        assert!(!is_client_error(StatusCode::UNAUTHORIZED));
+        assert!(!is_client_error(StatusCode::FORBIDDEN));
+        assert!(!is_client_error(StatusCode::NOT_FOUND));
+        assert!(!is_client_error(StatusCode::TOO_MANY_REQUESTS));
+        assert!(!is_client_error(StatusCode::INTERNAL_SERVER_ERROR));
+        assert!(!is_client_error(StatusCode::BAD_GATEWAY));
     }
 }

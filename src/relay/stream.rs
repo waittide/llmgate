@@ -9,8 +9,7 @@ use futures::Stream;
 use serde_json::{Value, json};
 
 use super::sse_event_end;
-use crate::relay::protocol::extract_usage_from_json;
-use crate::relay::state::Usage;
+use crate::relay::{protocol::extract_usage_from_json, state::Usage};
 
 /// Converts one provider-native SSE event into an OpenAI Chat Completion SSE chunk.
 pub type SseChunkConverter = fn(&str, &str, i64, &str) -> Option<String>;
@@ -62,12 +61,7 @@ where
                 let created = chrono::Utc::now().timestamp();
                 while let Some(end) = sse_event_end(&this.buffer) {
                     let event_str = String::from_utf8_lossy(&this.buffer[..end]).to_string();
-                    if let Some(chunk) = (this.convert_event)(
-                        &event_str,
-                        &this.model,
-                        created,
-                        &this.chatcmpl_id,
-                    ) {
+                    if let Some(chunk) = (this.convert_event)(&event_str, &this.model, created, &this.chatcmpl_id) {
                         this.pending_chunks.push_back(Bytes::from(chunk));
                     }
                     this.buffer.drain(..end);
@@ -99,29 +93,29 @@ where
 
 #[derive(Default)]
 struct ToolCallState {
-    item_id: String,
-    call_id: String,
-    name: String,
-    arguments: String,
+    item_id:      String,
+    call_id:      String,
+    name:         String,
+    arguments:    String,
     output_index: usize,
 }
 
 /// Adapts OpenAI Chat Completions SSE into OpenAI Responses SSE.
 pub struct ChatCompletionsToResponsesStream<S> {
-    inner: S,
-    buffer: Vec<u8>,
-    pending: VecDeque<Bytes>,
-    response_id: String,
-    message_id: String,
-    model: String,
-    created_at: i64,
-    sequence: u64,
-    started: bool,
+    inner:           S,
+    buffer:          Vec<u8>,
+    pending:         VecDeque<Bytes>,
+    response_id:     String,
+    message_id:      String,
+    model:           String,
+    created_at:      i64,
+    sequence:        u64,
+    started:         bool,
     message_started: bool,
-    completed: bool,
-    text: String,
-    tools: BTreeMap<usize, ToolCallState>,
-    usage: Option<Usage>,
+    completed:       bool,
+    text:            String,
+    tools:           BTreeMap<usize, ToolCallState>,
+    usage:           Option<Usage>,
 }
 
 impl<S> ChatCompletionsToResponsesStream<S> {
@@ -259,13 +253,16 @@ impl<S> ChatCompletionsToResponsesStream<S> {
                         .to_string();
                     let item_id = format!("fc_{}", nanoid::nanoid!(20));
                     let output_index = usize::from(self.message_started) + index;
-                    self.tools.insert(index, ToolCallState {
-                        item_id: item_id.clone(),
-                        call_id: call_id.clone(),
-                        name: name.clone(),
-                        arguments: String::new(),
-                        output_index,
-                    });
+                    self.tools.insert(
+                        index,
+                        ToolCallState {
+                            item_id: item_id.clone(),
+                            call_id: call_id.clone(),
+                            name: name.clone(),
+                            arguments: String::new(),
+                            output_index,
+                        },
+                    );
                     self.push_event(
                         "response.output_item.added",
                         json!({
@@ -305,7 +302,10 @@ impl<S> ChatCompletionsToResponsesStream<S> {
             }
         }
 
-        if choice.get("finish_reason").is_some_and(|reason| !reason.is_null()) {
+        if choice
+            .get("finish_reason")
+            .is_some_and(|reason| !reason.is_null())
+        {
             self.complete();
         }
     }
@@ -468,8 +468,12 @@ mod tests {
     #[tokio::test]
     async fn converts_chat_completion_sse_to_responses_events() {
         let chunks = vec![
-            Ok(Bytes::from_static(b"data: {\"choices\":[{\"delta\":{\"content\":\"Hello\"},\"finish_reason\":null}]}\n\n")),
-            Ok(Bytes::from_static(b"data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n")),
+            Ok(Bytes::from_static(
+                b"data: {\"choices\":[{\"delta\":{\"content\":\"Hello\"},\"finish_reason\":null}]}\n\n",
+            )),
+            Ok(Bytes::from_static(
+                b"data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n",
+            )),
         ];
         let output = ChatCompletionsToResponsesStream::new(stream::iter(chunks), "test-model".to_string())
             .collect::<Vec<_>>()

@@ -70,7 +70,7 @@ pub async fn refresh_group_cache(state: &AppState) -> Result<()> {
     }
 
     *state.groups.write() = crate::op::GroupCache {
-        by_id: local_groups,
+        by_id:   local_groups,
         by_name: local_name_index,
     };
     Ok(())

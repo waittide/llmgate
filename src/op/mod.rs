@@ -79,32 +79,35 @@ impl AppState {
         let (tx, rx) = mpsc::channel(2048);
         let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
         let join_handle = crate::op::log::start_log_worker(db.clone(), rx, shutdown_rx);
-        let log_shutdown = Arc::new(parking_lot::Mutex::new(Some(LogShutdown { shutdown_tx, join_handle })));
+        let log_shutdown = Arc::new(parking_lot::Mutex::new(Some(LogShutdown {
+            shutdown_tx,
+            join_handle,
+        })));
 
         let state = Self {
-            db:                    db.clone(),
-            channels:              Arc::new(DashMap::new()),
-            channel_models:        Arc::new(DashMap::new()),
-            groups:                Arc::new(RwLock::new(GroupCache::default())),
-            api_keys:              Arc::new(RwLock::new(ApiKeyCache::default())),
-            llm_prices:            Arc::new(DashMap::new()),
-            settings:              Arc::new(DashMap::new()),
-            stats:                 Arc::new(RwLock::new(SystemStats {
-                total: StatsTotal {
+            db: db.clone(),
+            channels: Arc::new(DashMap::new()),
+            channel_models: Arc::new(DashMap::new()),
+            groups: Arc::new(RwLock::new(GroupCache::default())),
+            api_keys: Arc::new(RwLock::new(ApiKeyCache::default())),
+            llm_prices: Arc::new(DashMap::new()),
+            settings: Arc::new(DashMap::new()),
+            stats: Arc::new(RwLock::new(SystemStats {
+                total:  StatsTotal {
                     id:      1,
                     metrics: StatsMetrics::default(),
                 },
-                daily: StatsDaily {
+                daily:  StatsDaily {
                     date:    now_date.clone(),
                     metrics: StatsMetrics::default(),
                 },
                 hourly: default_hourlies,
             })),
-            stats_api_keys:        Arc::new(DashMap::new()),
-            route_manager:         Arc::new(RouteManager::new()),
+            stats_api_keys: Arc::new(DashMap::new()),
+            route_manager: Arc::new(RouteManager::new()),
             request_state_manager: Arc::new(RequestStateManager::new()),
-            jwt_secret:            Arc::new(RwLock::new("octopus-jwt-secret-default".to_string())),
-            log_sender:            tx,
+            jwt_secret: Arc::new(RwLock::new("octopus-jwt-secret-default".to_string())),
+            log_sender: tx,
             log_shutdown,
         };
 

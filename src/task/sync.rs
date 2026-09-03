@@ -47,7 +47,6 @@ pub async fn fetch_upstream_models(channel: &Channel) -> Result<Vec<String>> {
         }
     }
 
-
     Ok(models)
 }
 pub async fn sync_all_channel_models(state: &AppState) -> Result<()> {

@@ -47,7 +47,10 @@ pub fn rewrite_request_body_in_json(body: &[u8], new_model: &str, param_override
 
 /// Converts a Responses API function tool into Chat Completions' nested shape.
 fn convert_responses_tool_to_chat(tool: &Value) -> Option<Value> {
-    let tool_type = tool.get("type").and_then(Value::as_str).unwrap_or("function");
+    let tool_type = tool
+        .get("type")
+        .and_then(Value::as_str)
+        .unwrap_or("function");
     if tool_type != "function" {
         return None;
     }
@@ -121,9 +124,17 @@ pub fn convert_responses_to_chat_completions(val: &Value) -> Value {
                             .map(str::to_string)
                             .or_else(|| item.get("id").and_then(Value::as_str).map(str::to_string))
                             .unwrap_or_else(|| format!("call_{}", nanoid::nanoid!(20)));
-                        let raw_id = item.get("id").and_then(Value::as_str).unwrap_or("").to_string();
+                        let raw_id = item
+                            .get("id")
+                            .and_then(Value::as_str)
+                            .unwrap_or("")
+                            .to_string();
                         call_lookup.push((raw_id, call_id.clone()));
-                        let name = item.get("name").and_then(Value::as_str).unwrap_or("").to_string();
+                        let name = item
+                            .get("name")
+                            .and_then(Value::as_str)
+                            .unwrap_or("")
+                            .to_string();
                         let arguments = item
                             .get("arguments")
                             .cloned()
@@ -183,15 +194,21 @@ pub fn convert_responses_to_chat_completions(val: &Value) -> Value {
                                             }));
                                         }
                                     } else if (ptype == "input_image" || ptype == "image_url")
-                                        && let Some(url) = part.get("image_url") {
-                                            converted_parts.push(serde_json::json!({
-                                                "type": "image_url",
-                                                "image_url": url
-                                            }));
-                                        }
+                                        && let Some(url) = part.get("image_url")
+                                    {
+                                        converted_parts.push(serde_json::json!({
+                                            "type": "image_url",
+                                            "image_url": url
+                                        }));
+                                    }
                                 }
-                                if converted_parts.len() == 1 && converted_parts[0].get("type").and_then(|t| t.as_str()) == Some("text") {
-                                    converted_parts[0].get("text").cloned().unwrap_or(Value::Array(converted_parts))
+                                if converted_parts.len() == 1
+                                    && converted_parts[0].get("type").and_then(|t| t.as_str()) == Some("text")
+                                {
+                                    converted_parts[0]
+                                        .get("text")
+                                        .cloned()
+                                        .unwrap_or(Value::Array(converted_parts))
                                 } else {
                                     Value::Array(converted_parts)
                                 }
@@ -248,7 +265,6 @@ pub fn convert_responses_to_chat_completions(val: &Value) -> Value {
     Value::Object(obj)
 }
 
-
 /// Converts an OpenAI Chat Completions payload (containing `messages: [...]`)
 /// into an OpenAI Responses payload (containing `input: [...]`).
 pub fn convert_chat_completions_to_responses(val: &Value) -> Value {
@@ -298,9 +314,18 @@ pub fn convert_openai_chat_to_responses_response(val: &Value, model_name: &str) 
         }
     }
 
-    let input_tokens = val.pointer("/usage/prompt_tokens").and_then(Value::as_i64).unwrap_or(0);
-    let output_tokens = val.pointer("/usage/completion_tokens").and_then(Value::as_i64).unwrap_or(0);
-    let total_tokens = val.pointer("/usage/total_tokens").and_then(Value::as_i64).unwrap_or(input_tokens + output_tokens);
+    let input_tokens = val
+        .pointer("/usage/prompt_tokens")
+        .and_then(Value::as_i64)
+        .unwrap_or(0);
+    let output_tokens = val
+        .pointer("/usage/completion_tokens")
+        .and_then(Value::as_i64)
+        .unwrap_or(0);
+    let total_tokens = val
+        .pointer("/usage/total_tokens")
+        .and_then(Value::as_i64)
+        .unwrap_or(input_tokens + output_tokens);
     serde_json::json!({
         "id": format!("resp_{}", nanoid::nanoid!(24)),
         "object": "response",
@@ -357,8 +382,14 @@ pub fn convert_openai_chat_to_anthropic_response(val: &Value, model_name: &str) 
             }));
         }
     }
-    let input_tokens = val.pointer("/usage/prompt_tokens").and_then(Value::as_i64).unwrap_or(0);
-    let output_tokens = val.pointer("/usage/completion_tokens").and_then(Value::as_i64).unwrap_or(0);
+    let input_tokens = val
+        .pointer("/usage/prompt_tokens")
+        .and_then(Value::as_i64)
+        .unwrap_or(0);
+    let output_tokens = val
+        .pointer("/usage/completion_tokens")
+        .and_then(Value::as_i64)
+        .unwrap_or(0);
     serde_json::json!({
         "id": format!("msg_{}", nanoid::nanoid!(24)),
         "type": "message",
@@ -403,8 +434,14 @@ pub fn convert_responses_to_anthropic_response(val: &Value, model_name: &str) ->
             }
         }
     }
-    let input_tokens = val.pointer("/usage/input_tokens").and_then(Value::as_i64).unwrap_or(0);
-    let output_tokens = val.pointer("/usage/output_tokens").and_then(Value::as_i64).unwrap_or(0);
+    let input_tokens = val
+        .pointer("/usage/input_tokens")
+        .and_then(Value::as_i64)
+        .unwrap_or(0);
+    let output_tokens = val
+        .pointer("/usage/output_tokens")
+        .and_then(Value::as_i64)
+        .unwrap_or(0);
     serde_json::json!({
         "id": format!("msg_{}", nanoid::nanoid!(24)),
         "type": "message",
@@ -434,7 +471,10 @@ pub fn convert_anthropic_to_openai_chat_request(val: &Value) -> Value {
 
     if let Some(Value::Array(input_messages)) = obj.remove("messages") {
         for message in input_messages {
-            let role = message.get("role").and_then(Value::as_str).unwrap_or("user");
+            let role = message
+                .get("role")
+                .and_then(Value::as_str)
+                .unwrap_or("user");
             let content = message.get("content").unwrap_or(&Value::Null);
             if let Some(parts) = content.as_array() {
                 let mut normal_parts = Vec::new();
@@ -484,7 +524,10 @@ pub fn convert_anthropic_to_openai_chat_request(val: &Value) -> Value {
                     let content = if normal_parts.len() == 1
                         && normal_parts[0].get("type").and_then(Value::as_str) == Some("text")
                     {
-                        normal_parts[0].get("text").cloned().unwrap_or(Value::String(String::new()))
+                        normal_parts[0]
+                            .get("text")
+                            .cloned()
+                            .unwrap_or(Value::String(String::new()))
                     } else {
                         Value::Array(normal_parts)
                     };
@@ -521,7 +564,10 @@ pub fn convert_anthropic_to_openai_chat_request(val: &Value) -> Value {
     if let Some(choice) = obj.get_mut("tool_choice") {
         match choice.get("type").and_then(Value::as_str) {
             Some("tool") => {
-                let name = choice.get("name").cloned().unwrap_or(Value::String(String::new()));
+                let name = choice
+                    .get("name")
+                    .cloned()
+                    .unwrap_or(Value::String(String::new()));
                 *choice = serde_json::json!({ "type": "function", "function": { "name": name } });
             }
             Some("any") => *choice = Value::String("required".to_string()),
@@ -553,18 +599,19 @@ fn openai_image_to_anthropic(url: &str) -> Option<Value> {
         return None;
     }
     if let Some(data_uri) = url.strip_prefix("data:")
-        && let Some((meta, data)) = data_uri.split_once(',') {
-            let media_type = meta
-                .split(';')
-                .next()
-                .filter(|s| !s.is_empty())
-                .unwrap_or("image/png")
-                .to_string();
-            return Some(serde_json::json!({
-                "type": "image",
-                "source": { "type": "base64", "media_type": media_type, "data": data }
-            }));
-        }
+        && let Some((meta, data)) = data_uri.split_once(',')
+    {
+        let media_type = meta
+            .split(';')
+            .next()
+            .filter(|s| !s.is_empty())
+            .unwrap_or("image/png")
+            .to_string();
+        return Some(serde_json::json!({
+            "type": "image",
+            "source": { "type": "base64", "media_type": media_type, "data": data }
+        }));
+    }
     Some(serde_json::json!({
         "type": "image",
         "source": { "type": "url", "url": url }
@@ -624,10 +671,16 @@ fn openai_assistant_to_anthropic(msg: &Value) -> Value {
     if let Some(calls) = msg.get("tool_calls").and_then(|v| v.as_array()) {
         for call in calls {
             let id = call.get("id").and_then(|v| v.as_str()).unwrap_or("");
-            let name = call.pointer("/function/name").and_then(|v| v.as_str()).unwrap_or("");
-            let arguments = call.pointer("/function/arguments").and_then(|v| v.as_str()).unwrap_or("{}");
-            let input = serde_json::from_str::<Value>(arguments)
-                .unwrap_or_else(|_| Value::String(arguments.to_string()));
+            let name = call
+                .pointer("/function/name")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let arguments = call
+                .pointer("/function/arguments")
+                .and_then(|v| v.as_str())
+                .unwrap_or("{}");
+            let input =
+                serde_json::from_str::<Value>(arguments).unwrap_or_else(|_| Value::String(arguments.to_string()));
             blocks.push(serde_json::json!({
                 "type": "tool_use",
                 "id": id,
@@ -642,7 +695,10 @@ fn openai_assistant_to_anthropic(msg: &Value) -> Value {
 /// Converts an OpenAI `tool` role message into an Anthropic `user` message with
 /// a single `tool_result` content block.
 fn openai_tool_to_anthropic(msg: &Value) -> Value {
-    let tool_use_id = msg.get("tool_call_id").and_then(|v| v.as_str()).unwrap_or("");
+    let tool_use_id = msg
+        .get("tool_call_id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
     let result_content = msg
         .get("content")
         .cloned()
@@ -687,16 +743,22 @@ pub fn convert_openai_to_anthropic(val: &Value) -> Value {
     if let Some(tools) = val.get("tools").and_then(|v| v.as_array()) {
         let mut anthropic_tools = Vec::new();
         for tool in tools {
-            let name = tool.pointer("/function/name").and_then(|v| v.as_str()).unwrap_or("");
+            let name = tool
+                .pointer("/function/name")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
             if name.is_empty() {
                 continue;
             }
             let mut t = serde_json::Map::new();
             t.insert("name".to_string(), Value::String(name.to_string()));
-            if let Some(desc) = tool.pointer("/function/description").and_then(|v| v.as_str())
-                && !desc.is_empty() {
-                    t.insert("description".to_string(), Value::String(desc.to_string()));
-                }
+            if let Some(desc) = tool
+                .pointer("/function/description")
+                .and_then(|v| v.as_str())
+                && !desc.is_empty()
+            {
+                t.insert("description".to_string(), Value::String(desc.to_string()));
+            }
             let input_schema = tool
                 .pointer("/function/parameters")
                 .cloned()
@@ -719,10 +781,7 @@ pub fn convert_openai_to_anthropic(val: &Value) -> Value {
                     "required" => "any",
                     _ => "auto",
                 };
-                anthropic_obj.insert(
-                    "tool_choice".to_string(),
-                    serde_json::json!({ "type": t }),
-                );
+                anthropic_obj.insert("tool_choice".to_string(), serde_json::json!({ "type": t }));
             }
             Value::Object(o) => {
                 if let Some(fname) = o
@@ -759,9 +818,8 @@ pub fn convert_openai_to_anthropic(val: &Value) -> Value {
                 "assistant" => anthropic_messages.push(openai_assistant_to_anthropic(msg)),
                 "tool" => anthropic_messages.push(openai_tool_to_anthropic(msg)),
                 _ => {
-                    let content = openai_content_to_anthropic(
-                        msg.get("content").unwrap_or(&Value::String(String::new())),
-                    );
+                    let content =
+                        openai_content_to_anthropic(msg.get("content").unwrap_or(&Value::String(String::new())));
                     anthropic_messages.push(serde_json::json!({
                         "role": role,
                         "content": content
@@ -792,8 +850,14 @@ pub fn convert_anthropic_to_openai_chat_response(val: &Value, model_name: &str) 
         })
         .unwrap_or_default();
 
-    let prompt_tokens = val.pointer("/usage/input_tokens").and_then(|v| v.as_i64()).unwrap_or(0);
-    let completion_tokens = val.pointer("/usage/output_tokens").and_then(|v| v.as_i64()).unwrap_or(0);
+    let prompt_tokens = val
+        .pointer("/usage/input_tokens")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(0);
+    let completion_tokens = val
+        .pointer("/usage/output_tokens")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(0);
 
     serde_json::json!({
         "id": format!("chatcmpl-{}", nanoid::nanoid!(24)),
@@ -855,11 +919,17 @@ pub fn anthropic_sse_event_to_openai_chunk(
                         "finish_reason": null
                     }]
                 });
-                return Some(format!("data: {}\n\n", serde_json::to_string(&chunk).unwrap_or_default()));
+                return Some(format!(
+                    "data: {}\n\n",
+                    serde_json::to_string(&chunk).unwrap_or_default()
+                ));
             }
         }
         "message_delta" => {
-            let finish_reason = val.pointer("/delta/stop_reason").and_then(|s| s.as_str()).unwrap_or("stop");
+            let finish_reason = val
+                .pointer("/delta/stop_reason")
+                .and_then(|s| s.as_str())
+                .unwrap_or("stop");
             let mut chunk = serde_json::json!({
                 "id": chatcmpl_id,
                 "object": "chat.completion.chunk",
@@ -874,12 +944,18 @@ pub fn anthropic_sse_event_to_openai_chunk(
             // Preserve Anthropic output_tokens so the StreamFinalizer can recover
             // real completion token counts instead of falling back to estimates.
             if let Some(usage) = val.get("usage") {
-                let output_tokens = usage.get("output_tokens").and_then(Value::as_i64).unwrap_or(0);
+                let output_tokens = usage
+                    .get("output_tokens")
+                    .and_then(Value::as_i64)
+                    .unwrap_or(0);
                 if output_tokens > 0 {
                     chunk["usage"] = serde_json::json!({ "completion_tokens": output_tokens });
                 }
             }
-            return Some(format!("data: {}\n\n", serde_json::to_string(&chunk).unwrap_or_default()));
+            return Some(format!(
+                "data: {}\n\n",
+                serde_json::to_string(&chunk).unwrap_or_default()
+            ));
         }
         "message_stop" => {
             return Some("data: [DONE]\n\n".to_string());
@@ -898,17 +974,18 @@ fn openai_image_to_gemini_part(url: &str) -> Option<Value> {
         return None;
     }
     if let Some(data_uri) = url.strip_prefix("data:")
-        && let Some((meta, data)) = data_uri.split_once(',') {
-            let mime_type = meta
-                .split(';')
-                .next()
-                .filter(|s| !s.is_empty())
-                .unwrap_or("image/png")
-                .to_string();
-            return Some(serde_json::json!({
-                "inlineData": { "mimeType": mime_type, "data": data }
-            }));
-        }
+        && let Some((meta, data)) = data_uri.split_once(',')
+    {
+        let mime_type = meta
+            .split(';')
+            .next()
+            .filter(|s| !s.is_empty())
+            .unwrap_or("image/png")
+            .to_string();
+        return Some(serde_json::json!({
+            "inlineData": { "mimeType": mime_type, "data": data }
+        }));
+    }
     Some(serde_json::json!({
         "fileData": { "fileUri": url }
     }))
@@ -951,8 +1028,7 @@ pub fn convert_openai_to_gemini(val: &Value) -> Value {
     let mut system_instruction = None;
     // OpenAI `tool` messages only carry `tool_call_id`; remember the mapping to
     // the function name so Gemini `functionResponse` can name the function.
-    let mut tool_call_names: std::collections::HashMap<String, String> =
-        std::collections::HashMap::new();
+    let mut tool_call_names: std::collections::HashMap<String, String> = std::collections::HashMap::new();
 
     if let Some(messages) = val.get("messages").and_then(|m| m.as_array()) {
         for msg in messages {
@@ -998,8 +1074,14 @@ pub fn convert_openai_to_gemini(val: &Value) -> Value {
                     }));
                 }
                 "tool" => {
-                    let tool_call_id = msg.get("tool_call_id").and_then(|v| v.as_str()).unwrap_or("");
-                    let name = tool_call_names.get(tool_call_id).cloned().unwrap_or_default();
+                    let tool_call_id = msg
+                        .get("tool_call_id")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
+                    let name = tool_call_names
+                        .get(tool_call_id)
+                        .cloned()
+                        .unwrap_or_default();
                     let response = msg
                         .get("content")
                         .cloned()
@@ -1012,9 +1094,8 @@ pub fn convert_openai_to_gemini(val: &Value) -> Value {
                     }));
                 }
                 _ => {
-                    let parts = openai_content_to_gemini_parts(
-                        msg.get("content").unwrap_or(&Value::String(String::new())),
-                    );
+                    let parts =
+                        openai_content_to_gemini_parts(msg.get("content").unwrap_or(&Value::String(String::new())));
                     let gemini_role = if role == "assistant" { "model" } else { "user" };
                     contents.push(serde_json::json!({
                         "role": gemini_role,
@@ -1036,20 +1117,27 @@ pub fn convert_openai_to_gemini(val: &Value) -> Value {
     if let Some(tools) = val.get("tools").and_then(|v| v.as_array()) {
         let mut funcs = Vec::new();
         for tool in tools {
-            let name = tool.pointer("/function/name").and_then(|v| v.as_str()).unwrap_or("");
+            let name = tool
+                .pointer("/function/name")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
             if name.is_empty() {
                 continue;
             }
             let mut f = serde_json::Map::new();
             f.insert("name".to_string(), Value::String(name.to_string()));
-            if let Some(desc) = tool.pointer("/function/description").and_then(|v| v.as_str())
-                && !desc.is_empty() {
-                    f.insert("description".to_string(), Value::String(desc.to_string()));
-                }
+            if let Some(desc) = tool
+                .pointer("/function/description")
+                .and_then(|v| v.as_str())
+                && !desc.is_empty()
+            {
+                f.insert("description".to_string(), Value::String(desc.to_string()));
+            }
             if let Some(params) = tool.pointer("/function/parameters")
-                && !params.is_null() {
-                    f.insert("parameters".to_string(), params.clone());
-                }
+                && !params.is_null()
+            {
+                f.insert("parameters".to_string(), params.clone());
+            }
             funcs.push(Value::Object(f));
         }
         if !funcs.is_empty() {
@@ -1080,10 +1168,7 @@ pub fn convert_openai_to_gemini(val: &Value) -> Value {
                     .and_then(|v| v.as_str())
                 {
                     cfg.insert("mode".to_string(), Value::String("ANY".to_string()));
-                    cfg.insert(
-                        "allowedFunctionNames".to_string(),
-                        serde_json::json!([fname]),
-                    );
+                    cfg.insert("allowedFunctionNames".to_string(), serde_json::json!([fname]));
                 }
             }
             _ => {}
@@ -1248,9 +1333,17 @@ pub fn gemini_sse_event_to_openai_chunk(
     // Preserve Gemini usageMetadata so the StreamFinalizer can recover real token
     // counts instead of falling back to estimates.
     if let Some(usage) = val.get("usageMetadata") {
-        let prompt_tokens = usage.get("promptTokenCount").and_then(Value::as_i64).unwrap_or(0);
-        let completion_tokens = usage.get("candidatesTokenCount").and_then(Value::as_i64).unwrap_or(0);
-        let total_tokens = usage.get("totalTokenCount").and_then(Value::as_i64)
+        let prompt_tokens = usage
+            .get("promptTokenCount")
+            .and_then(Value::as_i64)
+            .unwrap_or(0);
+        let completion_tokens = usage
+            .get("candidatesTokenCount")
+            .and_then(Value::as_i64)
+            .unwrap_or(0);
+        let total_tokens = usage
+            .get("totalTokenCount")
+            .and_then(Value::as_i64)
             .unwrap_or(prompt_tokens + completion_tokens);
         chunk["usage"] = serde_json::json!({
             "prompt_tokens": prompt_tokens,
@@ -1258,7 +1351,10 @@ pub fn gemini_sse_event_to_openai_chunk(
             "total_tokens": total_tokens
         });
     }
-    Some(format!("data: {}\n\n", serde_json::to_string(&chunk).unwrap_or_default()))
+    Some(format!(
+        "data: {}\n\n",
+        serde_json::to_string(&chunk).unwrap_or_default()
+    ))
 }
 
 pub fn calculate_cost(prompt_tokens: i64, completion_tokens: i64, price: Option<&LLMPrice>) -> f64 {
@@ -1404,10 +1500,7 @@ mod tests {
         let tools = anthropic.get("tools").unwrap().as_array().unwrap();
         assert_eq!(tools[0].get("name").unwrap(), "get_weather");
         assert!(tools[0].get("input_schema").is_some());
-        assert_eq!(
-            anthropic.get("tool_choice").unwrap().get("type").unwrap(),
-            "auto"
-        );
+        assert_eq!(anthropic.get("tool_choice").unwrap().get("type").unwrap(), "auto");
 
         let messages = anthropic.get("messages").unwrap().as_array().unwrap();
         assert_eq!(messages.len(), 3);
@@ -1455,7 +1548,11 @@ mod tests {
 
         let gemini = convert_openai_to_gemini(&openai_req);
         let tools = gemini.get("tools").unwrap().as_array().unwrap();
-        let decls = tools[0].get("functionDeclarations").unwrap().as_array().unwrap();
+        let decls = tools[0]
+            .get("functionDeclarations")
+            .unwrap()
+            .as_array()
+            .unwrap();
         assert_eq!(decls[0].get("name").unwrap(), "get_weather");
 
         let cfg = gemini
@@ -1470,22 +1567,12 @@ mod tests {
         assert_eq!(contents.len(), 3);
         assert_eq!(contents[1].get("role").unwrap(), "model");
         let model_parts = contents[1].get("parts").unwrap().as_array().unwrap();
-        assert_eq!(
-            model_parts[0].pointer("/functionCall/name").unwrap(),
-            "get_weather"
-        );
-        assert_eq!(
-            model_parts[0].pointer("/functionCall/args/city").unwrap(),
-            "Paris"
-        );
+        assert_eq!(model_parts[0].pointer("/functionCall/name").unwrap(), "get_weather");
+        assert_eq!(model_parts[0].pointer("/functionCall/args/city").unwrap(), "Paris");
         // tool message maps to functionResponse with the resolved function name
         let user_parts = contents[2].get("parts").unwrap().as_array().unwrap();
-        assert_eq!(
-            user_parts[0].pointer("/functionResponse/name").unwrap(),
-            "get_weather"
-        );
+        assert_eq!(user_parts[0].pointer("/functionResponse/name").unwrap(), "get_weather");
     }
-
 
     #[test]
     fn test_convert_gemini_to_openai_chat_response() {
@@ -1501,7 +1588,10 @@ mod tests {
             }
         });
         let openai = convert_gemini_to_openai_chat_response(&gemini, "gemini-2.5-pro");
-        assert_eq!(openai.pointer("/choices/0/message/content").unwrap(), "Hello from Gemini");
+        assert_eq!(
+            openai.pointer("/choices/0/message/content").unwrap(),
+            "Hello from Gemini"
+        );
         assert_eq!(openai.pointer("/choices/0/finish_reason").unwrap(), "stop");
         assert_eq!(openai.pointer("/usage/total_tokens").unwrap(), 7);
     }
@@ -1531,14 +1621,8 @@ mod tests {
         let content = messages[0].get("content").unwrap().as_array().unwrap();
         assert_eq!(content[0].get("type").unwrap(), "text");
         assert_eq!(content[1].get("type").unwrap(), "image");
-        assert_eq!(
-            content[1].pointer("/source/type").unwrap(),
-            "url"
-        );
-        assert_eq!(
-            content[1].pointer("/source/url").unwrap(),
-            "https://example.com/a.png"
-        );
+        assert_eq!(content[1].pointer("/source/type").unwrap(), "url");
+        assert_eq!(content[1].pointer("/source/url").unwrap(), "https://example.com/a.png");
     }
 
     #[test]
@@ -1586,7 +1670,6 @@ mod tests {
                 "content": [{ "type": "input_text", "text": "Hello world" }]
             }]
         });
-
 
         let chat = convert_responses_to_chat_completions(&responses_req);
         assert!(chat.get("include").is_none());
@@ -1640,7 +1723,11 @@ mod tests {
         });
         let chat = convert_responses_to_chat_completions(&responses_req);
         let messages = chat.get("messages").unwrap().as_array().unwrap();
-        let call_id = messages[0].pointer("/tool_calls/0/id").unwrap().as_str().unwrap();
+        let call_id = messages[0]
+            .pointer("/tool_calls/0/id")
+            .unwrap()
+            .as_str()
+            .unwrap();
         assert!(!call_id.is_empty());
         assert_eq!(messages[1].get("tool_call_id").unwrap(), call_id);
         // object output should be serialized to a JSON string
@@ -1677,7 +1764,8 @@ mod tests {
         assert!(chunk_str.contains("chatcmpl-test"));
 
         let stop_event = "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n";
-        let stop_chunk = anthropic_sse_event_to_openai_chunk(stop_event, "claude-3-5-sonnet", 1700000000, "chatcmpl-test");
+        let stop_chunk =
+            anthropic_sse_event_to_openai_chunk(stop_event, "claude-3-5-sonnet", 1700000000, "chatcmpl-test");
         assert_eq!(stop_chunk, Some("data: [DONE]\n\n".to_string()));
     }
 
@@ -1745,5 +1833,4 @@ mod tests {
         assert_eq!(response.pointer("/content/0/text").unwrap(), "Hello");
         assert_eq!(response.get("stop_reason").unwrap(), "end_turn");
     }
-
 }

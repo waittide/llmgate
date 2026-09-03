@@ -8,10 +8,8 @@ use bytes::Bytes;
 use futures::Stream;
 use serde_json::{Value, json};
 
-use crate::relay::protocol::extract_usage_from_json;
-use crate::relay::state::Usage;
-
 use super::sse_event_end;
+use crate::relay::{protocol::extract_usage_from_json, state::Usage};
 
 #[derive(Clone, Copy)]
 pub enum OpenaiStreamFormat {
@@ -21,23 +19,23 @@ pub enum OpenaiStreamFormat {
 
 #[derive(Default)]
 struct ToolState {
-    arguments: String,
+    arguments:   String,
     block_index: usize,
 }
 
 /// Adapts Chat Completions or Responses SSE into Anthropic Messages SSE.
 pub struct OpenaiToAnthropicStream<S> {
-    inner: S,
-    format: OpenaiStreamFormat,
-    buffer: Vec<u8>,
-    pending: VecDeque<Bytes>,
-    model: String,
-    message_id: String,
-    text_started: bool,
+    inner:            S,
+    format:           OpenaiStreamFormat,
+    buffer:           Vec<u8>,
+    pending:          VecDeque<Bytes>,
+    model:            String,
+    message_id:       String,
+    text_started:     bool,
     next_block_index: usize,
-    tools: BTreeMap<String, ToolState>,
-    completed: bool,
-    usage: Option<Usage>,
+    tools:            BTreeMap<String, ToolState>,
+    completed:        bool,
+    usage:            Option<Usage>,
 }
 
 impl<S> OpenaiToAnthropicStream<S> {
@@ -103,10 +101,13 @@ impl<S> OpenaiToAnthropicStream<S> {
             return;
         }
         let block_index = self.next_block_index;
-        self.tools.insert(key.clone(), ToolState {
-            arguments: String::new(),
-            block_index,
-        });
+        self.tools.insert(
+            key.clone(),
+            ToolState {
+                arguments: String::new(),
+                block_index,
+            },
+        );
         self.push(
             "content_block_start",
             json!({
@@ -203,7 +204,11 @@ impl<S> OpenaiToAnthropicStream<S> {
                         .and_then(Value::as_str)
                         .unwrap_or(&key)
                         .to_string();
-                    let name = item.get("name").and_then(Value::as_str).unwrap_or("").to_string();
+                    let name = item
+                        .get("name")
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                        .to_string();
                     self.start_tool(key, id, name);
                 }
             }
@@ -312,8 +317,12 @@ mod tests {
     #[tokio::test]
     async fn converts_chat_completion_text_to_anthropic_events() {
         let chunks = vec![
-            Ok(Bytes::from_static(b"data: {\"choices\":[{\"delta\":{\"content\":\"Hello\"},\"finish_reason\":null}]}\n\n")),
-            Ok(Bytes::from_static(b"data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n")),
+            Ok(Bytes::from_static(
+                b"data: {\"choices\":[{\"delta\":{\"content\":\"Hello\"},\"finish_reason\":null}]}\n\n",
+            )),
+            Ok(Bytes::from_static(
+                b"data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n",
+            )),
         ];
         let output = OpenaiToAnthropicStream::new(
             stream::iter(chunks),
