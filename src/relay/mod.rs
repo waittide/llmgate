@@ -19,7 +19,7 @@ use bytes::Bytes;
 use futures::{Stream, StreamExt};
 
 use crate::{
-    model::{LLMPrice, RequestLog, StatsMetrics},
+    model::{Channel, ChannelModel, ChannelProvider, Group, LLMPrice, RequestLog, StatsMetrics},
     op::{AppState, channel, group, llm, log, stats},
     relay::{
         protocol::{
@@ -299,6 +299,441 @@ impl<S> Drop for StreamFinalizer<S> {
     }
 }
 
+fn validate_relay_request(
+    state: &AppState,
+    auth_ctx: &AuthContext,
+    body_bytes: &Bytes,
+) -> Result<(protocol::ChatRequestMetadata, Group), Response> {
+    let metadata = match parse_request_metadata(body_bytes) {
+        Some(m) if !m.model.trim().is_empty() => m,
+        _ => return Err(error(StatusCode::BAD_REQUEST, "Invalid request: missing model")),
+    };
+
+    if !auth_ctx.supported_models.is_empty() && !auth_ctx.supported_models.contains(&metadata.model) {
+        return Err(error(StatusCode::UNAUTHORIZED, "model not supported by this api key"));
+    }
+
+    let group_obj = match group::get_group_by_name(state, &metadata.model) {
+        Ok(g) => g,
+        Err(_) => return Err(error(StatusCode::NOT_FOUND, "model not found")),
+    };
+
+    Ok((metadata, group_obj))
+}
+
+fn prepare_upstream_payload(
+    format: ApiFormat,
+    default_endpoint: &'static str,
+    body_bytes: &Bytes,
+    ch: &Channel,
+    channel_model: &ChannelModel,
+) -> (&'static str, Vec<u8>) {
+    let rewritten_body =
+        rewrite_request_body_in_json(body_bytes, &channel_model.name, ch.param_override.as_deref());
+    match (format, &ch.channel_type) {
+        (ApiFormat::OpenaiCompletion, ChannelProvider::Anthropic) => {
+            if let Ok(val) = serde_json::from_slice::<serde_json::Value>(&rewritten_body) {
+                let converted = protocol::convert_openai_to_anthropic(&val);
+                let bytes = serde_json::to_vec(&converted).unwrap_or(rewritten_body);
+                ("/messages", bytes)
+            } else {
+                ("/chat/completions", rewritten_body)
+            }
+        }
+        (ApiFormat::OpenaiCompletion, ChannelProvider::Gemini) => {
+            if let Ok(val) = serde_json::from_slice::<serde_json::Value>(&rewritten_body) {
+                let converted = protocol::convert_openai_to_gemini(&val);
+                let bytes = serde_json::to_vec(&converted).unwrap_or(rewritten_body);
+                (default_endpoint, bytes)
+            } else {
+                (default_endpoint, rewritten_body)
+            }
+        }
+        _ => (default_endpoint, rewritten_body),
+    }
+}
+
+struct RoundFailure<'a> {
+    round: i64,
+    channel_name: &'a str,
+    model_name: &'a str,
+    target_req_url: &'a str,
+    channel_req_headers: &'a str,
+    rewritten_body_str: &'a str,
+    response_headers: &'a str,
+    status: u16,
+    duration_ms: i64,
+    err_body: &'a str,
+    should_cooldown: bool,
+}
+
+fn record_round_failure(
+    state: &AppState,
+    group_id: i64,
+    item_id: i64,
+    cooldown_seconds: i64,
+    req_id: u64,
+    rounds: &mut Vec<crate::model::RoundLog>,
+    fail: RoundFailure<'_>,
+) {
+    let round_log = crate::model::RoundLog {
+        round: fail.round,
+        channel_name: fail.channel_name.to_string(),
+        model_name: fail.model_name.to_string(),
+        request_url: fail.target_req_url.to_string(),
+        request_headers: fail.channel_req_headers.to_string(),
+        request_body: fail.rewritten_body_str.to_string(),
+        response_url: fail.target_req_url.to_string(),
+        response_headers: fail.response_headers.to_string(),
+        response_body: fail.err_body.to_string(),
+        status: fail.status,
+        duration_ms: fail.duration_ms,
+        error: Some(fail.err_body.to_string()),
+    };
+    rounds.push(round_log.clone());
+    state.request_state_manager.record_round_attempt(req_id, round_log);
+
+    if fail.should_cooldown {
+        state.route_manager.report_failure(group_id, item_id, cooldown_seconds);
+    } else {
+        tracing::warn!(
+            "Upstream returned client error {} from channel {}: {}, not triggering cooldown",
+            fail.status,
+            fail.channel_name,
+            fail.err_body
+        );
+    }
+
+    state.request_state_manager.update_round_error(
+        req_id,
+        fail.round,
+        fail.channel_name.to_string(),
+        fail.model_name.to_string(),
+        fail.err_body.to_string(),
+    );
+}
+
+struct StreamSuccessContext<'a> {
+    req_id: u64,
+    request_id: i64,
+    model: &'a str,
+    channel: &'a Channel,
+    channel_model: &'a ChannelModel,
+    api_key_id: i64,
+    target_req_url: &'a str,
+    channel_req_headers: &'a str,
+    rewritten_body_str: &'a str,
+    body_str: &'a str,
+    started_at: i64,
+    round: i64,
+    rounds: Vec<crate::model::RoundLog>,
+    start_time: Instant,
+    price_opt: Option<LLMPrice>,
+}
+
+fn handle_successful_stream(
+    state: &AppState,
+    upstream_resp: reqwest::Response,
+    ctx: StreamSuccessContext<'_>,
+) -> Response {
+    state.request_state_manager.mark_committed(ctx.req_id);
+
+    let log_info = RequestLogInfo {
+        request_id: ctx.request_id,
+        model: ctx.model.to_string(),
+        target_channel: ctx.channel.name.clone(),
+        target_model: ctx.channel_model.name.clone(),
+        request_url: ctx.target_req_url.to_string(),
+        request_headers: ctx.channel_req_headers.to_string(),
+        request_body: ctx.rewritten_body_str.to_string(),
+        response_url: ctx.target_req_url.to_string(),
+        response_headers: serialize_headers(upstream_resp.headers()),
+        started_at: ctx.started_at,
+        round: ctx.round,
+    };
+
+    let raw_stream = upstream_resp.bytes_stream();
+    let mapped_stream = raw_stream.map(move |chunk_res| match chunk_res {
+        Ok(bytes) => Ok::<Bytes, std::io::Error>(bytes),
+        Err(e) => Err(std::io::Error::other(e)),
+    });
+
+    let prompt_tokens = estimate_tokens(ctx.body_str);
+    let finalizer = StreamFinalizer {
+        inner: mapped_stream,
+        state: state.clone(),
+        req_id: ctx.req_id,
+        api_key_id: ctx.api_key_id,
+        channel_id: ctx.channel.id,
+        channel_model_id: ctx.channel_model.id,
+        price: ctx.price_opt,
+        prompt_tokens,
+        buffer: Vec::new(),
+        output_chars: 0,
+        usage: None,
+        start_time: ctx.start_time,
+        done: false,
+        log_info,
+        previous_rounds: ctx.rounds,
+        response_capture: Vec::new(),
+    };
+
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, "text/event-stream")
+        .header(header::CACHE_CONTROL, "no-cache")
+        .header(header::CONNECTION, "keep-alive")
+        .body(Body::from_stream(finalizer))
+        .unwrap_or_else(|e| {
+            tracing::error!("Failed to build SSE response: {}", e);
+            Response::builder()
+                .status(StatusCode::INTERNAL_SERVER_ERROR)
+                .body(Body::from("Internal Server Error"))
+                .unwrap_or_default()
+        })
+}
+
+struct JsonSuccessContext<'a> {
+    req_id: u64,
+    request_id: i64,
+    model: &'a str,
+    channel: &'a Channel,
+    channel_model: &'a ChannelModel,
+    api_key_id: i64,
+    target_req_url: &'a str,
+    channel_req_headers: &'a str,
+    rewritten_body_str: &'a str,
+    body_str: &'a str,
+    started_at: i64,
+    round: i64,
+    round_start_time: Instant,
+    start_time: Instant,
+    price_opt: Option<LLMPrice>,
+}
+
+async fn handle_successful_json(
+    state: &AppState,
+    upstream_resp: reqwest::Response,
+    mut rounds: Vec<crate::model::RoundLog>,
+    ctx: JsonSuccessContext<'_>,
+) -> Response {
+    let response_headers = serialize_headers(upstream_resp.headers());
+    let resp_bytes = upstream_resp.bytes().await.unwrap_or_default();
+    let resp_str = String::from_utf8_lossy(&resp_bytes).to_string();
+
+    let usage = match serde_json::from_slice::<serde_json::Value>(&resp_bytes) {
+        Ok(val) => extract_usage_from_json(&val).unwrap_or(Usage {
+            prompt_tokens: estimate_tokens(ctx.body_str),
+            completion_tokens: estimate_tokens(&resp_str),
+            total_tokens: estimate_tokens(ctx.body_str) + estimate_tokens(&resp_str),
+        }),
+        Err(_) => Usage {
+            prompt_tokens: estimate_tokens(ctx.body_str),
+            completion_tokens: estimate_tokens(&resp_str),
+            total_tokens: estimate_tokens(ctx.body_str) + estimate_tokens(&resp_str),
+        },
+    };
+
+    let cost = calculate_cost(usage.prompt_tokens, usage.completion_tokens, ctx.price_opt.as_ref());
+    let elapsed_ms = ctx.start_time.elapsed().as_millis() as i64;
+    let round_duration_ms = ctx.round_start_time.elapsed().as_millis() as i64;
+
+    let round_log = crate::model::RoundLog {
+        round: ctx.round,
+        channel_name: ctx.channel.name.clone(),
+        model_name: ctx.channel_model.name.clone(),
+        request_url: ctx.target_req_url.to_string(),
+        request_headers: ctx.channel_req_headers.to_string(),
+        request_body: ctx.rewritten_body_str.to_string(),
+        response_url: ctx.target_req_url.to_string(),
+        response_headers: response_headers.clone(),
+        response_body: resp_str.clone(),
+        status: 200,
+        duration_ms: round_duration_ms,
+        error: None,
+    };
+    rounds.push(round_log.clone());
+    state.request_state_manager.record_round_attempt(ctx.req_id, round_log);
+
+    log::record_request_log(
+        state.clone(),
+        RequestLog {
+            request_id: ctx.request_id,
+            status: "success".to_string(),
+            model: ctx.model.to_string(),
+            target_channel: ctx.channel.name.clone(),
+            target_model: ctx.channel_model.name.clone(),
+            request_url: ctx.target_req_url.to_string(),
+            request_headers: ctx.channel_req_headers.to_string(),
+            request_body: ctx.rewritten_body_str.to_string(),
+            response_url: ctx.target_req_url.to_string(),
+            response_headers,
+            response_body: resp_str.clone(),
+            prompt_tokens: usage.prompt_tokens,
+            completion_tokens: usage.completion_tokens,
+            total_tokens: usage.total_tokens,
+            cost,
+            wait_time: elapsed_ms,
+            round: ctx.round,
+            error: None,
+            rounds_detail: serde_json::to_string(&rounds).unwrap_or_default(),
+            created_at: ctx.started_at,
+            ..Default::default()
+        },
+    );
+
+    let delta = StatsMetrics {
+        input_token: usage.prompt_tokens,
+        output_token: usage.completion_tokens,
+        input_cost: (usage.prompt_tokens as f64 / 1_000_000.0)
+            * ctx.price_opt.as_ref().map(|p| p.input).unwrap_or(0.0),
+        output_cost: (usage.completion_tokens as f64 / 1_000_000.0)
+            * ctx.price_opt.as_ref().map(|p| p.output).unwrap_or(0.0),
+        wait_time: elapsed_ms,
+        request_success: 1,
+        request_failed: 0,
+    };
+
+    stats::record_metrics(state, ctx.api_key_id, ctx.channel.id, ctx.channel_model.id, &delta);
+    state.request_state_manager.finish(
+        ctx.req_id,
+        "success",
+        usage,
+        cost,
+        resp_str,
+        None,
+        rounds,
+    );
+
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(resp_bytes))
+        .unwrap_or_else(|e| {
+            tracing::error!("Failed to build JSON response: {}", e);
+            Response::builder()
+                .status(StatusCode::INTERNAL_SERVER_ERROR)
+                .body(Body::from("Internal Server Error"))
+                .unwrap_or_default()
+        })
+}
+
+struct FailedRelayContext<'a> {
+    req_id: u64,
+    request_id: i64,
+    model: &'a str,
+    last_target_channel: String,
+    last_target_model: String,
+    request_url: String,
+    request_headers: String,
+    request_body: String,
+    last_response_url: String,
+    last_response_headers: String,
+    last_status: StatusCode,
+    last_error_body: String,
+    rounds: Vec<crate::model::RoundLog>,
+    started_at: i64,
+    wait_time_ms: i64,
+    round: i64,
+    api_key_id: i64,
+}
+
+fn build_failed_relay_response(state: &AppState, ctx: FailedRelayContext<'_>) -> Response {
+    let failed_delta = StatsMetrics {
+        input_token: 0,
+        output_token: 0,
+        input_cost: 0.0,
+        output_cost: 0.0,
+        wait_time: ctx.wait_time_ms,
+        request_success: 0,
+        request_failed: 1,
+    };
+    stats::record_metrics(state, ctx.api_key_id, 0, 0, &failed_delta);
+
+    let error_summary = if !ctx.last_error_body.is_empty() {
+        ctx.last_error_body.clone()
+    } else {
+        "All failover targets exhausted".to_string()
+    };
+
+    log::record_request_log(
+        state.clone(),
+        RequestLog {
+            request_id: ctx.request_id,
+            status: "failed".to_string(),
+            model: ctx.model.to_string(),
+            target_channel: ctx.last_target_channel,
+            target_model: ctx.last_target_model,
+            request_url: ctx.request_url,
+            request_headers: ctx.request_headers,
+            request_body: ctx.request_body,
+            response_url: ctx.last_response_url,
+            response_headers: ctx.last_response_headers,
+            response_body: ctx.last_error_body.clone(),
+            prompt_tokens: 0,
+            completion_tokens: 0,
+            total_tokens: 0,
+            cost: 0.0,
+            wait_time: ctx.wait_time_ms,
+            round: ctx.round,
+            error: Some(error_summary.clone()),
+            rounds_detail: serde_json::to_string(&ctx.rounds).unwrap_or_default(),
+            created_at: ctx.started_at,
+            ..Default::default()
+        },
+    );
+
+    state.request_state_manager.finish(
+        ctx.req_id,
+        "failed",
+        Usage::default(),
+        0.0,
+        ctx.last_error_body.clone(),
+        Some(error_summary),
+        ctx.rounds,
+    );
+
+    let response_body_bytes = if !ctx.last_error_body.is_empty() {
+        if serde_json::from_str::<serde_json::Value>(&ctx.last_error_body).is_ok() {
+            Bytes::from(ctx.last_error_body)
+        } else {
+            let json_err = serde_json::json!({
+                "error": {
+                    "message": ctx.last_error_body,
+                    "type": "upstream_error",
+                    "code": ctx.last_status.as_u16()
+                }
+            });
+            Bytes::from(serde_json::to_vec(&json_err).unwrap_or_default())
+        }
+    } else {
+        let json_err = serde_json::json!({
+            "error": {
+                "message": "Upstream request failed after all attempts",
+                "type": "failover_exhausted",
+                "code": 502
+            }
+        });
+        Bytes::from(serde_json::to_vec(&json_err).unwrap_or_default())
+    };
+
+    Response::builder()
+        .status(if ctx.last_status.is_client_error() || ctx.last_status.is_server_error() {
+            ctx.last_status
+        } else {
+            StatusCode::BAD_GATEWAY
+        })
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(response_body_bytes))
+        .unwrap_or_else(|e| {
+            tracing::error!("Failed to build error response: {}", e);
+            Response::builder()
+                .status(StatusCode::BAD_GATEWAY)
+                .body(Body::from("Bad Gateway"))
+                .unwrap_or_default()
+        })
+}
+
 pub async fn forward_relay(
     state: AppState,
     auth_ctx: Arc<AuthContext>,
@@ -307,23 +742,12 @@ pub async fn forward_relay(
     headers: HeaderMap,
     body_bytes: Bytes,
 ) -> Response {
-    let metadata = match parse_request_metadata(&body_bytes) {
-        Some(m) if !m.model.trim().is_empty() => m,
-        _ => return error(StatusCode::BAD_REQUEST, "Invalid request: missing model"),
+    let (metadata, group_obj) = match validate_relay_request(&state, &auth_ctx, &body_bytes) {
+        Ok(v) => v,
+        Err(err_resp) => return err_resp,
     };
 
-    // 1. Check API Key supported_models whitelist
-    if !auth_ctx.supported_models.is_empty() && !auth_ctx.supported_models.contains(&metadata.model) {
-        return error(StatusCode::UNAUTHORIZED, "model not supported by this api key");
-    }
-
-    // 2. Check if group exists
-    let group_obj = match group::get_group_by_name(&state, &metadata.model) {
-        Ok(g) => g,
-        Err(_) => return error(StatusCode::NOT_FOUND, "model not found"),
-    };
-
-    let endpoint = match format {
+    let default_endpoint = match format {
         ApiFormat::AnthropicMessage => "/messages",
         ApiFormat::OpenAIResponse => "/responses",
         _ => "/chat/completions",
@@ -340,8 +764,9 @@ pub async fn forward_relay(
     let request_id = req_id as i64;
     let started_at = chrono::Utc::now().timestamp_millis();
     let start_time = Instant::now();
-    let mut round = 0;
     let max_attempts = group_obj.relay_config.member_max_attempts.max(1);
+
+    let mut round = 0;
     let mut last_target_channel = String::new();
     let mut last_target_model = String::new();
     let mut last_response_url = String::new();
@@ -362,7 +787,6 @@ pub async fn forward_relay(
         let item = match state.route_manager.pick_group_item(&current_group) {
             Some(it) => it,
             None => {
-                // If the group has no items at all, no need to spin-wait
                 if current_group.items.is_empty() {
                     break;
                 }
@@ -371,13 +795,10 @@ pub async fn forward_relay(
             }
         };
 
-        let channel_model_id = item.channel_model_id;
-        let channel_model = match state.channel_models.get(&channel_model_id) {
+        let channel_model = match state.channel_models.get(&item.channel_model_id) {
             Some(cm) => cm.clone(),
             None => {
-                state
-                    .route_manager
-                    .report_failure(current_group.id, item.id, 60);
+                state.route_manager.report_failure(current_group.id, item.id, 60);
                 continue;
             }
         };
@@ -385,62 +806,28 @@ pub async fn forward_relay(
         let ch = match channel::get_channel(&state, channel_model.channel_id) {
             Ok(c) if c.enabled => c,
             _ => {
-                state
-                    .route_manager
-                    .report_failure(current_group.id, item.id, 60);
+                state.route_manager.report_failure(current_group.id, item.id, 60);
                 continue;
             }
         };
 
-        let target_req_url = format!("{}{}", normalize_base_url(&ch.base_url), endpoint);
-
-        let client = get_client();
+        let (target_endpoint, final_body) =
+            prepare_upstream_payload(format, default_endpoint, &body_bytes, &ch, &channel_model);
+        let target_req_url = format!("{}{}", normalize_base_url(&ch.base_url), target_endpoint);
         let channel_req_headers = upstream::build_upstream_headers(&ch)
             .map(|h| serialize_headers(&h))
             .unwrap_or_else(|_| request_headers.clone());
-
-        // Rewrite model and apply parameter overrides in json
-        let rewritten_body =
-            rewrite_request_body_in_json(&body_bytes, &channel_model.name, ch.param_override.as_deref());
-
-        let (target_endpoint, final_body) = match (format, &ch.channel_type) {
-            (ApiFormat::OpenaiCompletion, crate::model::ChannelProvider::Anthropic) => {
-                if let Ok(val) = serde_json::from_slice::<serde_json::Value>(&rewritten_body) {
-                    let converted = protocol::convert_openai_to_anthropic(&val);
-                    let bytes = serde_json::to_vec(&converted).unwrap_or(rewritten_body);
-                    ("/messages", bytes)
-                } else {
-                    (endpoint, rewritten_body)
-                }
-            }
-            (ApiFormat::OpenaiCompletion, crate::model::ChannelProvider::Gemini) => {
-                if let Ok(val) = serde_json::from_slice::<serde_json::Value>(&rewritten_body) {
-                    let converted = protocol::convert_openai_to_gemini(&val);
-                    let bytes = serde_json::to_vec(&converted).unwrap_or(rewritten_body);
-                    (endpoint, bytes)
-                } else {
-                    (endpoint, rewritten_body)
-                }
-            }
-            _ => (endpoint, rewritten_body),
-        };
-
         let rewritten_body_str = String::from_utf8_lossy(&final_body).to_string();
-        state
-            .request_state_manager
-            .update_round(req_id, round, ch.name.clone(), channel_model.name.clone(), true);
+
+        state.request_state_manager.update_round(req_id, round, ch.name.clone(), channel_model.name.clone(), true);
 
         let timeout_secs = if metadata.stream {
             None
         } else {
-            Some(
-                current_group
-                    .relay_config
-                    .member_non_stream_response_timeout_seconds
-                    .max(10) as u64,
-            )
+            Some(current_group.relay_config.member_non_stream_response_timeout_seconds.max(10) as u64)
         };
 
+        let client = get_client();
         let req_builder = match build_upstream_request(client, &ch, target_endpoint, Some(final_body), timeout_secs) {
             Ok(rb) => rb,
             Err(e) => {
@@ -448,221 +835,89 @@ pub async fn forward_relay(
                 last_target_channel = ch.name.clone();
                 last_target_model = channel_model.name.clone();
                 last_error_body = err_msg.clone();
-                state
-                    .route_manager
-                    .report_failure(current_group.id, item.id, 60);
-                let round_log = crate::model::RoundLog {
-                    round,
-                    channel_name: ch.name.clone(),
-                    model_name: channel_model.name.clone(),
-                    request_url: target_req_url.clone(),
-                    request_headers: channel_req_headers.clone(),
-                    request_body: rewritten_body_str.clone(),
-                    response_url: target_req_url.clone(),
-                    response_headers: String::new(),
-                    response_body: err_msg.clone(),
-                    status: 500,
-                    duration_ms: round_start_time.elapsed().as_millis() as i64,
-                    error: Some(err_msg.clone()),
-                };
-                rounds.push(round_log.clone());
-                state
-                    .request_state_manager
-                    .record_round_attempt(req_id, round_log);
-                state.request_state_manager.update_round_error(
+
+                record_round_failure(
+                    &state,
+                    current_group.id,
+                    item.id,
+                    60,
                     req_id,
-                    round,
-                    ch.name.clone(),
-                    channel_model.name.clone(),
-                    err_msg,
+                    &mut rounds,
+                    RoundFailure {
+                        round,
+                        channel_name: &ch.name,
+                        model_name: &channel_model.name,
+                        target_req_url: &target_req_url,
+                        channel_req_headers: &channel_req_headers,
+                        rewritten_body_str: &rewritten_body_str,
+                        response_headers: "",
+                        status: 500,
+                        duration_ms: round_start_time.elapsed().as_millis() as i64,
+                        err_body: &err_msg,
+                        should_cooldown: true,
+                    },
                 );
                 continue;
             }
         };
 
-        let resp_result = req_builder.send().await;
-        match resp_result {
+        match req_builder.send().await {
             Ok(upstream_resp) => {
                 let status = upstream_resp.status();
                 if status.is_success() {
-                    // Success!
                     state.route_manager.report_success(
                         current_group.id,
                         item.id,
                         current_group.relay_config.member_affinity_seconds,
                     );
-
                     let price_opt = llm::get_llm_price(&state, &channel_model.name);
 
                     if metadata.stream {
-                        state.request_state_manager.mark_committed(req_id);
-
-                        let channel_id = ch.id;
-                        let cm_id = channel_model.id;
-                        let api_key_id = auth_ctx.api_key.id;
-
-                        let log_info = RequestLogInfo {
-                            request_id,
-                            model: metadata.model.clone(),
-                            target_channel: ch.name.clone(),
-                            target_model: channel_model.name.clone(),
-                            request_url: target_req_url.clone(),
-                            request_headers: channel_req_headers.clone(),
-                            request_body: rewritten_body_str.clone(),
-                            response_url: target_req_url.clone(),
-                            response_headers: serialize_headers(upstream_resp.headers()),
-                            started_at,
-                            round,
-                        };
-
-                        let raw_stream = upstream_resp.bytes_stream();
-                        let mapped_stream = raw_stream.map(move |chunk_res| match chunk_res {
-                            Ok(bytes) => Ok::<Bytes, std::io::Error>(bytes),
-                            Err(e) => Err(std::io::Error::other(e)),
-                        });
-
-                        // Record real usage when the stream completes; Drop handles
-                        // client disconnect / mid-stream abort without dropping stats.
-                        let prompt_tokens = estimate_tokens(&body_str);
-                        let finalizer = StreamFinalizer {
-                            inner: mapped_stream,
-                            state: state.clone(),
-                            req_id,
-                            api_key_id,
-                            channel_id,
-                            channel_model_id: cm_id,
-                            price: price_opt.clone(),
-                            prompt_tokens,
-                            buffer: Vec::new(),
-                            output_chars: 0,
-                            usage: None,
-                            start_time,
-                            done: false,
-                            log_info,
-                            previous_rounds: rounds,
-                            response_capture: Vec::new(),
-                        };
-
-                        let body = Body::from_stream(finalizer);
-
-                        return Response::builder()
-                            .status(StatusCode::OK)
-                            .header(header::CONTENT_TYPE, "text/event-stream")
-                            .header(header::CACHE_CONTROL, "no-cache")
-                            .header(header::CONNECTION, "keep-alive")
-                            .body(body)
-                            .unwrap_or_else(|e| {
-                                tracing::error!("Failed to build SSE response: {}", e);
-                                Response::builder()
-                                    .status(StatusCode::INTERNAL_SERVER_ERROR)
-                                    .body(Body::from("Internal Server Error"))
-                                    .unwrap_or_default()
-                            });
-                    } else {
-                        // Non-streaming response
-                        let response_headers = serialize_headers(upstream_resp.headers());
-                        let resp_bytes = upstream_resp.bytes().await.unwrap_or_default();
-                        let resp_str = String::from_utf8_lossy(&resp_bytes).to_string();
-
-                        let usage = match serde_json::from_slice::<serde_json::Value>(&resp_bytes) {
-                            Ok(val) => extract_usage_from_json(&val).unwrap_or(Usage {
-                                prompt_tokens:     estimate_tokens(&body_str),
-                                completion_tokens: estimate_tokens(&resp_str),
-                                total_tokens:      estimate_tokens(&body_str) + estimate_tokens(&resp_str),
-                            }),
-                            Err(_) => Usage {
-                                prompt_tokens:     estimate_tokens(&body_str),
-                                completion_tokens: estimate_tokens(&resp_str),
-                                total_tokens:      estimate_tokens(&body_str) + estimate_tokens(&resp_str),
-                            },
-                        };
-
-                        let cost = calculate_cost(usage.prompt_tokens, usage.completion_tokens, price_opt.as_ref());
-
-                        let elapsed_ms = start_time.elapsed().as_millis() as i64;
-
-                        let round_duration_ms = round_start_time.elapsed().as_millis() as i64;
-                        let round_log = crate::model::RoundLog {
-                            round,
-                            channel_name: ch.name.clone(),
-                            model_name: channel_model.name.clone(),
-                            request_url: target_req_url.clone(),
-                            request_headers: channel_req_headers.clone(),
-                            request_body: rewritten_body_str.clone(),
-                            response_url: target_req_url.clone(),
-                            response_headers: response_headers.clone(),
-                            response_body: resp_str.clone(),
-                            status: 200,
-                            duration_ms: round_duration_ms,
-                            error: None,
-                        };
-                        rounds.push(round_log.clone());
-                        state
-                            .request_state_manager
-                            .record_round_attempt(req_id, round_log);
-
-                        // Persist the completed request/response log.
-                        log::record_request_log(
-                            state.clone(),
-                            RequestLog {
+                        return handle_successful_stream(
+                            &state,
+                            upstream_resp,
+                            StreamSuccessContext {
+                                req_id,
                                 request_id,
-                                status: "success".to_string(),
-                                model: metadata.model.clone(),
-                                target_channel: ch.name.clone(),
-                                target_model: channel_model.name.clone(),
-                                request_url: target_req_url.clone(),
-                                request_headers: channel_req_headers.clone(),
-                                request_body: rewritten_body_str.clone(),
-                                response_url: target_req_url.clone(),
-                                response_headers,
-                                response_body: resp_str.clone(),
-                                prompt_tokens: usage.prompt_tokens,
-                                completion_tokens: usage.completion_tokens,
-                                total_tokens: usage.total_tokens,
-                                cost,
-                                wait_time: elapsed_ms,
+                                model: &metadata.model,
+                                channel: &ch,
+                                channel_model: &channel_model,
+                                api_key_id: auth_ctx.api_key.id,
+                                target_req_url: &target_req_url,
+                                channel_req_headers: &channel_req_headers,
+                                rewritten_body_str: &rewritten_body_str,
+                                body_str: &body_str,
+                                started_at,
                                 round,
-                                error: None,
-                                rounds_detail: serde_json::to_string(&rounds).unwrap_or_default(),
-                                created_at: started_at,
-                                ..Default::default()
+                                rounds,
+                                start_time,
+                                price_opt,
                             },
                         );
-
-                        let delta = StatsMetrics {
-                            input_token:     usage.prompt_tokens,
-                            output_token:    usage.completion_tokens,
-                            input_cost:      (usage.prompt_tokens as f64 / 1_000_000.0)
-                                * price_opt.as_ref().map(|p| p.input).unwrap_or(0.0),
-                            output_cost:     (usage.completion_tokens as f64 / 1_000_000.0)
-                                * price_opt.as_ref().map(|p| p.output).unwrap_or(0.0),
-                            wait_time:       elapsed_ms,
-                            request_success: 1,
-                            request_failed:  0,
-                        };
-
-                        stats::record_metrics(&state, auth_ctx.api_key.id, ch.id, channel_model.id, &delta);
-                        state.request_state_manager.finish(
-                            req_id,
-                            "success",
-                            usage.clone(),
-                            cost,
-                            resp_str,
-                            None,
+                    } else {
+                        return handle_successful_json(
+                            &state,
+                            upstream_resp,
                             rounds,
-                        );
-
-                        return Response::builder()
-                            .status(StatusCode::OK)
-                            .header(header::CONTENT_TYPE, "application/json")
-                            .body(Body::from(resp_bytes))
-                            .unwrap_or_else(|e| {
-                                tracing::error!("Failed to build JSON response: {}", e);
-                                Response::builder()
-                                    .status(StatusCode::INTERNAL_SERVER_ERROR)
-                                    .body(Body::from("Internal Server Error"))
-                                    .unwrap_or_default()
-                            });
+                            JsonSuccessContext {
+                                req_id,
+                                request_id,
+                                model: &metadata.model,
+                                channel: &ch,
+                                channel_model: &channel_model,
+                                api_key_id: auth_ctx.api_key.id,
+                                target_req_url: &target_req_url,
+                                channel_req_headers: &channel_req_headers,
+                                rewritten_body_str: &rewritten_body_str,
+                                body_str: &body_str,
+                                started_at,
+                                round,
+                                round_start_time,
+                                start_time,
+                                price_opt,
+                            },
+                        )
+                        .await;
                     }
                 } else {
                     let resp_headers = serialize_headers(upstream_resp.headers());
@@ -675,50 +930,30 @@ pub async fn forward_relay(
                     last_status = status;
                     last_error_body = err_body.clone();
 
-                    let round_log = crate::model::RoundLog {
-                        round,
-                        channel_name: ch.name.clone(),
-                        model_name: channel_model.name.clone(),
-                        request_url: target_req_url.clone(),
-                        request_headers: request_headers.clone(),
-                        request_body: rewritten_body_str.clone(),
-                        response_url: target_req_url.clone(),
-                        response_headers: resp_headers,
-                        response_body: err_body.clone(),
-                        status: status.as_u16(),
-                        duration_ms: round_duration_ms,
-                        error: Some(err_body.clone()),
-                    };
-                    rounds.push(round_log.clone());
-                    state
-                        .request_state_manager
-                        .record_round_attempt(req_id, round_log);
-
-                    // Only penalize channel if it is a server error, rate-limit, or gateway failure
-                    if !is_client_error(status) {
-                        state.route_manager.report_failure(
-                            current_group.id,
-                            item.id,
-                            current_group.relay_config.member_cooldown_seconds,
-                        );
-                    } else {
-                        tracing::warn!(
-                            "Upstream returned client error {} from channel {}: {}, not triggering cooldown",
-                            status,
-                            ch.name,
-                            err_body
-                        );
-                    }
-                    state.request_state_manager.update_round_error(
+                    let is_client = is_client_error(status);
+                    record_round_failure(
+                        &state,
+                        current_group.id,
+                        item.id,
+                        current_group.relay_config.member_cooldown_seconds,
                         req_id,
-                        round,
-                        ch.name.clone(),
-                        channel_model.name.clone(),
-                        err_body,
+                        &mut rounds,
+                        RoundFailure {
+                            round,
+                            channel_name: &ch.name,
+                            model_name: &channel_model.name,
+                            target_req_url: &target_req_url,
+                            channel_req_headers: &request_headers,
+                            rewritten_body_str: &rewritten_body_str,
+                            response_headers: &resp_headers,
+                            status: status.as_u16(),
+                            duration_ms: round_duration_ms,
+                            err_body: &err_body,
+                            should_cooldown: !is_client,
+                        },
                     );
 
-                    // If it is a clear client error (e.g. 400 Bad Request / 422 Unprocessable), do not failover blindly
-                    if is_client_error(status) {
+                    if is_client {
                         break;
                     }
                 }
@@ -732,135 +967,54 @@ pub async fn forward_relay(
                 last_response_headers = String::new();
                 last_status = StatusCode::BAD_GATEWAY;
                 last_error_body = err_msg.clone();
-                let round_log = crate::model::RoundLog {
-                    round,
-                    channel_name: ch.name.clone(),
-                    model_name: channel_model.name.clone(),
-                    request_url: target_req_url.clone(),
-                    request_headers: channel_req_headers.clone(),
-                    request_body: rewritten_body_str.clone(),
-                    response_url: target_req_url.clone(),
-                    response_headers: String::new(),
-                    response_body: err_msg.clone(),
-                    status: 502,
-                    duration_ms: round_duration_ms,
-                    error: Some(err_msg.clone()),
-                };
-                rounds.push(round_log.clone());
-                state
-                    .request_state_manager
-                    .record_round_attempt(req_id, round_log);
 
-                state.route_manager.report_failure(
+                record_round_failure(
+                    &state,
                     current_group.id,
                     item.id,
                     current_group.relay_config.member_cooldown_seconds,
-                );
-                state.request_state_manager.update_round_error(
                     req_id,
-                    round,
-                    ch.name.clone(),
-                    channel_model.name.clone(),
-                    err_msg,
+                    &mut rounds,
+                    RoundFailure {
+                        round,
+                        channel_name: &ch.name,
+                        model_name: &channel_model.name,
+                        target_req_url: &target_req_url,
+                        channel_req_headers: &channel_req_headers,
+                        rewritten_body_str: &rewritten_body_str,
+                        response_headers: "",
+                        status: 502,
+                        duration_ms: round_duration_ms,
+                        err_body: &err_msg,
+                        should_cooldown: true,
+                    },
                 );
             }
         }
     }
 
-    // Record the failed attempt so request_failed metrics are not dropped.
-    let wait_time_ms = start_time.elapsed().as_millis() as i64;
-    let failed_delta = StatsMetrics {
-        input_token:     0,
-        output_token:    0,
-        input_cost:      0.0,
-        output_cost:     0.0,
-        wait_time:       wait_time_ms,
-        request_success: 0,
-        request_failed:  1,
-    };
-    stats::record_metrics(&state, auth_ctx.api_key.id, 0, 0, &failed_delta);
-    let error_summary = if !last_error_body.is_empty() {
-        last_error_body.clone()
-    } else {
-        "All failover targets exhausted".to_string()
-    };
-
-    // Persist the failed request log.
-    log::record_request_log(
-        state.clone(),
-        RequestLog {
+    build_failed_relay_response(
+        &state,
+        FailedRelayContext {
+            req_id,
             request_id,
-            status: "failed".to_string(),
-            model: metadata.model.clone(),
-            target_channel: last_target_channel,
-            target_model: last_target_model,
-            request_url: request_url.clone(),
-            request_headers: request_headers.clone(),
-            request_body: request_body.clone(),
-            response_url: last_response_url,
-            response_headers: last_response_headers,
-            response_body: last_error_body.clone(),
-            prompt_tokens: 0,
-            completion_tokens: 0,
-            total_tokens: 0,
-            cost: 0.0,
-            wait_time: wait_time_ms,
+            model: &metadata.model,
+            last_target_channel,
+            last_target_model,
+            request_url,
+            request_headers,
+            request_body,
+            last_response_url,
+            last_response_headers,
+            last_status,
+            last_error_body,
+            rounds,
+            started_at,
+            wait_time_ms: start_time.elapsed().as_millis() as i64,
             round,
-            error: Some(error_summary.clone()),
-            rounds_detail: serde_json::to_string(&rounds).unwrap_or_default(),
-            created_at: started_at,
-            ..Default::default()
+            api_key_id: auth_ctx.api_key.id,
         },
-    );
-
-    state.request_state_manager.finish(
-        req_id,
-        "failed",
-        Usage::default(),
-        0.0,
-        last_error_body.clone(),
-        Some(error_summary),
-        rounds,
-    );
-    let response_body_bytes = if !last_error_body.is_empty() {
-        if serde_json::from_str::<serde_json::Value>(&last_error_body).is_ok() {
-            Bytes::from(last_error_body)
-        } else {
-            let json_err = serde_json::json!({
-                "error": {
-                    "message": last_error_body,
-                    "type": "upstream_error",
-                    "code": last_status.as_u16()
-                }
-            });
-            Bytes::from(serde_json::to_vec(&json_err).unwrap_or_default())
-        }
-    } else {
-        let json_err = serde_json::json!({
-            "error": {
-                "message": "Upstream request failed after all attempts",
-                "type": "failover_exhausted",
-                "code": 502
-            }
-        });
-        Bytes::from(serde_json::to_vec(&json_err).unwrap_or_default())
-    };
-
-    Response::builder()
-        .status(if last_status.is_client_error() || last_status.is_server_error() {
-            last_status
-        } else {
-            StatusCode::BAD_GATEWAY
-        })
-        .header(header::CONTENT_TYPE, "application/json")
-        .body(Body::from(response_body_bytes))
-        .unwrap_or_else(|e| {
-            tracing::error!("Failed to build error response: {}", e);
-            Response::builder()
-                .status(StatusCode::BAD_GATEWAY)
-                .body(Body::from("Bad Gateway"))
-                .unwrap_or_default()
-        })
+    )
 }
 #[cfg(test)]
 mod tests {
