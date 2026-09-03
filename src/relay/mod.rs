@@ -71,6 +71,7 @@ struct StreamFinalizer<S> {
     adapt_anthropic_sse: bool,
     chatcmpl_id:         String,
     pending_chunks:      Vec<Bytes>,
+    done_emitted:        bool,
 }
 
 /// Drains complete SSE events from `buffer`, accumulating any `usage` found.
@@ -248,9 +249,12 @@ where
         let this = self.as_mut().get_mut();
 
         if this.adapt_anthropic_sse && !this.pending_chunks.is_empty() {
-            return Poll::Ready(Some(Ok(this.pending_chunks.remove(0))));
+            let chunk = this.pending_chunks.remove(0);
+            if chunk.as_ref() == b"data: [DONE]\n\n" {
+                this.done_emitted = true;
+            }
+            return Poll::Ready(Some(Ok(chunk)));
         }
-
         match Pin::new(&mut this.inner).poll_next(cx) {
             Poll::Ready(Some(Ok(bytes))) => {
                 this.output_bytes += bytes.len();
@@ -290,9 +294,12 @@ where
                         }
                         this.buffer.drain(..end);
                     }
-
                     if !this.pending_chunks.is_empty() {
-                        Poll::Ready(Some(Ok(this.pending_chunks.remove(0))))
+                        let chunk = this.pending_chunks.remove(0);
+                        if chunk.as_ref() == b"data: [DONE]\n\n" {
+                            this.done_emitted = true;
+                        }
+                        Poll::Ready(Some(Ok(chunk)))
                     } else {
                         cx.waker().wake_by_ref();
                         Poll::Pending
@@ -309,7 +316,8 @@ where
             Poll::Ready(None) => {
                 let was_done = this.done;
                 this.finalize(true);
-                if this.adapt_anthropic_sse && !was_done {
+                if this.adapt_anthropic_sse && !was_done && !this.done_emitted {
+                    this.done_emitted = true;
                     Poll::Ready(Some(Ok(Bytes::from_static(b"data: [DONE]\n\n"))))
                 } else {
                     Poll::Ready(None)
@@ -561,6 +569,7 @@ fn handle_successful_stream(
         adapt_anthropic_sse: ctx.channel.channel_type == ChannelProvider::Anthropic,
         chatcmpl_id: format!("chatcmpl-{}", nanoid::nanoid!(24)),
         pending_chunks: Vec::new(),
+        done_emitted: false,
     };
 
     Response::builder()
