@@ -6,11 +6,11 @@ use anyhow::{anyhow, Result};
 use sqlx::Row;
 
 pub async fn refresh_llm_cache(state: &AppState) -> Result<()> {
-    state.llm_prices.clear();
-    let rows = sqlx::query("SELECT * FROM llm_infos")
+    let rows = sqlx::query("SELECT name, input, output, cache_read, cache_write FROM llm_infos")
         .fetch_all(&state.db)
         .await?;
 
+    let mut local_prices = std::collections::HashMap::new();
     for row in rows {
         let name: String = row.get("name");
         let price = LLMPrice {
@@ -19,7 +19,12 @@ pub async fn refresh_llm_cache(state: &AppState) -> Result<()> {
             cache_read: row.get("cache_read"),
             cache_write: row.get("cache_write"),
         };
-        state.llm_prices.insert(name.to_lowercase(), price);
+        local_prices.insert(name.to_lowercase(), price);
+    }
+
+    state.llm_prices.clear();
+    for (k, v) in local_prices {
+        state.llm_prices.insert(k, v);
     }
     Ok(())
 }

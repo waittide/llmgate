@@ -172,11 +172,9 @@ pub struct Channel {
     pub key:            String,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub models:         Vec<ChannelModel>,
-    pub proxy:          bool,
     pub auto_sync:      bool,
     pub custom_header:  Vec<CustomHeader>,
     pub param_override: Option<String>,
-    pub channel_proxy:  Option<String>,
     pub match_regex:    Option<String>,
     #[serde(flatten, default)]
     pub metrics:        StatsMetrics,
@@ -196,10 +194,8 @@ pub struct ChannelUpdateRequest {
     pub base_url:       Option<String>,
     pub key:            Option<String>,
     pub models:         Option<Vec<ChannelModel>>,
-    pub proxy:          Option<bool>,
     pub auto_sync:      Option<bool>,
     pub custom_header:  Option<Vec<CustomHeader>>,
-    pub channel_proxy:  Option<String>,
     pub param_override: Option<String>,
     pub match_regex:    Option<String>,
 }
@@ -344,6 +340,50 @@ pub struct APIKey {
 pub struct Setting {
     pub key:   String,
     pub value: String,
+}
+
+// ---------------- Request Log ----------------
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct RoundLog {
+    pub round:            i64,
+    pub channel_name:     String,
+    pub model_name:       String,
+    pub request_url:      String,
+    pub request_headers:  String,
+    pub request_body:     String,
+    pub response_url:     String,
+    pub response_headers: String,
+    pub response_body:    String,
+    pub status:           u16,
+    pub duration_ms:      i64,
+    pub error:            Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, sqlx::FromRow)]
+#[serde(default)]
+pub struct RequestLog {
+    pub id:              i64,
+    pub request_id:      i64,
+    pub status:          String,
+    pub model:           String,
+    pub target_channel:  String,
+    pub target_model:    String,
+    pub request_url:     String,
+    pub request_headers: String,
+    pub request_body:    String,
+    pub response_url:    String,
+    pub response_headers: String,
+    pub response_body:   String,
+    pub prompt_tokens:   i64,
+    pub completion_tokens: i64,
+    pub total_tokens:    i64,
+    pub cost:            f64,
+    pub wait_time:       i64,
+    pub round:           i64,
+    pub error:           Option<String>,
+    pub rounds_detail:   String,
+    pub created_at:      i64,
 }
 
 // ---------------- LLM Pricing & Models ----------------

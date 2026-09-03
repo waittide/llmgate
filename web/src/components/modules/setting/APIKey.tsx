@@ -30,7 +30,7 @@ import { CopyIconButton } from '@/components/common/CopyButton';
 function toExpireAt(date: Date, time: string): number {
     const t = /^\d{2}:\d{2}$/.test(time) ? time : '00:00';
     const [hh, mm] = t.split(':').map(Number);
-    const d = new Date(Date.UTC(date.getFullYear(), date.getMonth(), date.getDate(), hh, mm, 0));
+    const d = new Date(date.getFullYear(), date.getMonth(), date.getDate(), hh, mm, 0);
     // 返回 Unix 时间戳（秒）
     return Math.floor(d.getTime() / 1000);
 }

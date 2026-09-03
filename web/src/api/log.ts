@@ -15,6 +15,21 @@ export interface RelayUsage {
         write_cached_tokens?: number;
     } | null;
 }
+// RoundLog 表示一轮上游渠道尝试的完整上下文与结果。
+export interface RoundLog {
+    round: number;
+    channel_name: string;
+    model_name: string;
+    request_url: string;
+    request_headers: string;
+    request_body: string;
+    response_url: string;
+    response_headers: string;
+    response_body: string;
+    status: number;
+    duration_ms: number;
+    error?: string;
+}
 
 // RelayLogOverview 是请求状态流发送的完整进程内请求状态。
 export interface RelayLogOverview {
@@ -30,8 +45,8 @@ export interface RelayLogOverview {
     target_model: string;
     sending: boolean;
     error?: string;
+    rounds?: RoundLog[];
 }
-
 // useClearLogs 清空已完成的内存日志。
 export function useClearLogs() {
     return useMutation({
@@ -60,7 +75,7 @@ export function useLogs() {
             setError(null);
             setIsLoading(false);
         };
-        source.addEventListener('log', (event) => {
+        source.addEventListener('overview', (event) => {
             let next: RelayLogOverview;
             try {
                 next = JSON.parse((event as MessageEvent<string>).data) as RelayLogOverview;
@@ -114,5 +129,47 @@ export function useLogResponseBody(id: number, startedAt: string, enabled: boole
         queryFn: () => apiRequest<string>(`/api/v1/log/${id}/response-body`),
         enabled,
         staleTime: Infinity,
-	});
+    });
+}
+
+// PersistentLogDetail 是持久化请求日志的完整内容, 含请求/响应两侧的 URL、Header 与 Body。
+export interface PersistentLogDetail extends RelayLogOverview {
+    request_url: string;
+    request_headers: string;
+    request_body: string;
+    response_url: string;
+    response_headers: string;
+    response_body: string;
+    rounds_detail?: string;
+}
+
+// LogListResponse 是持久化日志分页列表的响应。
+export interface LogListResponse {
+    total: number;
+    items: RelayLogOverview[];
+}
+
+// usePersistentLogs 按分页与过滤条件查询数据库中的持久化请求日志。
+export function usePersistentLogs(params: { page: number; pageSize: number; model: string; status: string; keyword: string }) {
+    return useQuery({
+        queryKey: ['logs', 'list', params],
+        queryFn: async () => {
+            const q = new URLSearchParams();
+            q.set('page', String(params.page));
+            q.set('page_size', String(params.pageSize));
+            if (params.model) q.set('model', params.model);
+            if (params.status) q.set('status', params.status);
+            if (params.keyword) q.set('keyword', params.keyword);
+            return apiRequest<LogListResponse>(`/api/v1/log/list?${q.toString()}`);
+        },
+    });
+}
+
+// useLogDetail 获取指定持久化日志的完整详情(URL/Header/Body)。
+export function useLogDetail(id: number, enabled: boolean) {
+    return useQuery({
+        queryKey: ['logs', id, 'detail'],
+        queryFn: () => apiRequest<PersistentLogDetail>(`/api/v1/log/${id}`),
+        enabled,
+    });
 }

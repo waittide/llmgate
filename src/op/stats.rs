@@ -230,6 +230,8 @@ pub fn list_stats_api_keys(state: &AppState) -> Vec<StatsAPIKey> {
 }
 
 pub async fn flush_stats_to_db(state: &AppState) -> Result<()> {
+    let mut tx = state.db.begin().await?;
+
     // 1. Flush Total
     let total = state.stats_total.read().clone();
     sqlx::query(
@@ -253,7 +255,7 @@ pub async fn flush_stats_to_db(state: &AppState) -> Result<()> {
     .bind(total.metrics.wait_time)
     .bind(total.metrics.request_success)
     .bind(total.metrics.request_failed)
-    .execute(&state.db)
+    .execute(&mut *tx)
     .await?;
 
     // 2. Flush Daily
@@ -280,7 +282,7 @@ pub async fn flush_stats_to_db(state: &AppState) -> Result<()> {
     .bind(daily.metrics.wait_time)
     .bind(daily.metrics.request_success)
     .bind(daily.metrics.request_failed)
-    .execute(&state.db)
+    .execute(&mut *tx)
     .await?;
 
     // 3. Flush Hourlies
@@ -309,7 +311,7 @@ pub async fn flush_stats_to_db(state: &AppState) -> Result<()> {
         .bind(h.metrics.wait_time)
         .bind(h.metrics.request_success)
         .bind(h.metrics.request_failed)
-        .execute(&state.db)
+        .execute(&mut *tx)
         .await?;
     }
 
@@ -338,7 +340,7 @@ pub async fn flush_stats_to_db(state: &AppState) -> Result<()> {
         .bind(k.metrics.wait_time)
         .bind(k.metrics.request_success)
         .bind(k.metrics.request_failed)
-        .execute(&state.db)
+        .execute(&mut *tx)
         .await?;
     }
 
@@ -361,7 +363,7 @@ pub async fn flush_stats_to_db(state: &AppState) -> Result<()> {
         .bind(ch.metrics.request_success)
         .bind(ch.metrics.request_failed)
         .bind(ch.id)
-        .execute(&state.db)
+        .execute(&mut *tx)
         .await?;
     }
 
@@ -383,9 +385,10 @@ pub async fn flush_stats_to_db(state: &AppState) -> Result<()> {
         .bind(cm.metrics.request_success)
         .bind(cm.metrics.request_failed)
         .bind(cm.id)
-        .execute(&state.db)
+        .execute(&mut *tx)
         .await?;
     }
 
+    tx.commit().await?;
     Ok(())
 }

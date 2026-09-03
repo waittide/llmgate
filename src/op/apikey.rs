@@ -6,16 +6,25 @@ use crate::{
 use anyhow::{anyhow, Result};
 
 pub async fn refresh_apikey_cache(state: &AppState) -> Result<()> {
-    state.api_keys.clear();
-    state.api_key_str_index.clear();
-
     let keys: Vec<APIKey> = sqlx::query_as("SELECT * FROM api_keys ORDER BY id ASC")
         .fetch_all(&state.db)
         .await?;
 
+    let mut local_keys = std::collections::HashMap::new();
+    let mut local_index = std::collections::HashMap::new();
+
     for key in keys {
-        state.api_key_str_index.insert(key.api_key.clone(), key.id);
-        state.api_keys.insert(key.id, key);
+        local_index.insert(key.api_key.clone(), key.id);
+        local_keys.insert(key.id, key);
+    }
+
+    state.api_keys.clear();
+    for (k, v) in local_keys {
+        state.api_keys.insert(k, v);
+    }
+    state.api_key_str_index.clear();
+    for (k, v) in local_index {
+        state.api_key_str_index.insert(k, v);
     }
     Ok(())
 }

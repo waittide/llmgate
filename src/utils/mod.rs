@@ -17,10 +17,20 @@ pub fn hash_password(password: &str) -> String {
     hasher.update(password.as_bytes());
     hex::encode(hasher.finalize())
 }
+pub fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (x, y) in a.iter().zip(b.iter()) {
+        diff |= x ^ y;
+    }
+    diff == 0
+}
 
 pub fn verify_password(password: &str, hashed: &str) -> bool {
     let computed = hash_password(password);
-    computed == hashed
+    constant_time_eq(computed.as_bytes(), hashed.as_bytes())
 }
 
 pub fn estimate_tokens(text: &str) -> i64 {

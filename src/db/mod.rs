@@ -75,11 +75,11 @@ pub async fn migrate(pool: &DbPool) -> Result<()> {
 
     // Seed default settings
     let default_settings = [
-        ("proxy_url", ""),
         ("stats_save_interval", "10"),
         ("cors_allow_origins", ""),
         ("model_info_update_interval", "24"),
         ("sync_llm_interval", "24"),
+        ("log_retention_days", "7"),
     ];
     for (k, v) in default_settings {
         sqlx::query("INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)")
@@ -116,11 +116,9 @@ pub async fn migrate(pool: &DbPool) -> Result<()> {
             enabled INTEGER NOT NULL DEFAULT 1,
             base_url TEXT NOT NULL,
             key TEXT NOT NULL,
-            proxy INTEGER NOT NULL DEFAULT 0,
             auto_sync INTEGER NOT NULL DEFAULT 0,
             custom_header TEXT NOT NULL DEFAULT '[]',
             param_override TEXT,
-            channel_proxy TEXT,
             match_regex TEXT,
             input_token INTEGER NOT NULL DEFAULT 0,
             output_token INTEGER NOT NULL DEFAULT 0,
@@ -254,6 +252,44 @@ pub async fn migrate(pool: &DbPool) -> Result<()> {
     )
     .execute(pool)
     .await?;
+
+    // 10. request_logs table (persistent request/response logging)
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS request_logs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            request_id INTEGER NOT NULL,
+            status TEXT NOT NULL DEFAULT '',
+            model TEXT NOT NULL DEFAULT '',
+            target_channel TEXT NOT NULL DEFAULT '',
+            target_model TEXT NOT NULL DEFAULT '',
+            request_url TEXT NOT NULL DEFAULT '',
+            request_headers TEXT NOT NULL DEFAULT '',
+            request_body TEXT NOT NULL DEFAULT '',
+            response_url TEXT NOT NULL DEFAULT '',
+            response_headers TEXT NOT NULL DEFAULT '',
+            response_body TEXT NOT NULL DEFAULT '',
+            prompt_tokens INTEGER NOT NULL DEFAULT 0,
+            completion_tokens INTEGER NOT NULL DEFAULT 0,
+            total_tokens INTEGER NOT NULL DEFAULT 0,
+            cost REAL NOT NULL DEFAULT 0,
+            wait_time INTEGER NOT NULL DEFAULT 0,
+            round INTEGER NOT NULL DEFAULT 1,
+            error TEXT,
+            rounds_detail TEXT NOT NULL DEFAULT '[]',
+            created_at INTEGER NOT NULL DEFAULT 0
+        );
+        CREATE INDEX IF NOT EXISTS idx_request_logs_created_at ON request_logs (created_at);
+        CREATE INDEX IF NOT EXISTS idx_request_logs_request_id ON request_logs (request_id);
+        "#,
+    )
+    .execute(pool)
+    .await?;
+
+    // Ensure rounds_detail column exists for existing databases
+    let _ = sqlx::query("ALTER TABLE request_logs ADD COLUMN rounds_detail TEXT NOT NULL DEFAULT '[]'")
+        .execute(pool)
+        .await;
 
     Ok(())
 }

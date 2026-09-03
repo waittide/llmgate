@@ -6,9 +6,9 @@ pub const APP_DESC: &str = "all ai service in one place (Rust Edition)";
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 #[derive(Parser, Debug, Clone)]
-#[command(name = APP_NAME, about = APP_DESC, version = VERSION)]
+#[command(name = APP_NAME, about = APP_DESC, version = VERSION, disable_help_flag = true)]
 pub struct Config {
-    #[arg(short = 'H', long, default_value = "0.0.0.0", help = "Server listening host")]
+    #[arg(short = 'h', long, default_value = "0.0.0.0", help = "Server listening host")]
     pub host: String,
 
     #[arg(short = 'p', long, default_value_t = 8080, help = "Server listening port")]
@@ -19,6 +19,10 @@ pub struct Config {
 
     #[arg(long, default_value_t = false, help = "Enable debug logging")]
     pub debug: bool,
+
+    /// Print help.
+    #[arg(long = "help", action = clap::ArgAction::Help)]
+    pub help: Option<bool>,
 }
 
 impl Config {

@@ -6,6 +6,7 @@ pub mod llm;
 pub mod setting;
 pub mod stats;
 pub mod user;
+pub mod log;
 
 use crate::{
     db::DbPool,

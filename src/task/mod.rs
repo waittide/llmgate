@@ -39,5 +39,21 @@ pub fn start_background_tasks(state: AppState) {
         }
     });
 
+    // 3. Periodic request-log purge (run once at startup, then every hour)
+    let state_purge = state.clone();
+    tokio::spawn(async move {
+        let _ = crate::op::log::purge_expired_logs(&state_purge).await;
+
+        let mut interval = tokio::time::interval(Duration::from_secs(3600));
+        interval.tick().await; // Consume immediate first tick
+
+        loop {
+            interval.tick().await;
+            if let Err(e) = crate::op::log::purge_expired_logs(&state_purge).await {
+                error!("Request-log purge failed: {}", e);
+            }
+        }
+    });
+
     info!("Background workers initialized");
 }

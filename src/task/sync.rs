@@ -36,12 +36,20 @@ async fn fetch_openai_models(client: &reqwest::Client, channel: &Channel) -> Res
     let base_url = normalize_base_url(&channel.base_url);
     let target_url = format!("{}/models", base_url);
 
-    let resp = client
+    let mut req = client
         .get(&target_url)
         .header("Authorization", format!("Bearer {}", channel.key))
-        .timeout(std::time::Duration::from_secs(15))
-        .send()
-        .await?;
+        .timeout(std::time::Duration::from_secs(15));
+
+    for h in &channel.custom_header {
+        if let (Ok(name), Ok(val)) = (
+            reqwest::header::HeaderName::from_bytes(h.header_key.as_bytes()),
+            reqwest::header::HeaderValue::from_str(&h.header_value),
+        ) {
+            req = req.header(name, val);
+        }
+    }
+    let resp = req.send().await?;
 
     let body: Value = resp.json().await?;
     let mut model_names = Vec::new();
@@ -59,14 +67,21 @@ async fn fetch_anthropic_models(client: &reqwest::Client, channel: &Channel) -> 
     let base_url = normalize_base_url(&channel.base_url);
     let target_url = format!("{}/models", base_url);
 
-    let resp = client
+    let mut req = client
         .get(&target_url)
         .header("x-api-key", &channel.key)
         .header("anthropic-version", "2023-06-01")
-        .timeout(std::time::Duration::from_secs(15))
-        .send()
-        .await?;
+        .timeout(std::time::Duration::from_secs(15));
 
+    for h in &channel.custom_header {
+        if let (Ok(name), Ok(val)) = (
+            reqwest::header::HeaderName::from_bytes(h.header_key.as_bytes()),
+            reqwest::header::HeaderValue::from_str(&h.header_value),
+        ) {
+            req = req.header(name, val);
+        }
+    }
+    let resp = req.send().await?;
     let body: Value = resp.json().await?;
     let mut model_names = Vec::new();
     if let Some(data_arr) = body.get("data").and_then(|d| d.as_array()) {
@@ -83,13 +98,20 @@ async fn fetch_gemini_models(client: &reqwest::Client, channel: &Channel) -> Res
     let base_url = normalize_base_url(&channel.base_url);
     let target_url = format!("{}/models", base_url);
 
-    let resp = client
+    let mut req = client
         .get(&target_url)
         .header("x-goog-api-key", &channel.key)
-        .timeout(std::time::Duration::from_secs(15))
-        .send()
-        .await?;
+        .timeout(std::time::Duration::from_secs(15));
 
+    for h in &channel.custom_header {
+        if let (Ok(name), Ok(val)) = (
+            reqwest::header::HeaderName::from_bytes(h.header_key.as_bytes()),
+            reqwest::header::HeaderValue::from_str(&h.header_value),
+        ) {
+            req = req.header(name, val);
+        }
+    }
+    let resp = req.send().await?;
     let body: Value = resp.json().await?;
     let mut model_names = Vec::new();
     if let Some(models_arr) = body.get("models").and_then(|m| m.as_array()) {
@@ -145,10 +167,8 @@ pub async fn sync_all_channel_models(state: &AppState) -> Result<()> {
                     base_url: None,
                     key: None,
                     models: Some(existing_models),
-                    proxy: None,
                     auto_sync: None,
                     custom_header: None,
-                    channel_proxy: None,
                     param_override: None,
                     match_regex: None,
                 };

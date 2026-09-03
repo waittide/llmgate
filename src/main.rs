@@ -19,18 +19,23 @@ async fn main() -> Result<()> {
     let config = Config::parse_args();
 
     let env_filter = if config.debug {
-        EnvFilter::new("debug,tower_http=debug,axum=debug")
+        EnvFilter::new("debug,tower_http=debug,axum=debug,octopus=debug")
     } else {
         EnvFilter::try_from_default_env()
-            .unwrap_or_else(|_| EnvFilter::new("info,tower_http=info"))
+            .map(|filter| filter.add_directive("octopus=info".parse().unwrap()))
+            .unwrap_or_else(|_| EnvFilter::new("info,tower_http=info,octopus=info"))
     };
+
+    let fmt_layer = tracing_subscriber::fmt::layer()
+        .with_target(false);
 
     tracing_subscriber::registry()
         .with(env_filter)
-        .with(tracing_subscriber::fmt::layer())
+        .with(fmt_layer)
         .init();
 
-    info!("Starting {} (Rust Edition) v{}", conf::APP_NAME, conf::VERSION);
+    info!("=== Starting {} (Rust Edition) v{} ===", conf::APP_NAME, conf::VERSION);
+    info!("Data directory: {:?}", config.data_dir);
 
     // 1. Initialize SQLite Database & Migrations
     let db_path = config.db_path();
@@ -43,16 +48,28 @@ async fn main() -> Result<()> {
     task::start_background_tasks(state.clone());
 
     // 4. Build Axum Router
-    let app = server::build_router(state);
+    let app = server::build_router(state.clone());
 
     // 5. Start Server
     let addr: SocketAddr = format!("{}:{}", config.host, config.port).parse()?;
     info!("Server listening on http://{}", addr);
 
     let listener = tokio::net::TcpListener::bind(addr).await?;
-    axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal())
-        .await?;
+    tokio::select! {
+        res = axum::serve(listener, app) => {
+            if let Err(e) = res {
+                tracing::error!("Server error: {}", e);
+            }
+        }
+        _ = shutdown_signal() => {
+            info!("Shutdown signal received, stopping server...");
+        }
+    }
+
+    info!("Flushing in-memory stats to database before shutdown...");
+    if let Err(e) = op::stats::flush_stats_to_db(&state).await {
+        tracing::error!("Failed to flush stats on shutdown: {}", e);
+    }
 
     info!("Server stopped gracefully");
     Ok(())

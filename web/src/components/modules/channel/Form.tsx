@@ -19,6 +19,7 @@ import { Switch } from '@/components/ui/switch';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Badge } from '@/components/ui/badge';
+import { Checkbox } from '@/components/ui/checkbox';
 import {
     Accordion,
     AccordionContent,
@@ -36,11 +37,9 @@ interface ChannelFormData {
     base_url: string;
     key: string;
     custom_header: Channel['custom_header'];
-    channel_proxy: string;
     param_override: string;
     models: ChannelModelInput[];
     enabled: boolean;
-    proxy: boolean;
     auto_sync: boolean;
     match_regex: string;
 }
@@ -52,12 +51,10 @@ const emptyFormData: ChannelFormData = {
     base_url: '',
     key: '',
     custom_header: [{ header_key: '', header_value: '' }],
-    channel_proxy: '',
     param_override: '',
     models: [],
     auto_sync: false,
     enabled: true,
-    proxy: false,
     match_regex: '',
 };
 
@@ -77,10 +74,8 @@ export function ChannelForm({ channel }: { channel?: Channel }) {
         base_url: channel.base_url,
         key: channel.key,
         custom_header: channel.custom_header.length > 0 ? channel.custom_header : [{ header_key: '', header_value: '' }],
-        channel_proxy: channel.channel_proxy ?? '',
         param_override: channel.param_override ?? '',
         models: channel.models.map(({ name, source }) => ({ name, source })),
-        proxy: channel.proxy,
         auto_sync: channel.auto_sync,
         match_regex: channel.match_regex ?? '',
     } : emptyFormData);
@@ -91,6 +86,8 @@ export function ChannelForm({ channel }: { channel?: Channel }) {
     const manualModels = formData.models.filter((model) => model.source === 'manual').map((model) => model.name);
     const hasModels = formData.models.length > 0;
     const [inputValue, setInputValue] = useState('');
+    // 刷新获取到的候选模型列表（不会自动选中，由用户勾选）
+    const [availableModels, setAvailableModels] = useState<string[]>([]);
     const trimmedInput = inputValue.trim();
     // 输入的模型名非空且未添加过时才允许追加
     const canAddModel = trimmedInput !== '' && !manualModels.includes(trimmedInput) && !autoModels.includes(trimmedInput);
@@ -113,18 +110,14 @@ export function ChannelForm({ channel }: { channel?: Channel }) {
                 type: formData.type,
                 base_url: formData.base_url.trim(),
                 key: formData.key.trim(),
-                proxy: formData.proxy,
-                channel_proxy: formData.channel_proxy.trim() || null,
                 match_regex: formData.match_regex.trim() || null,
                 custom_header: formData.custom_header.filter((h) => h.header_key.trim()),
             },
             {
                 onSuccess: (data) => {
                     if (data && data.length > 0) {
-                        const nextAuto = Array.from(new Set([...autoModels, ...data]
-                            .map((m) => m.trim())
-                            .filter((m) => m && !manualModels.includes(m))));
-                        updateModels(nextAuto, manualModels);
+                        // 只填充候选列表，不自动选中，由用户决定勾选哪些模型
+                        setAvailableModels(Array.from(new Set(data.map((m) => m.trim()).filter(Boolean))));
                         toast.success(t('modelRefreshSuccess'));
                     } else {
                         toast.warning(t('modelRefreshEmpty'));
@@ -172,10 +165,8 @@ export function ChannelForm({ channel }: { channel?: Channel }) {
                 base_url: formData.base_url.trim(),
                 key: formData.key.trim(),
                 models: formData.models,
-                proxy: formData.proxy,
                 auto_sync: formData.auto_sync,
                 custom_header,
-                channel_proxy: formData.channel_proxy.trim(),
                 param_override: formData.param_override.trim(),
                 match_regex: formData.match_regex.trim(),
             }, { onSuccess: () => setIsOpen(false) });
@@ -189,10 +180,9 @@ export function ChannelForm({ channel }: { channel?: Channel }) {
         if (formData.base_url.trim() !== channel.base_url) req.base_url = formData.base_url.trim();
         if (formData.key.trim() !== channel.key) req.key = formData.key.trim();
         if (modelsKey(formData.models) !== modelsKey(channel.models)) req.models = formData.models;
-        if (formData.proxy !== channel.proxy) req.proxy = formData.proxy;
         if (formData.auto_sync !== channel.auto_sync) req.auto_sync = formData.auto_sync;
         if (JSON.stringify(custom_header) !== JSON.stringify(channel.custom_header)) req.custom_header = custom_header;
-        for (const key of ['channel_proxy', 'param_override', 'match_regex'] as const) {
+        for (const key of ['param_override', 'match_regex'] as const) {
             const next = formData[key].trim();
             if (next !== (channel[key] ?? '')) req[key] = next;
         }
@@ -306,6 +296,58 @@ export function ChannelForm({ channel }: { channel?: Channel }) {
                         </Button>
                     )}
                 </div>
+                {availableModels.length > 0 && (
+                    <div className="space-y-2">
+                        <div className="flex items-center justify-between">
+                            <label className="text-xs font-medium text-card-foreground">
+                                {t('modelAvailable')} ({availableModels.length})
+                            </label>
+                            <div className="flex items-center gap-1">
+                                <Button
+                                    type="button"
+                                    variant="ghost"
+                                    size="sm"
+                                    onClick={() => updateModels(Array.from(new Set([...autoModels, ...availableModels])), manualModels)}
+                                    className="h-6 px-2 text-xs text-muted-foreground/50 hover:text-muted-foreground hover:bg-transparent"
+                                >
+                                    {t('modelSelectAll')}
+                                </Button>
+                                <Button
+                                    type="button"
+                                    variant="ghost"
+                                    size="sm"
+                                    onClick={() => updateModels(autoModels.filter((m) => !availableModels.includes(m)), manualModels)}
+                                    className="h-6 px-2 text-xs text-muted-foreground/50 hover:text-muted-foreground hover:bg-transparent"
+                                >
+                                    {t('modelDeselectAll')}
+                                </Button>
+                            </div>
+                        </div>
+                        <div className="rounded-xl border border-border bg-muted/30 p-2.5 max-h-40 overflow-y-auto">
+                            {availableModels.map((name) => {
+                                const selected = autoModels.includes(name);
+                                return (
+                                    <label
+                                        key={name}
+                                        className="flex items-center gap-2 py-1 text-sm text-card-foreground cursor-pointer hover:bg-muted/60 rounded-lg px-1"
+                                    >
+                                        <Checkbox
+                                            checked={selected}
+                                            onCheckedChange={(checked) => {
+                                                if (checked === true) {
+                                                    if (!autoModels.includes(name)) updateModels([...autoModels, name], manualModels);
+                                                } else {
+                                                    updateModels(autoModels.filter((m) => m !== name), manualModels);
+                                                }
+                                            }}
+                                        />
+                                        <span className="truncate">{name}</span>
+                                    </label>
+                                );
+                            })}
+                        </div>
+                    </div>
+                )}
 
                 <div className="space-y-2">
                     <div className="flex items-center justify-between">
@@ -369,19 +411,6 @@ export function ChannelForm({ channel }: { channel?: Channel }) {
                         {t('advanced')}
                     </AccordionTrigger>
                     <AccordionContent className="pt-4 px-4 pb-4 space-y-4 border-t">
-                        <div className="space-y-2">
-                            <label htmlFor={`${idPrefix}-channel-proxy`} className="text-sm font-medium text-card-foreground">
-                                {t('channelProxy')}
-                            </label>
-                            <Input
-                                id={`${idPrefix}-channel-proxy`}
-                                type="text"
-                                value={formData.channel_proxy}
-                                onChange={(e) => setFormData({ ...formData, channel_proxy: e.target.value })}
-                                placeholder={t('channelProxyPlaceholder')}
-                                className="rounded-xl"
-                            />
-                        </div>
 
                         <div className="space-y-2">
                             <div className="flex items-center justify-between">
@@ -471,13 +500,6 @@ export function ChannelForm({ channel }: { channel?: Channel }) {
                     <span className="text-sm font-medium text-card-foreground">{t('enabled')}</span>
                 </label>
                 <div className="flex items-center gap-6">
-                    <label className="flex items-center gap-2 cursor-pointer">
-                        <Switch
-                            checked={formData.proxy}
-                            onCheckedChange={(checked) => setFormData({ ...formData, proxy: checked })}
-                        />
-                        <span className="text-sm text-card-foreground">{t('proxy')}</span>
-                    </label>
                     <label className="flex items-center gap-2 cursor-pointer">
                         <Switch
                             checked={formData.auto_sync}

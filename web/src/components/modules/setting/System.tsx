@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslations } from 'use-intl';
-import { Monitor, Globe, Clock, Shield, HelpCircle, X } from 'lucide-react';
+import { Monitor, Clock, Shield, HelpCircle, X } from 'lucide-react';
 import { Input } from '@/components/ui/input';
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 import { useSettingList, useSetSetting, SettingKey } from '@/api/setting';
@@ -12,24 +12,17 @@ export function SettingSystem() {
     const { data: settings } = useSettingList();
     const setSetting = useSetSetting();
 
-    const [proxyUrl, setProxyUrl] = useState('');
     const [statsSaveInterval, setStatsSaveInterval] = useState('');
     const [corsAllowOrigins, setCorsAllowOrigins] = useState('');
     const [corsInputValue, setCorsInputValue] = useState('');
 
-    const initialProxyUrl = useRef('');
     const initialStatsSaveInterval = useRef('');
     const initialCorsAllowOrigins = useRef('');
 
     useEffect(() => {
         if (settings) {
-            const proxy = settings.find(s => s.key === SettingKey.ProxyURL);
             const interval = settings.find(s => s.key === SettingKey.StatsSaveInterval);
             const cors = settings.find(s => s.key === SettingKey.CORSAllowOrigins);
-            if (proxy) {
-                queueMicrotask(() => setProxyUrl(proxy.value));
-                initialProxyUrl.current = proxy.value;
-            }
             if (interval) {
                 queueMicrotask(() => setStatsSaveInterval(interval.value));
                 initialStatsSaveInterval.current = interval.value;
@@ -47,9 +40,7 @@ export function SettingSystem() {
         setSetting.mutate({ key, value }, {
             onSuccess: () => {
                 toast.success(t('saved'));
-                if (key === SettingKey.ProxyURL) {
-                    initialProxyUrl.current = value;
-                } else if (key === SettingKey.StatsSaveInterval) {
+                if (key === SettingKey.StatsSaveInterval) {
                     initialStatsSaveInterval.current = value;
                 } else if (key === SettingKey.CORSAllowOrigins) {
                     initialCorsAllowOrigins.current = value;
@@ -119,20 +110,6 @@ export function SettingSystem() {
                 {t('system')}
             </h2>
 
-            {/* 代理地址 */}
-            <div className="flex items-center justify-between gap-4">
-                <div className="flex items-center gap-3">
-                    <Globe className="h-5 w-5 text-muted-foreground" />
-                    <span className="text-sm font-medium">{t('proxyUrl.label')}</span>
-                </div>
-                <Input
-                    value={proxyUrl}
-                    onChange={(e) => setProxyUrl(e.target.value)}
-                    onBlur={() => handleSave('proxy_url', proxyUrl, initialProxyUrl.current)}
-                    placeholder={t('proxyUrl.placeholder')}
-                    className="w-48 rounded-xl"
-                />
-            </div>
 
             {/* 统计保存周期 */}
             <div className="flex items-center justify-between gap-4">

@@ -7,5 +7,4 @@ pub mod relay;
 pub mod setting;
 pub mod static_files;
 pub mod stats;
-pub mod update;
 pub mod user;

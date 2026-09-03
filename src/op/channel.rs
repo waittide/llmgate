@@ -9,13 +9,12 @@ use anyhow::{anyhow, Result};
 use sqlx::Row;
 
 pub async fn refresh_channel_cache(state: &AppState) -> Result<()> {
-    state.channels.clear();
-    state.channel_models.clear();
-
-    // 1. Fetch all channels
-    let rows = sqlx::query("SELECT * FROM channels ORDER BY id ASC")
+    // 1. Fetch all channels into local map first to avoid cache-stampede / 404 race
+    let rows = sqlx::query("SELECT id, name, type, enabled, base_url, key, auto_sync, custom_header, param_override, match_regex, input_token, output_token, input_cost, output_cost, wait_time, request_success, request_failed FROM channels ORDER BY id ASC")
         .fetch_all(&state.db)
         .await?;
+
+    let mut local_channels = std::collections::HashMap::new();
 
     for row in rows {
         let id: i64 = row.get("id");
@@ -24,13 +23,11 @@ pub async fn refresh_channel_cache(state: &AppState) -> Result<()> {
         let enabled: bool = row.get::<i64, _>("enabled") != 0;
         let base_url: String = row.get("base_url");
         let key: String = row.get("key");
-        let proxy: bool = row.get::<i64, _>("proxy") != 0;
         let auto_sync: bool = row.get::<i64, _>("auto_sync") != 0;
         let custom_header_json: String = row.get("custom_header");
         let custom_header: Vec<CustomHeader> =
             serde_json::from_str(&custom_header_json).unwrap_or_default();
         let param_override: Option<String> = row.get("param_override");
-        let channel_proxy: Option<String> = row.get("channel_proxy");
         let match_regex: Option<String> = row.get("match_regex");
 
         let metrics = StatsMetrics {
@@ -51,23 +48,22 @@ pub async fn refresh_channel_cache(state: &AppState) -> Result<()> {
             base_url,
             key,
             models: Vec::new(),
-            proxy,
             auto_sync,
             custom_header,
             param_override,
-            channel_proxy,
             match_regex,
             metrics,
         };
 
-        state.channels.insert(id, channel);
+        local_channels.insert(id, channel);
     }
 
-    // 2. Fetch all channel models
-    let model_rows = sqlx::query("SELECT * FROM channel_models ORDER BY id ASC")
+    // 2. Fetch all channel models into local map
+    let model_rows = sqlx::query("SELECT id, channel_id, name, source, input_token, output_token, input_cost, output_cost, wait_time, request_success, request_failed FROM channel_models ORDER BY id ASC")
         .fetch_all(&state.db)
         .await?;
 
+    let mut local_models = std::collections::HashMap::new();
     for row in model_rows {
         let id: i64 = row.get("id");
         let channel_id: i64 = row.get("channel_id");
@@ -91,11 +87,20 @@ pub async fn refresh_channel_cache(state: &AppState) -> Result<()> {
             metrics,
         };
 
-        state.channel_models.insert(id, channel_model.clone());
-
-        if let Some(mut channel) = state.channels.get_mut(&channel_id) {
-            channel.models.push(channel_model);
+        if let Some(ch) = local_channels.get_mut(&channel_id) {
+            ch.models.push(channel_model.clone());
         }
+        local_models.insert(id, channel_model);
+    }
+
+    // Atomically replace in-memory cache
+    state.channels.clear();
+    for (k, v) in local_channels {
+        state.channels.insert(k, v);
+    }
+    state.channel_models.clear();
+    for (k, v) in local_models {
+        state.channel_models.insert(k, v);
     }
 
     Ok(())
@@ -117,10 +122,11 @@ pub fn get_channel(state: &AppState, id: i64) -> Result<Channel> {
 
 pub async fn create_channel(state: &AppState, channel: &mut Channel) -> Result<()> {
     let custom_header_json = serde_json::to_string(&channel.custom_header)?;
+    let mut tx = state.db.begin().await?;
     let result = sqlx::query(
         r#"
-        INSERT INTO channels (name, type, enabled, base_url, key, proxy, auto_sync, custom_header, param_override, channel_proxy, match_regex)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO channels (name, type, enabled, base_url, key, auto_sync, custom_header, param_override, match_regex)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         "#,
     )
     .bind(&channel.name)
@@ -128,13 +134,11 @@ pub async fn create_channel(state: &AppState, channel: &mut Channel) -> Result<(
     .bind(channel.enabled as i64)
     .bind(&channel.base_url)
     .bind(&channel.key)
-    .bind(channel.proxy as i64)
     .bind(channel.auto_sync as i64)
     .bind(&custom_header_json)
     .bind(&channel.param_override)
-    .bind(&channel.channel_proxy)
     .bind(&channel.match_regex)
-    .execute(&state.db)
+    .execute(&mut *tx)
     .await?;
 
     let channel_id = result.last_insert_rowid();
@@ -148,11 +152,12 @@ pub async fn create_channel(state: &AppState, channel: &mut Channel) -> Result<(
         .bind(channel_id)
         .bind(&model.name)
         .bind(model.source.as_str())
-        .execute(&state.db)
+        .execute(&mut *tx)
         .await?;
         model.id = m_res.last_insert_rowid();
     }
 
+    tx.commit().await?;
     refresh_channel_cache(state).await?;
     Ok(())
 }
@@ -165,18 +170,17 @@ pub async fn update_channel(state: &AppState, req: &ChannelUpdateRequest) -> Res
     let enabled = req.enabled.unwrap_or(current.enabled);
     let base_url = req.base_url.as_ref().unwrap_or(&current.base_url);
     let key = req.key.as_ref().unwrap_or(&current.key);
-    let proxy = req.proxy.unwrap_or(current.proxy);
     let auto_sync = req.auto_sync.unwrap_or(current.auto_sync);
     let custom_header = req.custom_header.as_ref().unwrap_or(&current.custom_header);
     let custom_header_json = serde_json::to_string(custom_header)?;
-    let channel_proxy = req.channel_proxy.as_ref().or(current.channel_proxy.as_ref());
     let param_override = req.param_override.as_ref().or(current.param_override.as_ref());
     let match_regex = req.match_regex.as_ref().or(current.match_regex.as_ref());
 
+    let mut tx = state.db.begin().await?;
     sqlx::query(
         r#"
         UPDATE channels
-        SET name = ?, type = ?, enabled = ?, base_url = ?, key = ?, proxy = ?, auto_sync = ?, custom_header = ?, channel_proxy = ?, param_override = ?, match_regex = ?
+        SET name = ?, type = ?, enabled = ?, base_url = ?, key = ?, auto_sync = ?, custom_header = ?, param_override = ?, match_regex = ?
         WHERE id = ?
         "#,
     )
@@ -185,14 +189,12 @@ pub async fn update_channel(state: &AppState, req: &ChannelUpdateRequest) -> Res
     .bind(enabled as i64)
     .bind(base_url)
     .bind(key)
-    .bind(proxy as i64)
     .bind(auto_sync as i64)
     .bind(&custom_header_json)
-    .bind(channel_proxy)
     .bind(param_override)
     .bind(match_regex)
     .bind(req.id)
-    .execute(&state.db)
+    .execute(&mut *tx)
     .await?;
 
     // Handle models update if provided (incremental update to preserve IDs and metrics)
@@ -201,7 +203,7 @@ pub async fn update_channel(state: &AppState, req: &ChannelUpdateRequest) -> Res
             "SELECT id, name FROM channel_models WHERE channel_id = ?",
         )
         .bind(req.id)
-        .fetch_all(&state.db)
+        .fetch_all(&mut *tx)
         .await?;
 
         let mut req_model_names = std::collections::HashSet::new();
@@ -212,7 +214,7 @@ pub async fn update_channel(state: &AppState, req: &ChannelUpdateRequest) -> Res
                 sqlx::query("UPDATE channel_models SET source = ? WHERE id = ?")
                     .bind(model.source.as_str())
                     .bind(existing_id)
-                    .execute(&state.db)
+                    .execute(&mut *tx)
                     .await?;
             } else {
                 sqlx::query(
@@ -221,7 +223,7 @@ pub async fn update_channel(state: &AppState, req: &ChannelUpdateRequest) -> Res
                 .bind(req.id)
                 .bind(&model.name)
                 .bind(model.source.as_str())
-                .execute(&state.db)
+                .execute(&mut *tx)
                 .await?;
             }
         }
@@ -230,11 +232,13 @@ pub async fn update_channel(state: &AppState, req: &ChannelUpdateRequest) -> Res
             if !req_model_names.contains(&existing_name) {
                 sqlx::query("DELETE FROM channel_models WHERE id = ?")
                     .bind(existing_id)
-                    .execute(&state.db)
+                    .execute(&mut *tx)
                     .await?;
             }
         }
     }
+
+    tx.commit().await?;
 
     refresh_channel_cache(state).await?;
     crate::op::group::refresh_group_cache(state).await?;
@@ -326,10 +330,8 @@ mod tests {
                     ..Default::default()
                 },
             ]),
-            proxy: None,
             auto_sync: None,
             custom_header: None,
-            channel_proxy: None,
             param_override: None,
             match_regex: None,
         };

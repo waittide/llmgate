@@ -51,7 +51,7 @@ export function SettingLLMSync() {
 
     const formatLastSyncTime = (timeStr: string | undefined) => {
         if (!timeStr) return t('llmSync.neverSynced');
-        const date = new Date(timeStr);
+        const date = new Date(Number(timeStr) * 1000);
         if (date.getFullYear() === 1) return t('llmSync.neverSynced');
         return date.toLocaleString();
     };

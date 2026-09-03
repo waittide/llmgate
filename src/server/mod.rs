@@ -7,12 +7,13 @@ use crate::{
     op::AppState,
     server::{
         handlers::{
-            apikey, channel, group, log, model, relay, setting, static_files, stats, update, user,
+            apikey, channel, group, log, model, relay, setting, static_files, stats, user,
         },
         middleware::{admin_auth_middleware, api_key_auth_middleware},
     },
 };
 use axum::{
+    extract::DefaultBodyLimit,
     middleware::from_fn_with_state,
     routing::{delete, get, post},
     Router,
@@ -71,6 +72,8 @@ pub fn build_router(state: AppState) -> Router {
         .route("/stats/total", get(stats::get_stats_total))
         .route("/stats/apikey", get(stats::get_stats_apikey))
         // Log
+        .route("/log/list", get(log::list_logs))
+        .route("/log/{id}", get(log::get_log_detail))
         .route("/log/overview/stream", get(log::stream_overview))
         .route("/log/{id}/request-body", get(log::get_request_body))
         .route("/log/{id}/response-body", get(log::get_response_body))
@@ -84,10 +87,8 @@ pub fn build_router(state: AppState) -> Router {
         .route("/apikey/login", get(apikey::login_api_key))
         .layer(from_fn_with_state(state.clone(), api_key_auth_middleware));
 
-    // 3. Public Admin API Router (Login & Version check)
-    let public_api_router = Router::new()
-        .route("/user/login", post(user::login))
-        .route("/update", get(update::check_update));
+    // 3. Public Admin API Router (Login)
+    let public_api_router = Router::new().route("/user/login", post(user::login));
 
     // 4. Combined /api/v1 router
     let api_v1 = Router::new()
@@ -114,6 +115,7 @@ pub fn build_router(state: AppState) -> Router {
         .nest("/api/v1", api_v1)
         .nest("/v1", client_v1)
         .fallback(static_files::serve_static)
+        .layer(DefaultBodyLimit::max(64 * 1024 * 1024))
         .layer(cors)
         .layer(CompressionLayer::new())
         .layer(TraceLayer::new_for_http())

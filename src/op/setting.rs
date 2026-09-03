@@ -2,11 +2,11 @@ use crate::{model::Setting, op::AppState};
 use anyhow::Result;
 
 pub async fn refresh_setting_cache(state: &AppState) -> Result<()> {
-    state.settings.clear();
     let settings: Vec<Setting> = sqlx::query_as("SELECT key, value FROM settings")
         .fetch_all(&state.db)
         .await?;
 
+    state.settings.clear();
     for s in settings {
         state.settings.insert(s.key, s.value);
     }

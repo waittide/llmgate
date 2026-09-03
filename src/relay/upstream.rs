@@ -1,24 +1,28 @@
 use crate::model::{Channel, ChannelProvider};
 use anyhow::{anyhow, Result};
-use reqwest::{header::HeaderMap, Client, Proxy, RequestBuilder};
-use std::time::Duration;
+use reqwest::{header::HeaderMap, Client, RequestBuilder};
+use std::{sync::LazyLock, time::Duration};
 
 pub fn normalize_base_url(base_url: &str) -> String {
     base_url.trim_end_matches('/').to_string()
 }
 
-pub fn get_client_for_channel(channel: &Channel) -> Result<Client> {
-    let mut builder = Client::builder()
+static SHARED_HTTP_CLIENT: LazyLock<Client> = LazyLock::new(|| {
+    Client::builder()
         .connect_timeout(Duration::from_secs(10))
-        .tcp_nodelay(true);
+        .tcp_nodelay(true)
+        .pool_idle_timeout(Duration::from_secs(90))
+        .pool_max_idle_per_host(32)
+        .build()
+        .expect("Failed to initialize shared HTTP client")
+});
 
-    if let Some(proxy_str) = &channel.channel_proxy
-        && !proxy_str.trim().is_empty()
-    {
-        builder = builder.proxy(Proxy::all(proxy_str)?);
-    }
+pub fn get_client_for_channel(_channel: &Channel) -> Result<Client> {
+    Ok(SHARED_HTTP_CLIENT.clone())
+}
 
-    Ok(builder.build()?)
+pub fn get_shared_client() -> &'static Client {
+    &SHARED_HTTP_CLIENT
 }
 
 pub fn build_upstream_request(
@@ -31,6 +35,26 @@ pub fn build_upstream_request(
     let base_url = normalize_base_url(&channel.base_url);
     let target_url = format!("{}{}", base_url, endpoint);
 
+    let headers = build_upstream_headers(channel)?;
+
+    let mut req_builder = if body.is_some() {
+        client.post(&target_url)
+    } else {
+        client.get(&target_url)
+    };
+
+    req_builder = req_builder
+        .headers(headers)
+        .timeout(Duration::from_secs(timeout_secs));
+
+    if let Some(b) = body {
+        req_builder = req_builder.body(b);
+    }
+
+    Ok(req_builder)
+}
+
+pub fn build_upstream_headers(channel: &Channel) -> Result<HeaderMap> {
     let mut headers = HeaderMap::new();
     match channel.channel_type {
         ChannelProvider::Anthropic => {
@@ -82,21 +106,7 @@ pub fn build_upstream_request(
         }
     }
 
-    let mut req_builder = if body.is_some() {
-        client.post(&target_url)
-    } else {
-        client.get(&target_url)
-    };
-
-    req_builder = req_builder
-        .headers(headers)
-        .timeout(Duration::from_secs(timeout_secs));
-
-    if let Some(b) = body {
-        req_builder = req_builder.body(b);
-    }
-
-    Ok(req_builder)
+    Ok(headers)
 }
 
 #[cfg(test)]

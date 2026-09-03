@@ -5,7 +5,7 @@ import JsonView from '@uiw/react-json-view';
 import { githubDarkTheme } from '@uiw/react-json-view/githubDark';
 import { githubLightTheme } from '@uiw/react-json-view/githubLight';
 import { useTheme } from '@/provider/theme';
-import { type RelayLogOverview, useLogRequestBody, useLogResponseBody, useStopRound } from '@/api/log';
+import { type RelayLogOverview, type RoundLog, useLogDetail, useLogRequestBody, useLogResponseBody, useStopRound } from '@/api/log';
 import { useGroupList, useUpdateGroupActiveItem } from '@/api/group';
 import { useChannelList } from '@/api/channel';
 import { getModelIcon } from '@/lib/model-icons';
@@ -30,12 +30,21 @@ import {
 function formatTime(value: string) {
     const date = new Date(value);
     if (Number.isNaN(date.getTime()) || date.getUTCFullYear() === 1) return '--';
-    return date.toLocaleTimeString(undefined, {
+    const now = new Date();
+    const isSameDay =
+        date.getFullYear() === now.getFullYear() &&
+        date.getMonth() === now.getMonth() &&
+        date.getDate() === now.getDate();
+    const time = date.toLocaleTimeString(undefined, {
         hour: '2-digit',
         minute: '2-digit',
         second: '2-digit',
         hour12: false,
     });
+    if (isSameDay) return time;
+    const month = String(date.getMonth() + 1).padStart(2, '0');
+    const day = String(date.getDate()).padStart(2, '0');
+    return `${month}-${day} ${time}`;
 }
 
 // formatMilliseconds 将毫秒转换为紧凑耗时文本。
@@ -51,7 +60,7 @@ function LogMetrics({ log, now, brandColor, variant }: { log: RelayLogOverview; 
     // 进行中的请求按共享时钟推算耗时, 结束后改用后端记录的最终耗时。
     const duration = log.status === 'running' || log.status === 'committed'
         ? formatMilliseconds(now - new Date(log.started_at).getTime())
-        : formatMilliseconds(log.duration / 1_000_000);
+        : formatMilliseconds(log.duration);
     const metrics = [
         { key: 'time', Icon: Clock, iconClassName: 'size-3.5 shrink-0', iconStyle: { color: brandColor } as CSSProperties, value: formatTime(log.started_at), valueClassName: 'tabular-nums', cellClassName: 'col-span-4 whitespace-nowrap md:col-span-1' },
         { key: 'duration', Icon: Cpu, iconClassName: 'size-3.5 shrink-0 text-blue-500', value: duration, cellClassName: 'col-span-4 md:col-span-1' },
@@ -102,7 +111,7 @@ function JsonContent({ content, fallbackText }: { content: string | object | und
 
     if (!parsed.isJson) {
         return (
-            <pre className="p-4 text-xs text-muted-foreground whitespace-pre-wrap wrap-break-word font-mono leading-relaxed animate-in fade-in duration-200">
+            <pre className="p-4 text-xs text-muted-foreground whitespace-pre-wrap wrap-break-word font-mono leading-relaxed select-text animate-in fade-in duration-200">
                 {parsed.data as string}
             </pre>
         );
@@ -126,6 +135,43 @@ function JsonContent({ content, fallbackText }: { content: string | object | und
     );
 }
 
+// HttpMeta 展示持久化日志的 URL 与 Header, 实时日志(detail 尚未入库)时静默隐藏。
+function HttpMeta({ url, headers, loading }: { url?: string; headers?: string; loading: boolean }) {
+    const t = useTranslations('log.card');
+    if (!url && !headers) return null;
+
+    let parsedHeaders: object | null = null;
+    if (headers) {
+        try {
+            parsedHeaders = JSON.parse(headers) as object;
+        } catch {
+            parsedHeaders = null;
+        }
+    }
+
+    return (
+        <div className="shrink-0 space-y-1.5 border-b border-border bg-muted/40 px-3 py-2">
+            {url && (
+                <div className="break-all text-[11px] leading-relaxed text-muted-foreground">
+                    <span className="font-semibold text-foreground">{t('url')}: </span>
+                    {url}
+                </div>
+            )}
+            {parsedHeaders && (
+                <details className="text-[11px]">
+                    <summary className="cursor-pointer select-none text-muted-foreground transition-colors hover:text-foreground">
+                        {t('headers')}
+                    </summary>
+                    <pre className="mt-1.5 whitespace-pre-wrap wrap-break-word font-mono leading-relaxed text-muted-foreground">
+                        {JSON.stringify(parsedHeaders, null, 2)}
+                    </pre>
+                </details>
+            )}
+            {loading && <Loader2 className="size-3.5 animate-spin text-muted-foreground/60" />}
+        </div>
+    );
+}
+
 // LogDetail 渲染日志详情弹窗内容, 仅在弹窗打开期间挂载, 由此避免列表中的卡片持有详情查询和状态。
 function LogDetail({ log, now }: { log: RelayLogOverview; now: number }) {
     const t = useTranslations('log.card');
@@ -137,6 +183,7 @@ function LogDetail({ log, now }: { log: RelayLogOverview; now: number }) {
     const [switchingItemId, setSwitchingItemId] = useState<number | null>(null);
     const requestBody = useLogRequestBody(log.id, log.started_at, detailReady && leftTab === 'request');
     const responseBody = useLogResponseBody(log.id, log.started_at, detailReady && log.status === 'success');
+    const detail = useLogDetail(log.id, detailReady);
     const { data: groups = [] } = useGroupList(detailReady, detailReady);
     const { data: channels = [] } = useChannelList(detailReady);
     const updateActiveItem = useUpdateGroupActiveItem();
@@ -148,14 +195,38 @@ function LogDetail({ log, now }: { log: RelayLogOverview; now: number }) {
         });
         return map;
     }, [channels]);
-    const actualModel = log.target_model || log.model;
+
+    const persistentRounds = useMemo<RoundLog[]>(() => {
+        if (log.rounds && log.rounds.length > 0) return log.rounds;
+        if (detail.data?.rounds && detail.data.rounds.length > 0) return detail.data.rounds;
+        if (detail.data?.rounds_detail) {
+            try {
+                return JSON.parse(detail.data.rounds_detail) as RoundLog[];
+            } catch {
+                return [];
+            }
+        }
+        return [];
+    }, [log.rounds, detail.data]);
+
+    const [selectedRoundNum, setSelectedRoundNum] = useState<number | null>(null);
+    const activeRound = useMemo(() => {
+        if (persistentRounds.length === 0) return null;
+        if (selectedRoundNum !== null) {
+            return persistentRounds.find((r) => r.round === selectedRoundNum) || persistentRounds[persistentRounds.length - 1];
+        }
+        return persistentRounds[persistentRounds.length - 1];
+    }, [persistentRounds, selectedRoundNum]);
+
+    const actualModel = activeRound?.model_name || log.target_model || log.model;
+    const actualChannel = activeRound?.channel_name || log.target_channel;
     const { Icon, className: iconClassName, color: brandColor } = getModelIcon(actualModel);
-    const errorText = log.error ?? '';
+    const errorText = activeRound?.error ?? log.error ?? '';
     const requestFailed = log.status === 'failed' || log.status === 'canceled';
     const responseCommitted = log.status === 'committed';
-    const showRounds = log.status === 'running' || (requestFailed && rounds.length > 0);
+    const showRounds = log.status === 'running' && rounds.length > 0;
     const activeGroup = groups.find((group) => group.name === log.model);
-    const isWaitingForSelection = log.status === 'running' && !log.sending && activeGroup?.mode === 'manual' && activeGroup.active_item_id === 0; // isWaitingForSelection 表示手动模式请求正等待选择渠道。
+    const isWaitingForSelection = log.status === 'running' && !log.sending && activeGroup?.mode === 'manual' && activeGroup.active_item_id === 0;
 
     // 让弹窗先完成展开动画, 避免详情请求及其状态更新占用动画起步帧。
     useEffect(() => {
@@ -164,19 +235,17 @@ function LogDetail({ log, now }: { log: RelayLogOverview; now: number }) {
     }, []);
 
     // 按轮次记录本次打开期间观察到的上游请求状态, 最新一轮排在最前。
-    // 轮次来自逐次推送的日志, 需在渲染期比对已记录的快照累积, 不能仅由当前 log 推导。
-    const roundKey = log.round === 0 ? '' : `${log.round}:${log.target_channel}:${log.sending}:${errorText}`;
+    const roundKey = log.round === 0 ? '' : `${log.round}:${log.target_channel}:${log.sending}:${log.error ?? ''}`;
     if (roundKey !== '' && roundKey !== observedRoundKey) {
         setObservedRoundKey(roundKey);
         setRounds((current) => {
             if (!log.sending && current.every((item) => item.round !== log.round)) return current;
             return [
-                { round: log.round, channel: log.target_channel, error: errorText, sending: log.sending },
+                { round: log.round, channel: log.target_channel, error: log.error ?? '', sending: log.sending },
                 ...current.filter((item) => item.round !== log.round),
             ];
         });
     }
-
     return (
         <MorphingDialogContent className="relative w-[calc(100vw-2rem)] md:w-[80vw] bg-card text-card-foreground px-6 py-4 rounded-3xl h-[calc(100vh-2rem)] flex flex-col overflow-hidden">
             <MorphingDialogClose className="top-4 right-5 text-muted-foreground hover:text-foreground transition-colors" />
@@ -191,13 +260,49 @@ function LogDetail({ log, now }: { log: RelayLogOverview; now: number }) {
                     className="text-xs px-1.5 py-0"
                     style={{ backgroundColor: `${brandColor}15`, color: brandColor }}
                 >
-                    {log.target_channel || '-'}
+                    {actualChannel || '-'}
                 </Badge>
                 <span className="text-muted-foreground">{actualModel}</span>
+                {persistentRounds.length > 1 && (
+                    <Badge variant="outline" className="text-[11px] ml-auto">
+                        {t('roundIndex', { index: activeRound?.round ?? log.round })} / {persistentRounds.length}
+                    </Badge>
+                )}
             </MorphingDialogTitle>
-
-            <MorphingDialogDescription className="flex-1 min-h-0">
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-4 h-full min-h-0">
+            <MorphingDialogDescription className="flex-1 min-h-0 flex flex-col gap-2">
+                {persistentRounds.length > 1 && (
+                    <div className="flex items-center gap-1.5 overflow-x-auto pb-1 shrink-0">
+                        <span className="text-xs font-semibold text-muted-foreground mr-1 shrink-0">{t('round')}:</span>
+                        {persistentRounds.map((r) => {
+                            const isSelected = activeRound?.round === r.round;
+                            const isSuccess = r.status >= 200 && r.status < 300;
+                            return (
+                                <button
+                                    key={r.round}
+                                    type="button"
+                                    onClick={() => setSelectedRoundNum(r.round)}
+                                    className={cn(
+                                        'flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-medium transition-colors border shrink-0',
+                                        isSelected
+                                            ? 'bg-primary text-primary-foreground border-primary shadow-xs'
+                                            : 'bg-muted/50 text-muted-foreground border-border hover:bg-muted hover:text-foreground',
+                                    )}
+                                >
+                                    <span>{t('roundIndex', { index: r.round })}:</span>
+                                    <span className="font-semibold">{r.channel_name}</span>
+                                    <Badge
+                                        variant={isSuccess ? 'secondary' : 'destructive'}
+                                        className={cn('px-1 py-0 text-[10px]', isSelected && isSuccess && 'bg-primary-foreground/20 text-primary-foreground')}
+                                    >
+                                        {r.status || (isSuccess ? 200 : 500)}
+                                    </Badge>
+                                    {r.duration_ms > 0 && <span className="opacity-70 text-[10px]">{formatMilliseconds(r.duration_ms)}</span>}
+                                </button>
+                            );
+                        })}
+                    </div>
+                )}
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4 flex-1 min-h-0">
                     <div className="flex flex-col rounded-2xl border border-border bg-muted/30 overflow-hidden min-h-0">
                         <div className="flex h-10 shrink-0 items-center gap-2 border-b border-border bg-muted/50 pl-1 pr-3 md:pr-4">
                             <Tabs value={leftTab} onValueChange={(value) => setLeftTab(value as 'request' | 'group')}>
@@ -233,7 +338,17 @@ function LogDetail({ log, now }: { log: RelayLogOverview; now: number }) {
                                         <span>{t('detailUnavailable')}</span>
                                     </div>
                                 ) : (
-                                    <JsonContent content={requestBody.data} fallbackText={t('noRequestContent')} />
+                                    <>
+                                        <HttpMeta
+                                            url={activeRound?.request_url || detail.data?.request_url}
+                                            headers={activeRound?.request_headers || detail.data?.request_headers}
+                                            loading={detail.isLoading}
+                                        />
+                                        <JsonContent
+                                            content={activeRound?.request_body || requestBody.data}
+                                            fallbackText={t('noRequestContent')}
+                                        />
+                                    </>
                                 )
                             ) : !activeGroup ? (
                                 <div className="flex h-full items-center justify-center px-4 text-xs text-muted-foreground">
@@ -301,7 +416,7 @@ function LogDetail({ log, now }: { log: RelayLogOverview; now: number }) {
                     <div className="flex flex-col rounded-2xl border border-border bg-muted/30 overflow-hidden min-h-0">
                         <div className="flex h-10 shrink-0 items-center gap-2 border-b border-border bg-muted/50 px-3 md:px-4">
                             <span className="text-sm font-medium text-card-foreground">
-                                {isWaitingForSelection ? t('waitingChannelSelection') : showRounds ? t('retryDetails') : requestFailed ? t('errorInfo') : t('responseContent')}
+                                {isWaitingForSelection ? t('waitingChannelSelection') : showRounds ? t('retryDetails') : activeRound?.error ? t('errorInfo') : requestFailed ? t('errorInfo') : t('responseContent')}
                             </span>
                             {log.status === 'running' && log.sending && activeGroup?.mode === 'manual' ? (
                                 <button
@@ -375,6 +490,18 @@ function LogDetail({ log, now }: { log: RelayLogOverview; now: number }) {
                                     <Loader2 className="size-4 animate-spin" />
                                     {t('responseStreaming')}
                                 </div>
+                            ) : activeRound ? (
+                                <>
+                                    <HttpMeta
+                                        url={activeRound.response_url || detail.data?.response_url}
+                                        headers={activeRound.response_headers || detail.data?.response_headers}
+                                        loading={detail.isLoading}
+                                    />
+                                    <JsonContent
+                                        content={activeRound.response_body || activeRound.error || errorText}
+                                        fallbackText={t('noResponseContent')}
+                                    />
+                                </>
                             ) : requestFailed ? (
                                 <JsonContent content={errorText} fallbackText={t('noResponseContent')} />
                             ) : responseBody.isLoading ? (
@@ -387,7 +514,14 @@ function LogDetail({ log, now }: { log: RelayLogOverview; now: number }) {
                                     <span>{t('detailUnavailable')}</span>
                                 </div>
                             ) : (
-                                <JsonContent content={responseBody.data} fallbackText={t('noResponseContent')} />
+                                <>
+                                    <HttpMeta
+                                        url={detail.data?.response_url}
+                                        headers={detail.data?.response_headers}
+                                        loading={detail.isLoading}
+                                    />
+                                    <JsonContent content={responseBody.data} fallbackText={t('noResponseContent')} />
+                                </>
                             )}
                         </div>
                     </div>

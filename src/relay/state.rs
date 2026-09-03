@@ -32,6 +32,8 @@ pub struct RequestOverview {
     pub sending: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub rounds: Vec<crate::model::RoundLog>,
 }
 
 #[derive(Debug)]
@@ -42,6 +44,7 @@ pub struct RequestStateInternal {
     pub response_body: String,
     pub api_key_id: i64,
     pub started_instant: std::time::Instant,
+    pub rounds: Vec<crate::model::RoundLog>,
 }
 
 pub struct RequestStateManager {
@@ -93,6 +96,7 @@ impl RequestStateManager {
             target_model: String::new(),
             sending: false,
             error: None,
+            rounds: Vec::new(),
         };
 
         let internal = Arc::new(RwLock::new(RequestStateInternal {
@@ -101,6 +105,7 @@ impl RequestStateManager {
             response_body: String::new(),
             api_key_id,
             started_instant: std::time::Instant::now(),
+            rounds: Vec::new(),
         }));
 
         self.requests.insert(id, internal);
@@ -131,6 +136,26 @@ impl RequestStateManager {
             lock.overview.target_channel = target_channel;
             lock.overview.target_model = target_model;
             lock.overview.sending = sending;
+            lock.overview.error = None;
+            let _ = self.tx.send(lock.overview.clone());
+        }
+    }
+
+    pub fn update_round_error(
+        &self,
+        id: u64,
+        round: i64,
+        target_channel: String,
+        target_model: String,
+        error: String,
+    ) {
+        if let Some(req) = self.requests.get(&id) {
+            let mut lock = req.write();
+            lock.overview.round = round;
+            lock.overview.target_channel = target_channel;
+            lock.overview.target_model = target_model;
+            lock.overview.sending = false;
+            lock.overview.error = Some(error);
             let _ = self.tx.send(lock.overview.clone());
         }
     }
@@ -144,6 +169,19 @@ impl RequestStateManager {
         }
     }
 
+    pub fn record_round_attempt(&self, id: u64, round_log: crate::model::RoundLog) {
+        if let Some(req) = self.requests.get(&id) {
+            let mut lock = req.write();
+            if let Some(pos) = lock.rounds.iter().position(|r| r.round == round_log.round) {
+                lock.rounds[pos] = round_log;
+            } else {
+                lock.rounds.push(round_log);
+            }
+            lock.overview.rounds = lock.rounds.clone();
+            let _ = self.tx.send(lock.overview.clone());
+        }
+    }
+
     pub fn finish(
         &self,
         id: u64,
@@ -152,6 +190,7 @@ impl RequestStateManager {
         cost: f64,
         response_body: String,
         error: Option<String>,
+        rounds: Vec<crate::model::RoundLog>,
     ) {
         if let Some(req) = self.requests.get(&id) {
             let mut lock = req.write();
@@ -162,6 +201,10 @@ impl RequestStateManager {
             lock.overview.sending = false;
             lock.overview.error = error;
             lock.response_body = response_body;
+            if !rounds.is_empty() {
+                lock.rounds = rounds;
+            }
+            lock.overview.rounds = lock.rounds.clone();
             let _ = self.tx.send(lock.overview.clone());
         }
     }

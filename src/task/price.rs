@@ -24,9 +24,7 @@ pub fn get_catalog_price(model_name: &str) -> Option<LLMPrice> {
 }
 
 pub async fn fetch_catalog_from_models_dev() -> Result<()> {
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(30))
-        .build()?;
+    let client = crate::relay::upstream::get_shared_client();
 
     let resp = client
         .get("https://models.dev/api.json")

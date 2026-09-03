@@ -7,7 +7,7 @@ import type { StatsMetrics, StatsMetricsFormatted } from './stats';
  * 渠道类型枚举
  */
 export enum ChannelType {
-    OpenaiCompletion = 'openai',
+    OpenaiCompletion = 'openai_completion',
     OpenAIResponse = 'openai_responses',
     Anthropic = 'anthropic',
     Gemini = 'gemini',
@@ -43,11 +43,9 @@ export type Channel = StatsMetrics & {
     base_url: string;
     key: string;
     models: ChannelModel[];
-    proxy: boolean;
     auto_sync: boolean;
     custom_header: CustomHeader[];
     param_override?: string | null;
-    channel_proxy?: string | null;
     match_regex?: string | null;
 };
 
@@ -72,10 +70,8 @@ type CreateChannelRequest = {
     base_url: string;
     key: string;
     models: ChannelModelInput[];
-    proxy?: boolean;
     auto_sync?: boolean;
     custom_header?: CustomHeader[];
-    channel_proxy?: string | null;
     param_override?: string | null;
     match_regex?: string | null;
 };
@@ -91,10 +87,8 @@ export type UpdateChannelRequest = {
     base_url?: string;
     key?: string;
     models?: ChannelModelInput[];
-    proxy?: boolean;
     auto_sync?: boolean;
     custom_header?: CustomHeader[];
-    channel_proxy?: string | null;
     param_override?: string | null;
     match_regex?: string | null;
 };
@@ -103,8 +97,6 @@ type FetchModelRequest = {
     type: ChannelType;
     base_url: string;
     key: string;
-    proxy?: boolean;
-    channel_proxy?: string | null;
     match_regex?: string | null;
     custom_header?: CustomHeader[];
 };

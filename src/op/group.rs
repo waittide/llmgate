@@ -9,12 +9,12 @@ use anyhow::{anyhow, Result};
 use sqlx::Row;
 
 pub async fn refresh_group_cache(state: &AppState) -> Result<()> {
-    state.groups.clear();
-    state.group_name_index.clear();
-
-    let rows = sqlx::query("SELECT * FROM groups ORDER BY id ASC")
+    let rows = sqlx::query("SELECT id, name, mode, active_item_id, relay_config FROM groups ORDER BY id ASC")
         .fetch_all(&state.db)
         .await?;
+
+    let mut local_groups = std::collections::HashMap::new();
+    let mut local_name_index = std::collections::HashMap::new();
 
     for row in rows {
         let id: i64 = row.get("id");
@@ -34,8 +34,8 @@ pub async fn refresh_group_cache(state: &AppState) -> Result<()> {
             items: Vec::new(),
         };
 
-        state.groups.insert(id, group);
-        state.group_name_index.insert(name, id);
+        local_name_index.insert(name, id);
+        local_groups.insert(id, group);
     }
 
     // Fetch all group items
@@ -68,9 +68,19 @@ pub async fn refresh_group_cache(state: &AppState) -> Result<()> {
             priority,
         };
 
-        if let Some(mut group) = state.groups.get_mut(&group_id) {
+        if let Some(group) = local_groups.get_mut(&group_id) {
             group.items.push(item);
         }
+    }
+
+    // Atomically swap in-memory cache
+    state.groups.clear();
+    for (k, v) in local_groups {
+        state.groups.insert(k, v);
+    }
+    state.group_name_index.clear();
+    for (k, v) in local_name_index {
+        state.group_name_index.insert(k, v);
     }
 
     Ok(())
@@ -112,6 +122,7 @@ pub fn get_group_by_id(state: &AppState, id: i64) -> Result<Group> {
 
 pub async fn create_group(state: &AppState, group: &mut Group) -> Result<()> {
     let relay_config_json = serde_json::to_string(&group.relay_config)?;
+    let mut tx = state.db.begin().await?;
     let result = sqlx::query(
         "INSERT INTO groups (name, mode, active_item_id, relay_config) VALUES (?, ?, ?, ?)",
     )
@@ -119,7 +130,7 @@ pub async fn create_group(state: &AppState, group: &mut Group) -> Result<()> {
     .bind(group.mode.as_str())
     .bind(group.active_item_id)
     .bind(&relay_config_json)
-    .execute(&state.db)
+    .execute(&mut *tx)
     .await?;
 
     let group_id = result.last_insert_rowid();
@@ -133,11 +144,12 @@ pub async fn create_group(state: &AppState, group: &mut Group) -> Result<()> {
         .bind(group_id)
         .bind(item.channel_model_id)
         .bind(item.priority)
-        .execute(&state.db)
+        .execute(&mut *tx)
         .await?;
         item.id = item_res.last_insert_rowid();
     }
 
+    tx.commit().await?;
     refresh_group_cache(state).await?;
     Ok(())
 }
@@ -149,13 +161,14 @@ pub async fn update_group(state: &AppState, req: &GroupUpdateRequest) -> Result<
     let mode = req.mode.as_ref().unwrap_or(&current.mode);
     let relay_config = req.relay_config.as_ref().unwrap_or(&current.relay_config);
     let relay_config_json = serde_json::to_string(relay_config)?;
+    let mut tx = state.db.begin().await?;
 
     sqlx::query("UPDATE groups SET name = ?, mode = ?, relay_config = ? WHERE id = ?")
         .bind(name)
         .bind(mode.as_str())
         .bind(&relay_config_json)
         .bind(req.id)
-        .execute(&state.db)
+        .execute(&mut *tx)
         .await?;
 
     for item in &req.items_to_add {
@@ -165,7 +178,7 @@ pub async fn update_group(state: &AppState, req: &GroupUpdateRequest) -> Result<
         .bind(req.id)
         .bind(item.channel_model_id)
         .bind(item.priority)
-        .execute(&state.db)
+        .execute(&mut *tx)
         .await?;
     }
 
@@ -174,7 +187,7 @@ pub async fn update_group(state: &AppState, req: &GroupUpdateRequest) -> Result<
             .bind(item.priority)
             .bind(item.id)
             .bind(req.id)
-            .execute(&state.db)
+            .execute(&mut *tx)
             .await?;
     }
 
@@ -182,10 +195,11 @@ pub async fn update_group(state: &AppState, req: &GroupUpdateRequest) -> Result<
         sqlx::query("DELETE FROM group_items WHERE id = ? AND group_id = ?")
             .bind(item_id)
             .bind(req.id)
-            .execute(&state.db)
+            .execute(&mut *tx)
             .await?;
     }
 
+    tx.commit().await?;
     refresh_group_cache(state).await?;
     get_group_by_id(state, req.id)
 }

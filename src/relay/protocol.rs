@@ -24,11 +24,26 @@ pub fn parse_request_metadata(body: &[u8]) -> Option<ChatRequestMetadata> {
     serde_json::from_slice(body).ok()
 }
 
-pub fn rewrite_model_in_json(body: &[u8], new_model: &str) -> Vec<u8> {
+pub fn rewrite_request_body_in_json(
+    body: &[u8],
+    new_model: &str,
+    param_override: Option<&str>,
+) -> Vec<u8> {
     if let Ok(mut val) = serde_json::from_slice::<Value>(body)
         && let Some(obj) = val.as_object_mut()
     {
         obj.insert("model".to_string(), Value::String(new_model.to_string()));
+
+        if let Some(override_str) = param_override
+            && !override_str.trim().is_empty()
+            && let Ok(override_val) = serde_json::from_str::<Value>(override_str)
+            && let Some(override_obj) = override_val.as_object()
+        {
+            for (k, v) in override_obj {
+                obj.insert(k.clone(), v.clone());
+            }
+        }
+
         if let Ok(bytes) = serde_json::to_vec(&val) {
             return bytes;
         }

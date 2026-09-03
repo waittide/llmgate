@@ -83,18 +83,14 @@ impl RouteManager {
             return Some(item.clone());
         }
 
-        // Iterate sorted group items
+        // Pick highest priority available item (group.items are pre-sorted by priority ASC)
         for item in &group.items {
-            if item.id == route.current_item_id {
-                break;
-            }
             if let Some(&deadline) = route.cooldowns.get(&item.id)
                 && deadline > now
             {
                 continue;
             }
 
-            // Available higher priority item found
             if route.current_item_id != item.id {
                 route.current_item_id = item.id;
                 route.affinity_armed = true;
@@ -103,13 +99,10 @@ impl RouteManager {
             return Some(item.clone());
         }
 
-        // Fallback to any non-cooldown item
-        for item in &group.items {
-            if let Some(&deadline) = route.cooldowns.get(&item.id)
-                && deadline > now
-            {
-                continue;
-            }
+        // If all items are temporarily in cooldown, probe the one with the earliest expiring cooldown
+        if let Some(item) = group.items.iter().min_by_key(|item| {
+            route.cooldowns.get(&item.id).copied().unwrap_or(0)
+        }) {
             if route.current_item_id != item.id {
                 route.current_item_id = item.id;
                 route.affinity_armed = true;
