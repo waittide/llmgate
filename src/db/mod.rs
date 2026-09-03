@@ -279,8 +279,10 @@ pub async fn migrate(pool: &DbPool) -> Result<()> {
             rounds_detail TEXT NOT NULL DEFAULT '[]',
             created_at INTEGER NOT NULL DEFAULT 0
         );
-        CREATE INDEX IF NOT EXISTS idx_request_logs_created_at ON request_logs (created_at);
+        CREATE INDEX IF NOT EXISTS idx_request_logs_created_at ON request_logs (created_at DESC);
         CREATE INDEX IF NOT EXISTS idx_request_logs_request_id ON request_logs (request_id);
+        CREATE INDEX IF NOT EXISTS idx_request_logs_model_created ON request_logs (model, created_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_request_logs_status_created ON request_logs (status, created_at DESC);
         "#,
     )
     .execute(pool)

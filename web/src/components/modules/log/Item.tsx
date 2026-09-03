@@ -225,7 +225,7 @@ function LogDetail({ log, now }: { log: RelayLogOverview; now: number }) {
     const requestFailed = log.status === 'failed' || log.status === 'canceled';
     const responseCommitted = log.status === 'committed';
     const showRounds = log.status === 'running' && rounds.length > 0;
-    const activeGroup = groups.find((group) => group.name === log.model);
+    const activeGroup = groups.find((group) => group.name.toLowerCase() === log.model?.toLowerCase());
     const isWaitingForSelection = log.status === 'running' && !log.sending && activeGroup?.mode === 'manual' && activeGroup.active_item_id === 0;
 
     // 让弹窗先完成展开动画, 避免详情请求及其状态更新占用动画起步帧。
@@ -363,16 +363,27 @@ function LogDetail({ log, now }: { log: RelayLogOverview; now: number }) {
                                     {activeGroup.items.map((item) => {
                                         const modelName = item.channel_model?.name ?? '';
                                         const channelName = item.channel_model
-                                            ? channelNameByModelID.get(item.channel_model.id) ?? `#${item.channel_model.channel_id}`
+                                            ? channelNameByModelID.get(item.channel_model.id)
+                                                ?? channels.find((c) => c.raw.id === item.channel_model?.channel_id)?.raw.name
+                                                ?? `#${item.channel_model.channel_id}`
                                             : '-';
                                         const { Icon: ItemIcon, className: itemIconClassName } = getModelIcon(modelName);
                                         const itemActive = item.id === activeGroup.active_item_id;
                                         const itemSwitching = item.id === switchingItemId;
+                                        const isUsedByLog = Boolean(
+                                            actualChannel &&
+                                            (channelName === actualChannel || (!channelNameByModelID.size && (!channelName || channelName === '-'))) &&
+                                            (!actualModel || modelName === actualModel)
+                                        );
                                         const itemCurrent = switchingItemId !== null
                                             ? itemSwitching
-                                            : activeGroup.mode === 'failover'
-                                                ? activeGroup.runtime?.current_item_id === item.id
-                                                : itemActive;
+                                            : isUsedByLog
+                                                ? true
+                                                : log.status === 'running'
+                                                    ? activeGroup.mode === 'failover'
+                                                        ? activeGroup.runtime?.current_item_id === item.id
+                                                        : itemActive
+                                                    : false;
                                         return (
                                             <button
                                                 key={item.id ?? item.channel_model_id}
@@ -394,7 +405,10 @@ function LogDetail({ log, now }: { log: RelayLogOverview; now: number }) {
                                                         setSwitchingItemId(null);
                                                     }
                                                 }}
-                                                className="flex w-full items-center gap-2.5 rounded-lg px-3 py-2.5 text-left text-xs transition-colors hover:bg-muted/50 disabled:cursor-default disabled:hover:bg-transparent"
+                                                className={cn(
+                                                    "flex w-full items-center gap-2.5 rounded-lg px-3 py-2.5 text-left text-xs transition-colors hover:bg-muted/50 disabled:cursor-default disabled:hover:bg-transparent",
+                                                    itemCurrent && "bg-muted/60 font-medium"
+                                                )}
                                             >
                                                 <ItemIcon aria-hidden="true" className={itemIconClassName} width={20} height={20} />
                                                 <span className="min-w-0 flex-1">

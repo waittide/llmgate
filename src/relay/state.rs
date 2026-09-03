@@ -7,7 +7,7 @@ use std::sync::{
 };
 use tokio::sync::broadcast;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Usage {
     #[serde(default)]
     pub prompt_tokens: i64,
@@ -37,14 +37,11 @@ pub struct RequestOverview {
 }
 
 #[derive(Debug)]
-#[allow(dead_code)]
 pub struct RequestStateInternal {
     pub overview: RequestOverview,
     pub request_body: String,
     pub response_body: String,
-    pub api_key_id: i64,
     pub started_instant: std::time::Instant,
-    pub rounds: Vec<crate::model::RoundLog>,
 }
 
 pub struct RequestStateManager {
@@ -76,7 +73,7 @@ impl RequestStateManager {
             .collect()
     }
 
-    pub fn new_request(&self, model: String, body: String, api_key_id: i64) -> u64 {
+    pub fn new_request(&self, model: String, body: String) -> u64 {
         let id = self.counter.fetch_add(1, Ordering::SeqCst);
         let now = chrono::Utc::now();
         let overview = RequestOverview {
@@ -85,11 +82,7 @@ impl RequestStateManager {
             started_at: now.to_rfc3339(),
             duration: 0,
             model,
-            usage: Usage {
-                prompt_tokens: 0,
-                completion_tokens: 0,
-                total_tokens: 0,
-            },
+            usage: Usage::default(),
             cost: 0.0,
             round: 1,
             target_channel: String::new(),
@@ -103,9 +96,7 @@ impl RequestStateManager {
             overview: overview.clone(),
             request_body: body,
             response_body: String::new(),
-            api_key_id,
             started_instant: std::time::Instant::now(),
-            rounds: Vec::new(),
         }));
 
         self.requests.insert(id, internal);
@@ -172,16 +163,16 @@ impl RequestStateManager {
     pub fn record_round_attempt(&self, id: u64, round_log: crate::model::RoundLog) {
         if let Some(req) = self.requests.get(&id) {
             let mut lock = req.write();
-            if let Some(pos) = lock.rounds.iter().position(|r| r.round == round_log.round) {
-                lock.rounds[pos] = round_log;
+            if let Some(pos) = lock.overview.rounds.iter().position(|r| r.round == round_log.round) {
+                lock.overview.rounds[pos] = round_log;
             } else {
-                lock.rounds.push(round_log);
+                lock.overview.rounds.push(round_log);
             }
-            lock.overview.rounds = lock.rounds.clone();
             let _ = self.tx.send(lock.overview.clone());
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn finish(
         &self,
         id: u64,
@@ -202,9 +193,8 @@ impl RequestStateManager {
             lock.overview.error = error;
             lock.response_body = response_body;
             if !rounds.is_empty() {
-                lock.rounds = rounds;
+                lock.overview.rounds = rounds;
             }
-            lock.overview.rounds = lock.rounds.clone();
             let _ = self.tx.send(lock.overview.clone());
         }
     }

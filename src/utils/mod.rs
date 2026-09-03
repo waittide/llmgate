@@ -12,11 +12,27 @@ pub fn generate_api_key() -> String {
     format!("sk-octopus-{}", key)
 }
 
+/// Hash a password using a random 16-byte salt and SHA-256 iterations.
+/// Format: `pbkdf2:sha256:<salt_hex>:<hash_hex>`
 pub fn hash_password(password: &str) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(password.as_bytes());
-    hex::encode(hasher.finalize())
+    let mut salt_bytes = [0u8; 16];
+    rand::rng().fill(&mut salt_bytes);
+    let salt_hex = hex::encode(salt_bytes);
+    let hash_hex = compute_salted_hash(password, &salt_hex);
+    format!("pbkdf2:sha256:{}:{}", salt_hex, hash_hex)
 }
+
+fn compute_salted_hash(password: &str, salt_hex: &str) -> String {
+    let mut current = Sha256::digest(format!("{}:{}", salt_hex, password).as_bytes()).to_vec();
+    for _ in 1..10_000 {
+        let mut hasher = Sha256::new();
+        hasher.update(&current);
+        hasher.update(password.as_bytes());
+        current = hasher.finalize().to_vec();
+    }
+    hex::encode(current)
+}
+
 pub fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     if a.len() != b.len() {
         return false;
@@ -28,9 +44,20 @@ pub fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     diff == 0
 }
 
+/// Verify password against hash. Supports both new `pbkdf2:sha256:...` format and legacy raw SHA-256 hashes.
 pub fn verify_password(password: &str, hashed: &str) -> bool {
-    let computed = hash_password(password);
-    constant_time_eq(computed.as_bytes(), hashed.as_bytes())
+    if let Some(rest) = hashed.strip_prefix("pbkdf2:sha256:") {
+        if let Some((salt_hex, expected_hash)) = rest.split_once(':') {
+            let computed = compute_salted_hash(password, salt_hex);
+            return constant_time_eq(computed.as_bytes(), expected_hash.as_bytes());
+        }
+    }
+
+    // Legacy unsalted sha256 fallback
+    let mut hasher = Sha256::new();
+    hasher.update(password.as_bytes());
+    let legacy_computed = hex::encode(hasher.finalize());
+    constant_time_eq(legacy_computed.as_bytes(), hashed.as_bytes())
 }
 
 pub fn estimate_tokens(text: &str) -> i64 {

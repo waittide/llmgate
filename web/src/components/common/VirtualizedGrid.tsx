@@ -72,9 +72,15 @@ export function VirtualizedGrid<T>({
         const el = containerRef.current;
         if (!el) return;
 
+        let rafId: number | null = null;
         const updateWidth = () => {
-            const nextWidth = el.clientWidth;
-            setContainerWidth((prev) => (prev === nextWidth ? prev : nextWidth));
+            if (rafId !== null) return;
+            rafId = window.requestAnimationFrame(() => {
+                rafId = null;
+                if (!containerRef.current) return;
+                const nextWidth = containerRef.current.clientWidth;
+                setContainerWidth((prev) => (Math.abs(prev - nextWidth) < 2 ? prev : nextWidth));
+            });
         };
 
         updateWidth();
@@ -84,6 +90,7 @@ export function VirtualizedGrid<T>({
         observer.observe(el);
 
         return () => {
+            if (rafId !== null) window.cancelAnimationFrame(rafId);
             observer.disconnect();
         };
     }, []);

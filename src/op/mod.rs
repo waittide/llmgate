@@ -11,7 +11,7 @@ pub mod log;
 use crate::{
     db::DbPool,
     model::{
-        APIKey, Channel, ChannelModel, Group, LLMPrice, StatsAPIKey, StatsDaily,
+        APIKey, Channel, ChannelModel, Group, LLMPrice, RequestLog, StatsAPIKey, StatsDaily,
         StatsHourly, StatsMetrics, StatsTotal,
     },
     relay::{route::RouteManager, state::RequestStateManager},
@@ -20,6 +20,7 @@ use anyhow::Result;
 use dashmap::DashMap;
 use parking_lot::RwLock;
 use std::sync::Arc;
+use tokio::sync::mpsc;
 use tracing::info;
 
 #[derive(Clone)]
@@ -40,6 +41,7 @@ pub struct AppState {
     pub route_manager: Arc<RouteManager>,
     pub request_state_manager: Arc<RequestStateManager>,
     pub jwt_secret: Arc<RwLock<String>>,
+    pub log_sender: mpsc::Sender<RequestLog>,
 }
 
 impl AppState {
@@ -52,7 +54,7 @@ impl AppState {
         });
 
         let state = Self {
-            db,
+            db: db.clone(),
             channels: Arc::new(DashMap::new()),
             channel_models: Arc::new(DashMap::new()),
             groups: Arc::new(DashMap::new()),
@@ -74,6 +76,11 @@ impl AppState {
             route_manager: Arc::new(RouteManager::new()),
             request_state_manager: Arc::new(RequestStateManager::new()),
             jwt_secret: Arc::new(RwLock::new("octopus-jwt-secret-default".to_string())),
+            log_sender: {
+                let (tx, rx) = mpsc::channel(2048);
+                crate::op::log::start_log_worker(db.clone(), rx);
+                tx
+            },
         };
 
         state.refresh_all_caches().await?;

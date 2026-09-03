@@ -15,10 +15,37 @@ pub fn get_log_retention_days(state: &AppState) -> i64 {
         .unwrap_or(DEFAULT_RETENTION_DAYS)
 }
 
-/// Persists a completed request/response log. Fire-and-forget so relay paths
-/// (including synchronous stream finalizers) never block on the write.
-pub fn record_request_log(state: AppState, entry: RequestLog) {
+/// Worker that receives request logs from a bounded channel and batches writes to SQLite.
+pub fn start_log_worker(db: crate::db::DbPool, mut rx: tokio::sync::mpsc::Receiver<RequestLog>) {
     tokio::spawn(async move {
+        let mut batch = Vec::with_capacity(64);
+        let mut interval = tokio::time::interval(std::time::Duration::from_millis(200));
+
+        loop {
+            tokio::select! {
+                biased;
+                Some(log) = rx.recv() => {
+                    batch.push(log);
+                    if batch.len() >= 64 {
+                        flush_log_batch(&db, &mut batch).await;
+                    }
+                }
+                _ = interval.tick() => {
+                    if !batch.is_empty() {
+                        flush_log_batch(&db, &mut batch).await;
+                    }
+                }
+                else => break,
+            }
+        }
+        if !batch.is_empty() {
+            flush_log_batch(&db, &mut batch).await;
+        }
+    });
+}
+
+async fn flush_log_batch(db: &crate::db::DbPool, batch: &mut Vec<RequestLog>) {
+    for entry in batch.drain(..) {
         let _ = sqlx::query(
             r#"
             INSERT INTO request_logs (
@@ -50,9 +77,16 @@ pub fn record_request_log(state: AppState, entry: RequestLog) {
         .bind(&entry.error)
         .bind(&entry.rounds_detail)
         .bind(entry.created_at)
-        .execute(&state.db)
+        .execute(db)
         .await;
-    });
+    }
+}
+
+/// Persists a completed request/response log via bounded channel queue.
+pub fn record_request_log(state: AppState, entry: RequestLog) {
+    if let Err(e) = state.log_sender.try_send(entry) {
+        tracing::warn!("Request log channel full or closed, dropping entry: {}", e);
+    }
 }
 /// Deletes request logs older than the configured retention period.
 /// Returns the number of rows removed.

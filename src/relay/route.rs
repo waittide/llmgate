@@ -9,7 +9,6 @@ use tokio::sync::broadcast;
 pub struct RouteState {
     pub group_id: i64,
     pub current_item_id: i64,
-    pub probe_item_id: i64,
     pub affinity_until: i64,
     pub cooldowns: HashMap<i64, i64>,
     #[serde(skip)]
@@ -48,7 +47,6 @@ impl RouteManager {
                 Arc::new(Mutex::new(RouteState {
                     group_id,
                     current_item_id: 0,
-                    probe_item_id: 0,
                     affinity_until: 0,
                     cooldowns: HashMap::new(),
                     affinity_armed: false,

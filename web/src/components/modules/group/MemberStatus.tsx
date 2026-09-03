@@ -66,17 +66,24 @@ export function MemberStatus({ group, itemId, now, active = false, activeClassNa
             const label = t(cooling ? 'cooling' : 'affinity', { seconds: Math.ceil((deadline - now) / 1000) });
 
             return (
-                <Badge
-                    variant="outline"
-                    className={cn(
-                        'shrink-0 px-1.5 py-0 text-[10px] font-medium',
-                        cooling
-                            ? 'border-orange-500/30 bg-orange-500/10 text-orange-600 dark:text-orange-400'
-                            : 'border-cyan-500/30 bg-cyan-500/10 text-cyan-600 dark:text-cyan-400'
+                <div className="flex items-center gap-1.5 shrink-0">
+                    <Badge
+                        variant="outline"
+                        className={cn(
+                            'shrink-0 px-1.5 py-0 text-[10px] font-medium',
+                            cooling
+                                ? 'border-orange-500/30 bg-orange-500/10 text-orange-600 dark:text-orange-400'
+                                : 'border-cyan-500/30 bg-cyan-500/10 text-cyan-600 dark:text-cyan-400'
+                        )}
+                    >
+                        {label}
+                    </Badge>
+                    {active && (
+                        <span aria-hidden="true" className={cn('inline-flex shrink-0 text-primary', activeClassName)}>
+                            <CircleCheck className="size-4" />
+                        </span>
                     )}
-                >
-                    {label}
-                </Badge>
+                </div>
             );
         }
     }

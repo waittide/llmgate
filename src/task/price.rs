@@ -24,7 +24,7 @@ pub fn get_catalog_price(model_name: &str) -> Option<LLMPrice> {
 }
 
 pub async fn fetch_catalog_from_models_dev() -> Result<()> {
-    let client = crate::relay::upstream::get_shared_client();
+    let client = crate::relay::upstream::get_client();
 
     let resp = client
         .get("https://models.dev/api.json")

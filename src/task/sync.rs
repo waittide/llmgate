@@ -1,7 +1,7 @@
 use crate::{
     model::{Channel, ChannelModel, ChannelModelSource, ChannelProvider},
     op::{channel, AppState},
-    relay::upstream::{get_client_for_channel, normalize_base_url},
+    relay::upstream::{build_upstream_request, get_client},
 };
 use anyhow::Result;
 use serde_json::Value;
@@ -15,12 +15,35 @@ pub fn get_last_sync_time() -> i64 {
 }
 
 pub async fn fetch_upstream_models(channel: &Channel) -> Result<Vec<String>> {
-    let client = get_client_for_channel(channel)?;
-    let mut models = match channel.channel_type {
-        ChannelProvider::Anthropic => fetch_anthropic_models(&client, channel).await?,
-        ChannelProvider::Gemini => fetch_gemini_models(&client, channel).await?,
-        _ => fetch_openai_models(&client, channel).await?,
-    };
+    let client = get_client();
+    let resp = build_upstream_request(client, channel, "/models", None, 15)?
+        .send()
+        .await?;
+
+    let body: Value = resp.json().await?;
+    let mut models = Vec::new();
+
+    match channel.channel_type {
+        ChannelProvider::Gemini => {
+            if let Some(models_arr) = body.get("models").and_then(|m| m.as_array()) {
+                for item in models_arr {
+                    if let Some(name) = item.get("name").and_then(|n| n.as_str()) {
+                        let clean_name = name.strip_prefix("models/").unwrap_or(name);
+                        models.push(clean_name.to_string());
+                    }
+                }
+            }
+        }
+        _ => {
+            if let Some(data_arr) = body.get("data").and_then(|d| d.as_array()) {
+                for item in data_arr {
+                    if let Some(id) = item.get("id").and_then(|i| i.as_str()) {
+                        models.push(id.to_string());
+                    }
+                }
+            }
+        }
+    }
 
     if let Some(regex_str) = &channel.match_regex
         && !regex_str.trim().is_empty()
@@ -31,100 +54,6 @@ pub async fn fetch_upstream_models(channel: &Channel) -> Result<Vec<String>> {
 
     Ok(models)
 }
-
-async fn fetch_openai_models(client: &reqwest::Client, channel: &Channel) -> Result<Vec<String>> {
-    let base_url = normalize_base_url(&channel.base_url);
-    let target_url = format!("{}/models", base_url);
-
-    let mut req = client
-        .get(&target_url)
-        .header("Authorization", format!("Bearer {}", channel.key))
-        .timeout(std::time::Duration::from_secs(15));
-
-    for h in &channel.custom_header {
-        if let (Ok(name), Ok(val)) = (
-            reqwest::header::HeaderName::from_bytes(h.header_key.as_bytes()),
-            reqwest::header::HeaderValue::from_str(&h.header_value),
-        ) {
-            req = req.header(name, val);
-        }
-    }
-    let resp = req.send().await?;
-
-    let body: Value = resp.json().await?;
-    let mut model_names = Vec::new();
-    if let Some(data_arr) = body.get("data").and_then(|d| d.as_array()) {
-        for item in data_arr {
-            if let Some(id) = item.get("id").and_then(|i| i.as_str()) {
-                model_names.push(id.to_string());
-            }
-        }
-    }
-    Ok(model_names)
-}
-
-async fn fetch_anthropic_models(client: &reqwest::Client, channel: &Channel) -> Result<Vec<String>> {
-    let base_url = normalize_base_url(&channel.base_url);
-    let target_url = format!("{}/models", base_url);
-
-    let mut req = client
-        .get(&target_url)
-        .header("x-api-key", &channel.key)
-        .header("anthropic-version", "2023-06-01")
-        .timeout(std::time::Duration::from_secs(15));
-
-    for h in &channel.custom_header {
-        if let (Ok(name), Ok(val)) = (
-            reqwest::header::HeaderName::from_bytes(h.header_key.as_bytes()),
-            reqwest::header::HeaderValue::from_str(&h.header_value),
-        ) {
-            req = req.header(name, val);
-        }
-    }
-    let resp = req.send().await?;
-    let body: Value = resp.json().await?;
-    let mut model_names = Vec::new();
-    if let Some(data_arr) = body.get("data").and_then(|d| d.as_array()) {
-        for item in data_arr {
-            if let Some(id) = item.get("id").and_then(|i| i.as_str()) {
-                model_names.push(id.to_string());
-            }
-        }
-    }
-    Ok(model_names)
-}
-
-async fn fetch_gemini_models(client: &reqwest::Client, channel: &Channel) -> Result<Vec<String>> {
-    let base_url = normalize_base_url(&channel.base_url);
-    let target_url = format!("{}/models", base_url);
-
-    let mut req = client
-        .get(&target_url)
-        .header("x-goog-api-key", &channel.key)
-        .timeout(std::time::Duration::from_secs(15));
-
-    for h in &channel.custom_header {
-        if let (Ok(name), Ok(val)) = (
-            reqwest::header::HeaderName::from_bytes(h.header_key.as_bytes()),
-            reqwest::header::HeaderValue::from_str(&h.header_value),
-        ) {
-            req = req.header(name, val);
-        }
-    }
-    let resp = req.send().await?;
-    let body: Value = resp.json().await?;
-    let mut model_names = Vec::new();
-    if let Some(models_arr) = body.get("models").and_then(|m| m.as_array()) {
-        for item in models_arr {
-            if let Some(name) = item.get("name").and_then(|n| n.as_str()) {
-                let clean_name = name.strip_prefix("models/").unwrap_or(name);
-                model_names.push(clean_name.to_string());
-            }
-        }
-    }
-    Ok(model_names)
-}
-
 pub async fn sync_all_channel_models(state: &AppState) -> Result<()> {
     let channels = channel::list_channels(state);
     let mut all_added_models = Vec::new();

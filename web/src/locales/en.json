@@ -367,6 +367,8 @@
       "submitting": "Creating..."
     },
     "toast": {
+      "created": "Model created successfully",
+      "createFailed": "Failed to create model",
       "updated": "Model price updated",
       "updateFailed": "Update failed",
       "deleted": "Model deleted",

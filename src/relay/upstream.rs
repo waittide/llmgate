@@ -17,11 +17,7 @@ static SHARED_HTTP_CLIENT: LazyLock<Client> = LazyLock::new(|| {
         .expect("Failed to initialize shared HTTP client")
 });
 
-pub fn get_client_for_channel(_channel: &Channel) -> Result<Client> {
-    Ok(SHARED_HTTP_CLIENT.clone())
-}
-
-pub fn get_shared_client() -> &'static Client {
+pub fn get_client() -> &'static Client {
     &SHARED_HTTP_CLIENT
 }
 

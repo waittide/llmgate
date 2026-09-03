@@ -21,11 +21,11 @@ pub async fn refresh_llm_cache(state: &AppState) -> Result<()> {
         };
         local_prices.insert(name.to_lowercase(), price);
     }
-
-    state.llm_prices.clear();
-    for (k, v) in local_prices {
-        state.llm_prices.insert(k, v);
+    // Atomically sync in-memory cache without leaving empty windows
+    for (k, v) in &local_prices {
+        state.llm_prices.insert(k.clone(), v.clone());
     }
+    state.llm_prices.retain(|k, _| local_prices.contains_key(k));
     Ok(())
 }
 

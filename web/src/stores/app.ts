@@ -21,21 +21,40 @@ export const NAV_ITEMS: NavItem[] = [
 
 const NAV_ORDER: Page[] = NAV_ITEMS.map((item) => item.id); // NAV_ORDER 用于计算页面名称滚动方向。
 
+function getPageFromLocation(): Page | null {
+    if (typeof window === 'undefined') return null;
+    const hash = window.location.hash.replace(/^#\/?/, '').trim().toLowerCase();
+    if (NAV_ORDER.includes(hash as Page)) {
+        return hash as Page;
+    }
+    const path = window.location.pathname.replace(/^\//, '').trim().toLowerCase();
+    if (NAV_ORDER.includes(path as Page)) {
+        return path as Page;
+    }
+    return null;
+}
+
 interface AppState {
     currentPage: Page; // 当前选中的固定页面。
     direction: number; // 页面名称切换时的滚动方向。
-    setCurrentPage: (page: Page) => void; // 切换当前页面。
+    setCurrentPage: (page: Page, pushHistory?: boolean) => void; // 切换当前页面。
 }
 
 // useAppStore 保存应用当前页面及页面名称切换方向。
 export const useAppStore = create<AppState>()(
     persist(
         (set, get) => ({
-            currentPage: 'home',
+            currentPage: getPageFromLocation() || 'home',
             direction: 0,
-            setCurrentPage: (page) => {
+            setCurrentPage: (page, pushHistory = true) => {
                 const currentIndex = NAV_ORDER.indexOf(get().currentPage);
                 const nextIndex = NAV_ORDER.indexOf(page);
+                if (typeof window !== 'undefined' && pushHistory) {
+                    const targetHash = `#${page}`;
+                    if (window.location.hash !== targetHash) {
+                        window.history.pushState({ page }, '', targetHash);
+                    }
+                }
                 set({ currentPage: page, direction: nextIndex > currentIndex ? 1 : -1 });
             },
         }),
@@ -44,3 +63,12 @@ export const useAppStore = create<AppState>()(
         }
     )
 );
+
+if (typeof window !== 'undefined') {
+    window.addEventListener('popstate', () => {
+        const page = getPageFromLocation();
+        if (page && page !== useAppStore.getState().currentPage) {
+            useAppStore.getState().setCurrentPage(page, false);
+        }
+    });
+}

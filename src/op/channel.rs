@@ -93,16 +93,16 @@ pub async fn refresh_channel_cache(state: &AppState) -> Result<()> {
         local_models.insert(id, channel_model);
     }
 
-    // Atomically replace in-memory cache
-    state.channels.clear();
-    for (k, v) in local_channels {
-        state.channels.insert(k, v);
+    // Atomically sync in-memory cache without leaving empty windows
+    for (k, v) in &local_channels {
+        state.channels.insert(*k, v.clone());
     }
-    state.channel_models.clear();
-    for (k, v) in local_models {
-        state.channel_models.insert(k, v);
-    }
+    state.channels.retain(|k, _| local_channels.contains_key(k));
 
+    for (k, v) in &local_models {
+        state.channel_models.insert(*k, v.clone());
+    }
+    state.channel_models.retain(|k, _| local_models.contains_key(k));
     Ok(())
 }
 

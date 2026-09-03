@@ -17,15 +17,16 @@ pub async fn refresh_apikey_cache(state: &AppState) -> Result<()> {
         local_index.insert(key.api_key.clone(), key.id);
         local_keys.insert(key.id, key);
     }
+    // Atomically sync in-memory cache without leaving empty windows
+    for (k, v) in &local_keys {
+        state.api_keys.insert(*k, v.clone());
+    }
+    state.api_keys.retain(|k, _| local_keys.contains_key(k));
 
-    state.api_keys.clear();
-    for (k, v) in local_keys {
-        state.api_keys.insert(k, v);
+    for (k, v) in &local_index {
+        state.api_key_str_index.insert(k.clone(), *v);
     }
-    state.api_key_str_index.clear();
-    for (k, v) in local_index {
-        state.api_key_str_index.insert(k, v);
-    }
+    state.api_key_str_index.retain(|k, _| local_index.contains_key(k));
     Ok(())
 }
 

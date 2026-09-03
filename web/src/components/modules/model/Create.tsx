@@ -10,12 +10,13 @@ import {
     useMorphingDialog,
 } from '@/components/ui/morphing-dialog';
 import { useTranslations } from 'use-intl';
+import { toast } from 'sonner';
 
 export function CreateDialogContent() {
     const { setIsOpen } = useMorphingDialog();
     const t = useTranslations('model.create');
+    const tToast = useTranslations('model.toast');
     const createModel = useCreateModel();
-
     const [formData, setFormData] = useState({
         name: '',
         input: '',
@@ -26,20 +27,38 @@ export function CreateDialogContent() {
 
     const handleSubmit = (event: React.FormEvent<HTMLFormElement>) => {
         event.preventDefault();
-        if (!formData.name.trim()) return;
+        const trimmedName = formData.name.trim();
+        if (!trimmedName) {
+            toast.error(tToast('createFailed'), { description: t('name') });
+            return;
+        }
 
-        createModel.mutate({
-            name: formData.name.trim(),
-            input: parseFloat(formData.input) || 0,
-            output: parseFloat(formData.output) || 0,
-            cache_read: parseFloat(formData.cache_read) || 0,
-            cache_write: parseFloat(formData.cache_write) || 0,
-        }, {
-            onSuccess: () => {
-                setFormData({ name: '', input: '', output: '', cache_read: '', cache_write: '' });
-                setIsOpen(false);
+        const parsePositiveNumber = (val: string) => {
+            if (!val) return 0;
+            const num = parseFloat(val);
+            return Number.isFinite(num) && num >= 0 ? num : 0;
+        };
+
+        createModel.mutate(
+            {
+                name: trimmedName,
+                input: parsePositiveNumber(formData.input),
+                output: parsePositiveNumber(formData.output),
+                cache_read: parsePositiveNumber(formData.cache_read),
+                cache_write: parsePositiveNumber(formData.cache_write),
+            },
+            {
+                onSuccess: () => {
+                    toast.success(tToast('created'));
+                    setFormData({ name: '', input: '', output: '', cache_read: '', cache_write: '' });
+                    setIsOpen(false);
+                },
+                onError: (error) => {
+                    const msg = error instanceof Error ? error.message : String(error);
+                    toast.error(tToast('createFailed'), { description: msg });
+                },
             }
-        });
+        );
     };
 
     return (

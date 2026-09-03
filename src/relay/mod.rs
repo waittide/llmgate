@@ -12,7 +12,7 @@ use crate::{
             rewrite_request_body_in_json, ApiFormat,
         },
         state::Usage,
-        upstream::{build_upstream_request, get_client_for_channel, normalize_base_url},
+        upstream::{build_upstream_request, get_client, normalize_base_url},
     },
     server::{middleware::AuthContext, resp::error},
     utils::estimate_tokens,
@@ -86,6 +86,8 @@ struct StreamFinalizer<S> {
 }
 
 /// Drains complete SSE events from `buffer`, accumulating any `usage` found.
+const SSE_BUFFER_LIMIT: usize = 64 * 1024; // 64KB max temporary SSE accumulation buffer
+
 /// Handles events split across arbitrary stream chunk boundaries.
 fn sse_event_end(buf: &[u8]) -> Option<usize> {
     for i in 0..buf.len().saturating_sub(1) {
@@ -120,6 +122,23 @@ fn extract_usage_from_sse_buffer(buffer: &mut Vec<u8>, usage: &mut Option<Usage>
             }
         }
     }
+    // Guard against malformed streams without event boundaries
+    if buffer.len() > SSE_BUFFER_LIMIT {
+        buffer.drain(..buffer.len() - (SSE_BUFFER_LIMIT / 2));
+    }
+}
+
+/// Determine if an upstream error indicates a client issue (invalid payload, bad auth on client key, model not found, etc.)
+/// Client errors should not penalize the upstream channel with cooldown/failover.
+fn is_client_error(status: StatusCode) -> bool {
+    matches!(
+        status,
+        StatusCode::BAD_REQUEST
+            | StatusCode::UNAUTHORIZED
+            | StatusCode::FORBIDDEN
+            | StatusCode::NOT_FOUND
+            | StatusCode::UNPROCESSABLE_ENTITY
+    )
 }
 
 impl<S> StreamFinalizer<S> {
@@ -311,7 +330,7 @@ pub async fn forward_relay(
     let body_str = String::from_utf8_lossy(&body_bytes).to_string();
     let req_id = state
         .request_state_manager
-        .new_request(metadata.model.clone(), body_str.clone(), auth_ctx.api_key.id);
+        .new_request(metadata.model.clone(), body_str.clone());
 
 
     let request_url = uri.path().to_string();
@@ -342,7 +361,11 @@ pub async fn forward_relay(
         let item = match state.route_manager.pick_group_item(&current_group) {
             Some(it) => it,
             None => {
-                tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+                // If the group has no items at all, no need to spin-wait
+                if current_group.items.is_empty() {
+                    break;
+                }
+                tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
                 continue;
             }
         };
@@ -370,42 +393,7 @@ pub async fn forward_relay(
 
         let target_req_url = format!("{}{}", normalize_base_url(&ch.base_url), endpoint);
 
-        let client = match get_client_for_channel(&ch) {
-            Ok(c) => c,
-            Err(e) => {
-                let err_msg = format!("Failed to create client for channel {}: {}", ch.name, e);
-                last_target_channel = ch.name.clone();
-                last_target_model = channel_model.name.clone();
-                last_error_body = err_msg.clone();
-                state
-                    .route_manager
-                    .report_failure(current_group.id, item.id, 60);
-                let round_log = crate::model::RoundLog {
-                    round,
-                    channel_name: ch.name.clone(),
-                    model_name: channel_model.name.clone(),
-                    request_url: target_req_url.clone(),
-                    request_headers: request_headers.clone(),
-                    request_body: request_body.clone(),
-                    response_url: target_req_url.clone(),
-                    response_headers: String::new(),
-                    response_body: err_msg.clone(),
-                    status: 500,
-                    duration_ms: round_start_time.elapsed().as_millis() as i64,
-                    error: Some(err_msg.clone()),
-                };
-                rounds.push(round_log.clone());
-                state.request_state_manager.record_round_attempt(req_id, round_log);
-                state.request_state_manager.update_round_error(
-                    req_id,
-                    round,
-                    ch.name.clone(),
-                    channel_model.name.clone(),
-                    err_msg,
-                );
-                continue;
-            }
-        };
+        let client = get_client();
         let channel_req_headers = upstream::build_upstream_headers(&ch)
             .map(|h| serialize_headers(&h))
             .unwrap_or_else(|_| request_headers.clone());
@@ -416,7 +404,30 @@ pub async fn forward_relay(
             &channel_model.name,
             ch.param_override.as_deref(),
         );
-        let rewritten_body_str = String::from_utf8_lossy(&rewritten_body).to_string();
+
+        let (target_endpoint, final_body) = match (format, &ch.channel_type) {
+            (ApiFormat::OpenaiCompletion, crate::model::ChannelProvider::Anthropic) => {
+                if let Ok(val) = serde_json::from_slice::<serde_json::Value>(&rewritten_body) {
+                    let converted = protocol::convert_openai_to_anthropic(&val);
+                    let bytes = serde_json::to_vec(&converted).unwrap_or(rewritten_body);
+                    ("/messages", bytes)
+                } else {
+                    (endpoint, rewritten_body)
+                }
+            }
+            (ApiFormat::OpenaiCompletion, crate::model::ChannelProvider::Gemini) => {
+                if let Ok(val) = serde_json::from_slice::<serde_json::Value>(&rewritten_body) {
+                    let converted = protocol::convert_openai_to_gemini(&val);
+                    let bytes = serde_json::to_vec(&converted).unwrap_or(rewritten_body);
+                    (endpoint, bytes)
+                } else {
+                    (endpoint, rewritten_body)
+                }
+            }
+            _ => (endpoint, rewritten_body),
+        };
+
+        let rewritten_body_str = String::from_utf8_lossy(&final_body).to_string();
         state.request_state_manager.update_round(
             req_id,
             round,
@@ -439,10 +450,10 @@ pub async fn forward_relay(
         };
 
         let req_builder = match build_upstream_request(
-            &client,
+            client,
             &ch,
-            endpoint,
-            Some(rewritten_body),
+            target_endpoint,
+            Some(final_body),
             timeout_secs,
         ) {
             Ok(rb) => rb,
@@ -554,7 +565,13 @@ pub async fn forward_relay(
                             .header(header::CACHE_CONTROL, "no-cache")
                             .header(header::CONNECTION, "keep-alive")
                             .body(body)
-                            .unwrap();
+                            .unwrap_or_else(|e| {
+                                tracing::error!("Failed to build SSE response: {}", e);
+                                Response::builder()
+                                    .status(StatusCode::INTERNAL_SERVER_ERROR)
+                                    .body(Body::from("Internal Server Error"))
+                                    .unwrap_or_default()
+                            });
                     } else {
                         // Non-streaming response
                         let response_headers = serialize_headers(upstream_resp.headers());
@@ -656,7 +673,13 @@ pub async fn forward_relay(
                             .status(StatusCode::OK)
                             .header(header::CONTENT_TYPE, "application/json")
                             .body(Body::from(resp_bytes))
-                            .unwrap();
+                            .unwrap_or_else(|e| {
+                                tracing::error!("Failed to build JSON response: {}", e);
+                                Response::builder()
+                                    .status(StatusCode::INTERNAL_SERVER_ERROR)
+                                    .body(Body::from("Internal Server Error"))
+                                    .unwrap_or_default()
+                            });
                     }
                 } else {
                     let resp_headers = serialize_headers(upstream_resp.headers());
@@ -686,11 +709,21 @@ pub async fn forward_relay(
                     rounds.push(round_log.clone());
                     state.request_state_manager.record_round_attempt(req_id, round_log);
 
-                    state.route_manager.report_failure(
-                        current_group.id,
-                        item.id,
-                        current_group.relay_config.member_cooldown_seconds,
-                    );
+                    // Only penalize channel if it is a server error, rate-limit, or gateway failure
+                    if !is_client_error(status) {
+                        state.route_manager.report_failure(
+                            current_group.id,
+                            item.id,
+                            current_group.relay_config.member_cooldown_seconds,
+                        );
+                    } else {
+                        tracing::warn!(
+                            "Upstream returned client error {} from channel {}: {}, not triggering cooldown",
+                            status,
+                            ch.name,
+                            err_body
+                        );
+                    }
                     state.request_state_manager.update_round_error(
                         req_id,
                         round,
@@ -698,6 +731,11 @@ pub async fn forward_relay(
                         channel_model.name.clone(),
                         err_body,
                     );
+
+                    // If it is a clear client error (e.g. 400 Bad Request / 422 Unprocessable), do not failover blindly
+                    if is_client_error(status) {
+                        break;
+                    }
                 }
             }
             Err(e) => {
@@ -791,11 +829,7 @@ pub async fn forward_relay(
     state.request_state_manager.finish(
         req_id,
         "failed",
-        Usage {
-            prompt_tokens: 0,
-            completion_tokens: 0,
-            total_tokens: 0,
-        },
+        Usage::default(),
         0.0,
         last_error_body.clone(),
         Some(error_summary),
@@ -833,7 +867,13 @@ pub async fn forward_relay(
         })
         .header(header::CONTENT_TYPE, "application/json")
         .body(Body::from(response_body_bytes))
-        .unwrap()
+        .unwrap_or_else(|e| {
+            tracing::error!("Failed to build error response: {}", e);
+            Response::builder()
+                .status(StatusCode::BAD_GATEWAY)
+                .body(Body::from("Bad Gateway"))
+                .unwrap_or_default()
+        })
 }
 #[cfg(test)]
 mod tests {

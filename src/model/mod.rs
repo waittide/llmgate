@@ -236,31 +236,15 @@ pub struct GroupRelayConfig {
     pub member_affinity_seconds:                    i64,
 }
 
-fn default_attempts() -> i64 {
-    2
-}
-fn default_interval() -> i64 {
-    1
-}
-fn default_non_stream_timeout() -> i64 {
-    60
-}
-fn default_stream_first_event_timeout() -> i64 {
-    30
-}
-fn default_cooldown() -> i64 {
-    300
-}
-
 impl Default for GroupRelayConfig {
     fn default() -> Self {
         Self {
-            member_max_attempts:                        default_attempts(),
-            member_retry_interval_seconds:              default_interval(),
-            member_non_stream_response_timeout_seconds: default_non_stream_timeout(),
-            member_stream_first_event_timeout_seconds:  default_stream_first_event_timeout(),
-            member_cooldown_seconds:                    default_cooldown(),
-            member_affinity_seconds:                    0,
+            member_max_attempts: 2,
+            member_retry_interval_seconds: 1,
+            member_non_stream_response_timeout_seconds: 60,
+            member_stream_first_event_timeout_seconds: 30,
+            member_cooldown_seconds: 300,
+            member_affinity_seconds: 0,
         }
     }
 }

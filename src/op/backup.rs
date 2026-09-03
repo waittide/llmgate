@@ -50,6 +50,7 @@ pub async fn export_backup(state: &AppState) -> Result<BackupData> {
 }
 
 pub async fn import_backup(state: &AppState, backup: BackupData) -> Result<DBImportResult> {
+    let mut tx = state.db.begin().await?;
     let mut rows_affected = HashMap::new();
 
     // 1. Settings
@@ -60,7 +61,7 @@ pub async fn import_backup(state: &AppState, backup: BackupData) -> Result<DBImp
         )
         .bind(&s.key)
         .bind(&s.value)
-        .execute(&state.db)
+        .execute(&mut *tx)
         .await;
         if res.is_ok() {
             setting_count += 1;
@@ -92,7 +93,7 @@ pub async fn import_backup(state: &AppState, backup: BackupData) -> Result<DBImp
             .bind(key.expire_at)
             .bind(key.max_cost)
             .bind(&key.supported_models)
-            .execute(&state.db)
+            .execute(&mut *tx)
             .await
         } else {
             sqlx::query(
@@ -107,7 +108,7 @@ pub async fn import_backup(state: &AppState, backup: BackupData) -> Result<DBImp
             .bind(key.expire_at)
             .bind(key.max_cost)
             .bind(&key.supported_models)
-            .execute(&state.db)
+            .execute(&mut *tx)
             .await
         };
 
@@ -162,7 +163,7 @@ pub async fn import_backup(state: &AppState, backup: BackupData) -> Result<DBImp
             .bind(ch.metrics.wait_time)
             .bind(ch.metrics.request_success)
             .bind(ch.metrics.request_failed)
-            .execute(&state.db)
+            .execute(&mut *tx)
             .await
         } else {
             sqlx::query(
@@ -180,7 +181,7 @@ pub async fn import_backup(state: &AppState, backup: BackupData) -> Result<DBImp
             .bind(&custom_header_json)
             .bind(&ch.param_override)
             .bind(&ch.match_regex)
-            .execute(&state.db)
+            .execute(&mut *tx)
             .await
         };
 
@@ -197,7 +198,7 @@ pub async fn import_backup(state: &AppState, backup: BackupData) -> Result<DBImp
             .bind(ch_id)
             .bind(&cm.name)
             .bind(cm.source.as_str())
-            .execute(&state.db)
+            .execute(&mut *tx)
             .await;
         }
     }
@@ -235,7 +236,7 @@ pub async fn import_backup(state: &AppState, backup: BackupData) -> Result<DBImp
             .bind(cm.metrics.wait_time)
             .bind(cm.metrics.request_success)
             .bind(cm.metrics.request_failed)
-            .execute(&state.db)
+            .execute(&mut *tx)
             .await
         } else {
             sqlx::query(
@@ -244,7 +245,7 @@ pub async fn import_backup(state: &AppState, backup: BackupData) -> Result<DBImp
             .bind(cm.channel_id)
             .bind(&cm.name)
             .bind(cm.source.as_str())
-            .execute(&state.db)
+            .execute(&mut *tx)
             .await
         };
         if res.is_ok() {
@@ -274,7 +275,7 @@ pub async fn import_backup(state: &AppState, backup: BackupData) -> Result<DBImp
             .bind(grp.mode.as_str())
             .bind(grp.active_item_id)
             .bind(&relay_config_json)
-            .execute(&state.db)
+            .execute(&mut *tx)
             .await
         } else {
             sqlx::query("INSERT INTO groups (name, mode, active_item_id, relay_config) VALUES (?, ?, ?, ?)")
@@ -282,7 +283,7 @@ pub async fn import_backup(state: &AppState, backup: BackupData) -> Result<DBImp
                 .bind(grp.mode.as_str())
                 .bind(grp.active_item_id)
                 .bind(&relay_config_json)
-                .execute(&state.db)
+                .execute(&mut *tx)
                 .await
         };
 
@@ -299,7 +300,7 @@ pub async fn import_backup(state: &AppState, backup: BackupData) -> Result<DBImp
             .bind(g_id)
             .bind(item.channel_model_id)
             .bind(item.priority)
-            .execute(&state.db)
+            .execute(&mut *tx)
             .await;
         }
     }
@@ -323,7 +324,7 @@ pub async fn import_backup(state: &AppState, backup: BackupData) -> Result<DBImp
             .bind(item.group_id)
             .bind(item.channel_model_id)
             .bind(item.priority)
-            .execute(&state.db)
+            .execute(&mut *tx)
             .await
         } else {
             sqlx::query(
@@ -332,7 +333,7 @@ pub async fn import_backup(state: &AppState, backup: BackupData) -> Result<DBImp
             .bind(item.group_id)
             .bind(item.channel_model_id)
             .bind(item.priority)
-            .execute(&state.db)
+            .execute(&mut *tx)
             .await
         };
         if res.is_ok() {
@@ -342,9 +343,34 @@ pub async fn import_backup(state: &AppState, backup: BackupData) -> Result<DBImp
     rows_affected.insert("group_items".to_string(), gi_count);
 
     // 7. LLM Infos
-    let llm_count = backup.llm_infos.len() as i64;
-    let _ = crate::op::llm::batch_create_llm_infos(state, backup.llm_infos).await;
+    let mut llm_count = 0;
+    for info in backup.llm_infos {
+        let name_lower = info.name.to_lowercase();
+        let res = sqlx::query(
+            r#"
+            INSERT INTO llm_infos (name, input, output, cache_read, cache_write)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(name) DO UPDATE SET
+                input = excluded.input,
+                output = excluded.output,
+                cache_read = excluded.cache_read,
+                cache_write = excluded.cache_write
+            "#,
+        )
+        .bind(&name_lower)
+        .bind(info.price.input)
+        .bind(info.price.output)
+        .bind(info.price.cache_read)
+        .bind(info.price.cache_write)
+        .execute(&mut *tx)
+        .await;
+        if res.is_ok() {
+            llm_count += 1;
+        }
+    }
     rows_affected.insert("llm_infos".to_string(), llm_count);
+
+    tx.commit().await?;
     state.refresh_all_caches().await?;
     Ok(DBImportResult { rows_affected })
 }

@@ -73,16 +73,16 @@ pub async fn refresh_group_cache(state: &AppState) -> Result<()> {
         }
     }
 
-    // Atomically swap in-memory cache
-    state.groups.clear();
-    for (k, v) in local_groups {
-        state.groups.insert(k, v);
+    // Atomically sync in-memory cache without leaving empty windows
+    for (k, v) in &local_groups {
+        state.groups.insert(*k, v.clone());
     }
-    state.group_name_index.clear();
-    for (k, v) in local_name_index {
-        state.group_name_index.insert(k, v);
-    }
+    state.groups.retain(|k, _| local_groups.contains_key(k));
 
+    for (k, v) in &local_name_index {
+        state.group_name_index.insert(k.clone(), *v);
+    }
+    state.group_name_index.retain(|k, _| local_name_index.contains_key(k));
     Ok(())
 }
 

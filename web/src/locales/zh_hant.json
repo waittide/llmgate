@@ -367,6 +367,8 @@
       "submitting": "建立中..."
     },
     "toast": {
+      "created": "模型已建立",
+      "createFailed": "建立失敗",
       "updated": "模型價格已更新",
       "updateFailed": "更新失敗",
       "deleted": "模型已刪除",

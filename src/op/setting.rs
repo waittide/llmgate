@@ -26,15 +26,6 @@ pub fn list_settings(state: &AppState) -> Vec<Setting> {
     list
 }
 
-#[allow(dead_code)]
-pub fn get_setting_string(state: &AppState, key: &str) -> String {
-    state
-        .settings
-        .get(key)
-        .map(|entry| entry.value().clone())
-        .unwrap_or_default()
-}
-
 pub async fn set_setting_string(state: &AppState, key: &str, value: &str) -> Result<()> {
     sqlx::query(
         r#"
