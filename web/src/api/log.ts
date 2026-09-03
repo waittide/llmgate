@@ -31,6 +31,9 @@ export interface RoundLog {
     error?: string;
 }
 
+// 实时日志滑动窗口上限: 超过后在内存中丢弃最旧的条目, 防止长时间运行导致内存膨胀。
+const MAX_RT_LOGS = 200;
+
 // RelayLogOverview 是请求状态流发送的完整进程内请求状态。
 export interface RelayLogOverview {
     id: number;
@@ -95,8 +98,15 @@ export function useLogs() {
                     return updated;
                 }
                 const position = current.findIndex((item) => item.id < next.id);
-                if (position < 0) return [...current, next];
-                return [...current.slice(0, position), next, ...current.slice(position)];
+                const nextList =
+                    position < 0
+                        ? [...current, next]
+                        : [...current.slice(0, position), next, ...current.slice(position)];
+                // 只保留最近 MAX_RT_LOGS 条, 丢弃最旧 (列表尾部, ID 最小)。
+                if (nextList.length > MAX_RT_LOGS) {
+                    return nextList.slice(0, MAX_RT_LOGS);
+                }
+                return nextList;
             });
         });
         source.onerror = () => {
