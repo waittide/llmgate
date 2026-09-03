@@ -100,13 +100,12 @@ fn extract_usage_from_sse_buffer(buffer: &mut Vec<u8>, usage: &mut Option<Usage>
             for line in text.lines() {
                 if let Some(data) = line.strip_prefix("data:") {
                     let trimmed = data.trim();
-                    if !trimmed.is_empty() && trimmed != "[DONE]" {
-                        if let Ok(val) = serde_json::from_str::<serde_json::Value>(trimmed)
+                    if !trimmed.is_empty() && trimmed != "[DONE]"
+                        && let Ok(val) = serde_json::from_str::<serde_json::Value>(trimmed)
                             && let Some(u) = extract_usage_from_json(&val)
                         {
                             *usage = Some(u);
                         }
-                    }
                 }
             }
         }
@@ -366,19 +365,19 @@ fn validate_relay_request(
     state: &AppState,
     auth_ctx: &AuthContext,
     body_bytes: &Bytes,
-) -> Result<(protocol::ChatRequestMetadata, Group), Response> {
+) -> Result<(protocol::ChatRequestMetadata, Group), Box<Response>> {
     let metadata = match parse_request_metadata(body_bytes) {
         Some(m) if !m.model.trim().is_empty() => m,
-        _ => return Err(error(StatusCode::BAD_REQUEST, "Invalid request: missing model")),
+        _ => return Err(Box::new(error(StatusCode::BAD_REQUEST, "Invalid request: missing model"))),
     };
 
     if !auth_ctx.supported_models.is_empty() && !auth_ctx.supported_models.contains(&metadata.model) {
-        return Err(error(StatusCode::UNAUTHORIZED, "model not supported by this api key"));
+        return Err(Box::new(error(StatusCode::UNAUTHORIZED, "model not supported by this api key")));
     }
 
     let group_obj = match group::get_group_by_name(state, &metadata.model) {
         Ok(g) => g,
-        Err(_) => return Err(error(StatusCode::NOT_FOUND, "model not found")),
+        Err(_) => return Err(Box::new(error(StatusCode::NOT_FOUND, "model not found"))),
     };
 
     Ok((metadata, group_obj))
@@ -960,7 +959,7 @@ pub async fn forward_relay(
 ) -> Response {
     let (metadata, group_obj) = match validate_relay_request(&state, &auth_ctx, &body_bytes) {
         Ok(v) => v,
-        Err(err_resp) => return err_resp,
+        Err(err_resp) => return *err_resp,
     };
 
     let body_str = String::from_utf8_lossy(&body_bytes).to_string();

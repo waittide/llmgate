@@ -118,7 +118,7 @@ pub fn convert_responses_to_chat_completions(val: &Value) -> Value {
                         && last.get("role").and_then(Value::as_str) == Some("assistant")
                         && last.get("tool_calls").and_then(Value::as_array).is_some()
                     {
-                        last["tool_calls"].as_array_mut().map(|calls| calls.push(call));
+                        if let Some(calls) = last["tool_calls"].as_array_mut() { calls.push(call) }
                     } else {
                         messages.push(serde_json::json!({
                             "role": "assistant",
@@ -149,14 +149,13 @@ pub fn convert_responses_to_chat_completions(val: &Value) -> Value {
                                         "text": text
                                     }));
                                 }
-                            } else if ptype == "input_image" || ptype == "image_url" {
-                                if let Some(url) = part.get("image_url") {
+                            } else if (ptype == "input_image" || ptype == "image_url")
+                                && let Some(url) = part.get("image_url") {
                                     converted_parts.push(serde_json::json!({
                                         "type": "image_url",
                                         "image_url": url
                                     }));
                                 }
-                            }
                         }
                         if converted_parts.len() == 1 && converted_parts[0].get("type").and_then(|t| t.as_str()) == Some("text") {
                             converted_parts[0].get("text").cloned().unwrap_or(Value::Array(converted_parts))
@@ -484,8 +483,8 @@ fn openai_image_to_anthropic(url: &str) -> Option<Value> {
     if url.is_empty() {
         return None;
     }
-    if let Some(data_uri) = url.strip_prefix("data:") {
-        if let Some((meta, data)) = data_uri.split_once(',') {
+    if let Some(data_uri) = url.strip_prefix("data:")
+        && let Some((meta, data)) = data_uri.split_once(',') {
             let media_type = meta
                 .split(';')
                 .next()
@@ -497,7 +496,6 @@ fn openai_image_to_anthropic(url: &str) -> Option<Value> {
                 "source": { "type": "base64", "media_type": media_type, "data": data }
             }));
         }
-    }
     Some(serde_json::json!({
         "type": "image",
         "source": { "type": "url", "url": url }
@@ -626,11 +624,10 @@ pub fn convert_openai_to_anthropic(val: &Value) -> Value {
             }
             let mut t = serde_json::Map::new();
             t.insert("name".to_string(), Value::String(name.to_string()));
-            if let Some(desc) = tool.pointer("/function/description").and_then(|v| v.as_str()) {
-                if !desc.is_empty() {
+            if let Some(desc) = tool.pointer("/function/description").and_then(|v| v.as_str())
+                && !desc.is_empty() {
                     t.insert("description".to_string(), Value::String(desc.to_string()));
                 }
-            }
             let input_schema = tool
                 .pointer("/function/parameters")
                 .cloned()
@@ -823,8 +820,8 @@ fn openai_image_to_gemini_part(url: &str) -> Option<Value> {
     if url.is_empty() {
         return None;
     }
-    if let Some(data_uri) = url.strip_prefix("data:") {
-        if let Some((meta, data)) = data_uri.split_once(',') {
+    if let Some(data_uri) = url.strip_prefix("data:")
+        && let Some((meta, data)) = data_uri.split_once(',') {
             let mime_type = meta
                 .split(';')
                 .next()
@@ -835,7 +832,6 @@ fn openai_image_to_gemini_part(url: &str) -> Option<Value> {
                 "inlineData": { "mimeType": mime_type, "data": data }
             }));
         }
-    }
     Some(serde_json::json!({
         "fileData": { "fileUri": url }
     }))
@@ -969,16 +965,14 @@ pub fn convert_openai_to_gemini(val: &Value) -> Value {
             }
             let mut f = serde_json::Map::new();
             f.insert("name".to_string(), Value::String(name.to_string()));
-            if let Some(desc) = tool.pointer("/function/description").and_then(|v| v.as_str()) {
-                if !desc.is_empty() {
+            if let Some(desc) = tool.pointer("/function/description").and_then(|v| v.as_str())
+                && !desc.is_empty() {
                     f.insert("description".to_string(), Value::String(desc.to_string()));
                 }
-            }
-            if let Some(params) = tool.pointer("/function/parameters") {
-                if !params.is_null() {
+            if let Some(params) = tool.pointer("/function/parameters")
+                && !params.is_null() {
                     f.insert("parameters".to_string(), params.clone());
                 }
-            }
             funcs.push(Value::Object(f));
         }
         if !funcs.is_empty() {
