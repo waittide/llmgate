@@ -77,7 +77,7 @@ export function Group() {
             estimateItemHeight={520}
             getItemKey={(group, index) => group.id ?? `group-${index}`}
             renderItem={(group) => {
-                let deadline = group.runtime?.affinity_until ?? 0;
+                let deadline = 0;
                 for (const cooldownUntil of Object.values(group.runtime?.cooldowns ?? {})) {
                     deadline = Math.max(deadline, cooldownUntil);
                 }

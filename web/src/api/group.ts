@@ -14,7 +14,6 @@ export interface GroupRelayConfig {
     member_non_stream_response_timeout_seconds: number;
     member_stream_first_event_timeout_seconds: number;
     member_cooldown_seconds: number;
-    member_affinity_seconds: number;
 }
 
 // GroupItem 是分组内可手动选择或故障转移的渠道模型。
@@ -30,7 +29,6 @@ export interface GroupItem {
 export interface GroupRuntimeStatus {
     group_id: number;
     current_item_id: number;
-    affinity_until: number;
     cooldowns: Record<number, number>;
 }
 

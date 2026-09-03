@@ -31,7 +31,6 @@ const defaultRelayConfig: GroupRelayConfig = {
     member_non_stream_response_timeout_seconds: 120,
     member_stream_first_event_timeout_seconds: 30,
     member_cooldown_seconds: 60,
-    member_affinity_seconds: 0,
 };
 
 // FieldHelp 渲染配置字段的简短帮助提示。
@@ -500,25 +499,6 @@ export function GroupEditor({
                                         onChange={(event) => {
                                             const value = Number.parseInt(event.target.value, 10);
                                             setRelayConfig((prev) => ({ ...prev, member_cooldown_seconds: Number.isFinite(value) && value >= 1 ? value : 1 }));
-                                        }}
-                                        className="rounded-xl"
-                                    />
-                                </Field>
-                                <Field>
-                                    <FieldLabel htmlFor="group-affinity">
-                                        {t('form.affinity')}
-                                        <FieldHelp text={t('form.affinityHint')} />
-                                    </FieldLabel>
-                                    <Input
-                                        id="group-affinity"
-                                        type="number"
-                                        inputMode="numeric"
-                                        min={0}
-                                        step={1}
-                                        value={String(relayConfig.member_affinity_seconds)}
-                                        onChange={(event) => {
-                                            const value = Number.parseInt(event.target.value, 10);
-                                            setRelayConfig((prev) => ({ ...prev, member_affinity_seconds: Number.isFinite(value) && value >= 0 ? value : 0 }));
                                         }}
                                         className="rounded-xl"
                                     />

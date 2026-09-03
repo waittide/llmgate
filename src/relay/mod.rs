@@ -966,7 +966,6 @@ pub async fn forward_relay(
                     state.route_manager.report_success(
                         current_group.id,
                         item.id,
-                        current_group.relay_config.member_affinity_seconds,
                     );
                     let price_opt = llm::get_llm_price(&state, &channel_model.name);
 

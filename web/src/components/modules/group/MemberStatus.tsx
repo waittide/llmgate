@@ -23,7 +23,6 @@ export function useRuntimeClock(source?: Group | Group[]) {
     for (const group of groups) {
         if (group.mode !== 'failover' || !group.runtime) continue;
         enabled = true;
-        lastDeadline = Math.max(lastDeadline, group.runtime.affinity_until);
         for (const cooldownUntil of Object.values(group.runtime.cooldowns)) {
             lastDeadline = Math.max(lastDeadline, cooldownUntil);
         }
@@ -57,32 +56,16 @@ export function MemberStatus({ group, itemId, now, active = false, activeClassNa
 
     if (group.mode === 'failover' && itemId !== undefined && group.runtime) {
         const cooldownUntil = group.runtime.cooldowns[itemId] ?? 0;
-        const affinityUntil = group.runtime.current_item_id === itemId
-            ? group.runtime.affinity_until
-            : 0;
-        if (now < cooldownUntil || now < affinityUntil) {
-            const cooling = now < cooldownUntil;
-            const deadline = cooling ? cooldownUntil : affinityUntil;
-            const label = t(cooling ? 'cooling' : 'affinity', { seconds: Math.ceil((deadline - now) / 1000) });
-
+        if (now < cooldownUntil) {
+            const label = t('cooling', { seconds: Math.ceil((cooldownUntil - now) / 1000) });
             return (
                 <div className="flex items-center gap-1.5 shrink-0">
                     <Badge
                         variant="outline"
-                        className={cn(
-                            'shrink-0 px-1.5 py-0 text-[10px] font-medium',
-                            cooling
-                                ? 'border-orange-500/30 bg-orange-500/10 text-orange-600 dark:text-orange-400'
-                                : 'border-cyan-500/30 bg-cyan-500/10 text-cyan-600 dark:text-cyan-400'
-                        )}
+                        className="shrink-0 px-1.5 py-0 text-[10px] font-medium border-orange-500/30 bg-orange-500/10 text-orange-600 dark:text-orange-400"
                     >
                         {label}
                     </Badge>
-                    {active && (
-                        <span aria-hidden="true" className={cn('inline-flex shrink-0 text-primary', activeClassName)}>
-                            <CircleCheck className="size-4" />
-                        </span>
-                    )}
                 </div>
             );
         }

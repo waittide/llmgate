@@ -239,7 +239,6 @@ pub struct GroupRelayConfig {
     pub member_non_stream_response_timeout_seconds: i64,
     pub member_stream_first_event_timeout_seconds:  i64,
     pub member_cooldown_seconds:                    i64,
-    pub member_affinity_seconds:                    i64,
 }
 
 impl Default for GroupRelayConfig {
@@ -250,7 +249,6 @@ impl Default for GroupRelayConfig {
             member_non_stream_response_timeout_seconds: 60,
             member_stream_first_event_timeout_seconds:  30,
             member_cooldown_seconds:                    300,
-            member_affinity_seconds:                    0,
         }
     }
 }

@@ -10,10 +10,7 @@ use crate::model::{Group, GroupItem, GroupMode};
 pub struct RouteState {
     pub group_id:        i64,
     pub current_item_id: i64,
-    pub affinity_until:  i64,
     pub cooldowns:       HashMap<i64, i64>,
-    #[serde(skip)]
-    pub affinity_armed:  bool,
 }
 
 pub struct RouteManager {
@@ -45,9 +42,7 @@ impl RouteManager {
         self.routes.entry(group_id).or_insert_with(|| RouteState {
             group_id,
             current_item_id: 0,
-            affinity_until: 0,
             cooldowns: HashMap::new(),
-            affinity_armed: false,
         })
     }
 
@@ -64,18 +59,6 @@ impl RouteManager {
         let route = entry.value_mut();
         let now = chrono::Utc::now().timestamp_millis();
 
-        if route.affinity_until <= now {
-            route.affinity_until = 0;
-        }
-
-        // Within affinity period: stick to current item
-        if route.current_item_id != 0
-            && route.affinity_until > now
-            && let Some(item) = group.items.iter().find(|i| i.id == route.current_item_id)
-        {
-            return Some(item.clone());
-        }
-
         // Pick highest priority available item (group.items are pre-sorted by priority ASC)
         for item in &group.items {
             if let Some(&deadline) = route.cooldowns.get(&item.id)
@@ -86,7 +69,6 @@ impl RouteManager {
 
             if route.current_item_id != item.id {
                 route.current_item_id = item.id;
-                route.affinity_armed = true;
                 self.notify_change(route);
             }
             return Some(item.clone());
@@ -100,7 +82,6 @@ impl RouteManager {
         {
             if route.current_item_id != item.id {
                 route.current_item_id = item.id;
-                route.affinity_armed = true;
                 self.notify_change(route);
             }
             return Some(item.clone());
@@ -109,15 +90,10 @@ impl RouteManager {
         None
     }
 
-    pub fn report_success(&self, group_id: i64, item_id: i64, affinity_seconds: i64) {
+    pub fn report_success(&self, group_id: i64, item_id: i64) {
         let mut entry = self.get_or_create_route_entry(group_id);
         let route = entry.value_mut();
         route.cooldowns.remove(&item_id);
-
-        if route.affinity_armed && affinity_seconds > 0 {
-            route.affinity_until = chrono::Utc::now().timestamp_millis() + affinity_seconds * 1000;
-            route.affinity_armed = false;
-        }
         self.notify_change(route);
     }
 
@@ -131,8 +107,6 @@ impl RouteManager {
 
         if route.current_item_id == item_id {
             route.current_item_id = 0;
-            route.affinity_until = 0;
-            route.affinity_armed = false;
         }
         self.notify_change(route);
     }

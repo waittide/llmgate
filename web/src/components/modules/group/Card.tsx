@@ -184,8 +184,7 @@ export const GroupCard = memo(function GroupCard({ group, now }: { group: Group;
             values.relay_config.member_retry_interval_seconds !== group.relay_config.member_retry_interval_seconds ||
             values.relay_config.member_non_stream_response_timeout_seconds !== group.relay_config.member_non_stream_response_timeout_seconds ||
             values.relay_config.member_stream_first_event_timeout_seconds !== group.relay_config.member_stream_first_event_timeout_seconds ||
-            values.relay_config.member_cooldown_seconds !== group.relay_config.member_cooldown_seconds ||
-            values.relay_config.member_affinity_seconds !== group.relay_config.member_affinity_seconds
+            values.relay_config.member_cooldown_seconds !== group.relay_config.member_cooldown_seconds
         ) payload.relay_config = values.relay_config;
         if (items_to_add.length) payload.items_to_add = items_to_add;
         if (items_to_update.length) payload.items_to_update = items_to_update;
