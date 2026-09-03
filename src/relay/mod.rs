@@ -572,7 +572,7 @@ fn record_round_failure(
     );
 }
 
-struct StreamSuccessContext<'a> {
+struct SuccessContext<'a> {
     req_id: u64,
     request_id: i64,
     model: &'a str,
@@ -586,15 +586,16 @@ struct StreamSuccessContext<'a> {
     body_str: &'a str,
     started_at: i64,
     round: i64,
-    rounds: Vec<crate::model::RoundLog>,
+    round_start_time: Instant,
     start_time: Instant,
     price_opt: Option<LLMPrice>,
+    rounds: Vec<crate::model::RoundLog>,
 }
 
 fn handle_successful_stream(
     state: &AppState,
     upstream_resp: reqwest::Response,
-    ctx: StreamSuccessContext<'_>,
+    ctx: SuccessContext<'_>,
 ) -> Response {
     state.request_state_manager.mark_committed(ctx.req_id);
 
@@ -673,30 +674,11 @@ fn handle_successful_stream(
         })
 }
 
-struct JsonSuccessContext<'a> {
-    req_id: u64,
-    request_id: i64,
-    model: &'a str,
-    format: ApiFormat,
-    channel: &'a Channel,
-    channel_model: &'a ChannelModel,
-    api_key_id: i64,
-    target_req_url: &'a str,
-    channel_req_headers: &'a str,
-    rewritten_body_str: &'a str,
-    body_str: &'a str,
-    started_at: i64,
-    round: i64,
-    round_start_time: Instant,
-    start_time: Instant,
-    price_opt: Option<LLMPrice>,
-}
 
 async fn handle_successful_json(
     state: &AppState,
     upstream_resp: reqwest::Response,
-    mut rounds: Vec<crate::model::RoundLog>,
-    ctx: JsonSuccessContext<'_>,
+    mut ctx: SuccessContext<'_>,
 ) -> Response {
     let response_headers = serialize_headers(upstream_resp.headers());
     let raw_bytes = upstream_resp.bytes().await.unwrap_or_default();
@@ -748,7 +730,7 @@ async fn handle_successful_json(
         duration_ms: round_duration_ms,
         error: None,
     };
-    rounds.push(round_log.clone());
+    ctx.rounds.push(round_log.clone());
     state.request_state_manager.record_round_attempt(ctx.req_id, round_log);
 
     log::record_request_log(
@@ -772,7 +754,7 @@ async fn handle_successful_json(
             wait_time: elapsed_ms,
             round: ctx.round,
             error: None,
-            rounds_detail: serde_json::to_string(&rounds).unwrap_or_default(),
+            rounds_detail: serde_json::to_string(&ctx.rounds).unwrap_or_default(),
             created_at: ctx.started_at,
             ..Default::default()
         },
@@ -798,7 +780,7 @@ async fn handle_successful_json(
         cost,
         resp_str,
         None,
-        rounds,
+        ctx.rounds,
     );
 
     Response::builder()
@@ -1077,31 +1059,7 @@ pub async fn forward_relay(
                         return handle_successful_stream(
                             &state,
                             upstream_resp,
-                            StreamSuccessContext {
-                                req_id,
-                                request_id,
-                                model: &metadata.model,
-                                format,
-                                channel: &ch,
-                                channel_model: &channel_model,
-                                api_key_id: auth_ctx.api_key.id,
-                                target_req_url: &target_req_url,
-                                channel_req_headers: &channel_req_headers,
-                                rewritten_body_str: &rewritten_body_str,
-                                body_str: &body_str,
-                                started_at,
-                                round,
-                                rounds,
-                                start_time,
-                                price_opt,
-                            },
-                        );
-                    } else {
-                        return handle_successful_json(
-                            &state,
-                            upstream_resp,
-                            rounds,
-                            JsonSuccessContext {
+                            SuccessContext {
                                 req_id,
                                 request_id,
                                 model: &metadata.model,
@@ -1118,6 +1076,31 @@ pub async fn forward_relay(
                                 round_start_time,
                                 start_time,
                                 price_opt,
+                                rounds,
+                            },
+                        );
+                    } else {
+                        return handle_successful_json(
+                            &state,
+                            upstream_resp,
+                            SuccessContext {
+                                req_id,
+                                request_id,
+                                model: &metadata.model,
+                                format,
+                                channel: &ch,
+                                channel_model: &channel_model,
+                                api_key_id: auth_ctx.api_key.id,
+                                target_req_url: &target_req_url,
+                                channel_req_headers: &channel_req_headers,
+                                rewritten_body_str: &rewritten_body_str,
+                                body_str: &body_str,
+                                started_at,
+                                round,
+                                round_start_time,
+                                start_time,
+                                price_opt,
+                                rounds,
                             },
                         )
                         .await;
