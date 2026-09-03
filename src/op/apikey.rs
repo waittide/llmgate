@@ -7,53 +7,41 @@ pub async fn refresh_apikey_cache(state: &AppState) -> Result<()> {
         .fetch_all(&state.db)
         .await?;
 
-    let mut local_keys = std::collections::HashMap::new();
-    let mut local_index = std::collections::HashMap::new();
-
+    let mut cache = crate::op::ApiKeyCache::default();
     for key in keys {
-        local_index.insert(key.api_key.clone(), key.id);
-        local_keys.insert(key.id, key);
+        cache.by_key.insert(key.api_key.clone(), key.id);
+        cache.by_id.insert(key.id, key);
     }
-    // Atomically sync in-memory cache without leaving empty windows
-    for (k, v) in &local_keys {
-        state.api_keys.insert(*k, v.clone());
-    }
-    state.api_keys.retain(|k, _| local_keys.contains_key(k));
-
-    for (k, v) in &local_index {
-        state.api_key_str_index.insert(k.clone(), *v);
-    }
-    state
-        .api_key_str_index
-        .retain(|k, _| local_index.contains_key(k));
+    *state.api_keys.write() = cache;
     Ok(())
 }
 
 pub fn list_api_keys(state: &AppState) -> Vec<APIKey> {
-    let mut list: Vec<APIKey> = state
-        .api_keys
-        .iter()
-        .map(|entry| entry.value().clone())
-        .collect();
+    let mut list: Vec<APIKey> = state.api_keys.read().by_id.values().cloned().collect();
     list.sort_by_key(|k| k.id);
     list
 }
 
 pub fn get_api_key_by_key(state: &AppState, key_str: &str) -> Result<APIKey> {
-    let id = state
-        .api_key_str_index
+    let cache = state.api_keys.read();
+    let id = cache
+        .by_key
         .get(key_str)
-        .map(|entry| *entry.value())
         .ok_or_else(|| anyhow!("API key not found"))?;
-
-    get_api_key_by_id(state, id)
+    cache
+        .by_id
+        .get(id)
+        .cloned()
+        .ok_or_else(|| anyhow!("API key not found"))
 }
 
 pub fn get_api_key_by_id(state: &AppState, id: i64) -> Result<APIKey> {
     state
         .api_keys
+        .read()
+        .by_id
         .get(&id)
-        .map(|entry| entry.value().clone())
+        .cloned()
         .ok_or_else(|| anyhow!("API key not found with id: {}", id))
 }
 

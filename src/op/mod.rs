@@ -8,7 +8,7 @@ pub mod setting;
 pub mod stats;
 pub mod user;
 
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
 
 use anyhow::Result;
 use dashmap::DashMap;
@@ -30,15 +30,25 @@ pub struct LogShutdown {
     pub join_handle: tokio::task::JoinHandle<()>,
 }
 
+#[derive(Default)]
+pub struct GroupCache {
+    pub by_id:   HashMap<i64, Group>,
+    pub by_name: HashMap<String, i64>,
+}
+
+#[derive(Default)]
+pub struct ApiKeyCache {
+    pub by_id:  HashMap<i64, APIKey>,
+    pub by_key: HashMap<String, i64>,
+}
+
 #[derive(Clone)]
 pub struct AppState {
     pub db:                    DbPool,
     pub channels:              DashMap<i64, Channel>,
     pub channel_models:        DashMap<i64, ChannelModel>,
-    pub groups:                DashMap<i64, Group>,
-    pub group_name_index:      DashMap<String, i64>,
-    pub api_keys:              DashMap<i64, APIKey>,
-    pub api_key_str_index:     DashMap<String, i64>,
+    pub groups:                Arc<RwLock<GroupCache>>,
+    pub api_keys:              Arc<RwLock<ApiKeyCache>>,
     pub llm_prices:            DashMap<String, LLMPrice>,
     pub settings:              DashMap<String, String>,
     pub stats:                 Arc<RwLock<SystemStats>>,
@@ -68,10 +78,8 @@ impl AppState {
             db:                    db.clone(),
             channels:              DashMap::new(),
             channel_models:        DashMap::new(),
-            groups:                DashMap::new(),
-            group_name_index:      DashMap::new(),
-            api_keys:              DashMap::new(),
-            api_key_str_index:     DashMap::new(),
+            groups:                Arc::new(RwLock::new(GroupCache::default())),
+            api_keys:              Arc::new(RwLock::new(ApiKeyCache::default())),
             llm_prices:            DashMap::new(),
             settings:              DashMap::new(),
             stats:                 Arc::new(RwLock::new(SystemStats {

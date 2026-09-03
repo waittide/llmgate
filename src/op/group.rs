@@ -13,7 +13,6 @@ pub async fn refresh_group_cache(state: &AppState) -> Result<()> {
 
     let mut local_groups = std::collections::HashMap::new();
     let mut local_name_index = std::collections::HashMap::new();
-
     for row in rows {
         let id: i64 = row.get("id");
         let name: String = row.get("name");
@@ -70,56 +69,45 @@ pub async fn refresh_group_cache(state: &AppState) -> Result<()> {
         }
     }
 
-    // Atomically sync in-memory cache without leaving empty windows
-    for (k, v) in &local_groups {
-        state.groups.insert(*k, v.clone());
-    }
-    state.groups.retain(|k, _| local_groups.contains_key(k));
-
-    for (k, v) in &local_name_index {
-        state.group_name_index.insert(k.clone(), *v);
-    }
-    state
-        .group_name_index
-        .retain(|k, _| local_name_index.contains_key(k));
+    *state.groups.write() = crate::op::GroupCache {
+        by_id: local_groups,
+        by_name: local_name_index,
+    };
     Ok(())
 }
 
 pub fn list_groups(state: &AppState) -> Vec<Group> {
-    let mut list: Vec<Group> = state
-        .groups
-        .iter()
-        .map(|entry| entry.value().clone())
-        .collect();
+    let mut list: Vec<Group> = state.groups.read().by_id.values().cloned().collect();
     list.sort_by_key(|g| g.id);
     list
 }
 
 pub fn list_model_names(state: &AppState) -> Vec<String> {
-    let mut names: Vec<String> = state
-        .groups
-        .iter()
-        .map(|entry| entry.value().name.clone())
-        .collect();
+    let mut names: Vec<String> = state.groups.read().by_name.keys().cloned().collect();
     names.sort();
     names
 }
 
 pub fn get_group_by_name(state: &AppState, name: &str) -> Result<Group> {
-    let group_id = state
-        .group_name_index
+    let cache = state.groups.read();
+    let group_id = cache
+        .by_name
         .get(name)
-        .map(|entry| *entry.value())
         .ok_or_else(|| anyhow!("Group not found for model: {}", name))?;
-
-    get_group_by_id(state, group_id)
+    cache
+        .by_id
+        .get(group_id)
+        .cloned()
+        .ok_or_else(|| anyhow!("Group not found for model: {}", name))
 }
 
 pub fn get_group_by_id(state: &AppState, id: i64) -> Result<Group> {
     state
         .groups
+        .read()
+        .by_id
         .get(&id)
-        .map(|entry| entry.value().clone())
+        .cloned()
         .ok_or_else(|| anyhow!("Group not found with id: {}", id))
 }
 
