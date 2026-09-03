@@ -1,8 +1,8 @@
-import { useEffect } from 'react';
+import { useEffect, useState } from 'react';
 import { useMutation } from '@tanstack/react-query';
 import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
-import { apiRequest, apiUnauthorizedEvent, setAPIKey, setAuthToken } from './client';
+import { ApiError, apiRequest, apiUnauthorizedEvent, setAPIKey, setAuthToken } from './client';
 
 /**
  * 用户登录请求
@@ -85,8 +85,14 @@ export const useAuthStore = create<AuthState>()(
                         isLoading: false,
                         token
                     });
-                } catch {
-                    get().logout();
+                } catch (err) {
+                    // Only a definitive 401 invalidates the session. A transient
+                    // network/server error on refresh must not drop a valid token.
+                    if (err instanceof ApiError && err.status === 401) {
+                        get().logout();
+                    } else {
+                        set({ isLoading: false, isAuthenticated: true });
+                    }
                 }
             },
 
@@ -194,17 +200,33 @@ export function useChangeUsername() {
 export function useAuth() {
     const store = useAuthStore();
     const { checkAuth, isLoading } = store;
+    // hydrated 表示持久化的认证状态是否已经恢复, 恢复前不校验 token。
+    const [hydrated, setHydrated] = useState(false);
 
-    // 只在首次挂载时检查认证状态
+    // 全局未授权事件: 任何请求返回 401 都视为会话失效。
     useEffect(() => {
         const handleUnauthorized = () => useAuthStore.getState().logout();
         window.addEventListener(apiUnauthorizedEvent, handleUnauthorized);
-        if (isLoading) {
-            void checkAuth();
-        }
         return () => window.removeEventListener(apiUnauthorizedEvent, handleUnauthorized);
         // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, []); // 有意只在挂载时执行一次
+    }, []);
+
+    // 等待 persist 水合完成后再校验 token, 避免刷新时读到尚未恢复的空 token
+    // 而误判为未登录/已退出。水合在微任务中完成, 这里先查 hasHydrated 兜底。
+    useEffect(() => {
+        if (useAuthStore.persist.hasHydrated()) {
+            setHydrated(true);
+            return;
+        }
+        const unsubscribe = useAuthStore.persist.onFinishHydration(() => setHydrated(true));
+        return unsubscribe;
+    }, []);
+
+    useEffect(() => {
+        if (hydrated) {
+            void checkAuth();
+        }
+    }, [hydrated, checkAuth]);
 
     return {
         isAuthenticated: store.isAuthenticated,
