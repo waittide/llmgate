@@ -28,9 +28,9 @@ import { toast } from 'sonner';
 import { CopyIconButton } from '@/components/common/CopyButton';
 
 function toExpireAt(date: Date, time: string): number {
-    const t = /^\d{2}:\d{2}$/.test(time) ? time : '00:00';
+    const t = /^\d{2}:\d{2}$/.test(time) ? time : '23:59';
     const [hh, mm] = t.split(':').map(Number);
-    const d = new Date(date.getFullYear(), date.getMonth(), date.getDate(), hh, mm, 0);
+    const d = new Date(date.getFullYear(), date.getMonth(), date.getDate(), hh, mm, 59);
     // 返回 Unix 时间戳（秒）
     return Math.floor(d.getTime() / 1000);
 }
@@ -97,7 +97,7 @@ function APIKeyForm({ apiKey, isPending, submitLabel, onSubmit, onClose }: APIKe
                 return `${d.getHours().toString().padStart(2, '0')}:${d.getMinutes().toString().padStart(2, '0')}`;
             }
         }
-        return '00:00';
+        return '23:59';
     });
     const [expireOpen, setExpireOpen] = useState(false);
 
@@ -120,7 +120,8 @@ function APIKeyForm({ apiKey, isPending, submitLabel, onSubmit, onClose }: APIKe
 
     const handleSelectDate = (d: Date | undefined) => {
         if (d) {
-            updateForm({ expire_at: toExpireAt(d, expireTime) });
+            const time = expireTime || '23:59';
+            updateForm({ expire_at: toExpireAt(d, time) });
             setExpireOpen(false);
         } else {
             updateForm({ expire_at: undefined });
@@ -136,7 +137,11 @@ function APIKeyForm({ apiKey, isPending, submitLabel, onSubmit, onClose }: APIKe
 
     const handleToggleNeverExpire = () => {
         if (neverExpire) {
-            updateForm({ expire_at: toExpireAt(new Date(), expireTime) });
+            const defaultFuture = new Date();
+            defaultFuture.setDate(defaultFuture.getDate() + 30);
+            const time = expireTime || '23:59';
+            setExpireTime(time);
+            updateForm({ expire_at: toExpireAt(defaultFuture, time) });
         } else {
             updateForm({ expire_at: undefined });
             setExpireOpen(false);
