@@ -369,6 +369,109 @@ pub fn convert_openai_to_anthropic(val: &Value) -> Value {
     Value::Object(anthropic_obj)
 }
 
+/// Converts a non-streaming Anthropic message response into an OpenAI Chat Completion response.
+pub fn convert_anthropic_to_openai_chat_response(val: &Value, model_name: &str) -> Value {
+    let text = val
+        .get("content")
+        .and_then(|c| c.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|item| item.get("text").and_then(|t| t.as_str()))
+                .collect::<Vec<_>>()
+                .join("")
+        })
+        .unwrap_or_default();
+
+    let prompt_tokens = val.pointer("/usage/input_tokens").and_then(|v| v.as_i64()).unwrap_or(0);
+    let completion_tokens = val.pointer("/usage/output_tokens").and_then(|v| v.as_i64()).unwrap_or(0);
+
+    serde_json::json!({
+        "id": format!("chatcmpl-{}", nanoid::nanoid!(24)),
+        "object": "chat.completion",
+        "created": chrono::Utc::now().timestamp(),
+        "model": model_name,
+        "choices": [{
+            "index": 0,
+            "message": {
+                "role": "assistant",
+                "content": text
+            },
+            "finish_reason": val.get("stop_reason").and_then(|r| r.as_str()).unwrap_or("stop")
+        }],
+        "usage": {
+            "prompt_tokens": prompt_tokens,
+            "completion_tokens": completion_tokens,
+            "total_tokens": prompt_tokens + completion_tokens
+        }
+    })
+}
+
+/// Translates an Anthropic SSE event string into corresponding OpenAI Chat Completion SSE chunk lines.
+pub fn anthropic_sse_event_to_openai_chunk(
+    event_str: &str,
+    model_name: &str,
+    created: i64,
+    chatcmpl_id: &str,
+) -> Option<String> {
+    let mut event_type = "";
+    let mut data_str = "";
+
+    for line in event_str.lines() {
+        let trimmed = line.trim();
+        if let Some(et) = trimmed.strip_prefix("event:") {
+            event_type = et.trim();
+        } else if let Some(d) = trimmed.strip_prefix("data:") {
+            data_str = d.trim();
+        }
+    }
+
+    if data_str.is_empty() {
+        return None;
+    }
+
+    let val: serde_json::Value = serde_json::from_str(data_str).ok()?;
+
+    match event_type {
+        "content_block_delta" => {
+            if let Some(text) = val.pointer("/delta/text").and_then(|t| t.as_str()) {
+                let chunk = serde_json::json!({
+                    "id": chatcmpl_id,
+                    "object": "chat.completion.chunk",
+                    "created": created,
+                    "model": model_name,
+                    "choices": [{
+                        "index": 0,
+                        "delta": { "content": text },
+                        "finish_reason": null
+                    }]
+                });
+                return Some(format!("data: {}\n\n", serde_json::to_string(&chunk).unwrap_or_default()));
+            }
+        }
+        "message_delta" => {
+            let finish_reason = val.pointer("/delta/stop_reason").and_then(|s| s.as_str()).unwrap_or("stop");
+            let chunk = serde_json::json!({
+                "id": chatcmpl_id,
+                "object": "chat.completion.chunk",
+                "created": created,
+                "model": model_name,
+                "choices": [{
+                    "index": 0,
+                    "delta": {},
+                    "finish_reason": finish_reason
+                }]
+            });
+            return Some(format!("data: {}\n\n", serde_json::to_string(&chunk).unwrap_or_default()));
+        }
+        "message_stop" => {
+            return Some("data: [DONE]\n\n".to_string());
+        }
+        _ => {}
+    }
+
+    None
+}
+
 /// Converts an OpenAI `image_url` content part to a Gemini content part. Base64
 /// `data:` URIs become `inlineData`; public URLs become `fileData` (Gemini
 /// fetches publicly accessible URIs server-side).
@@ -883,5 +986,40 @@ mod tests {
         assert_eq!(input.len(), 1);
         assert_eq!(input[0].get("role").unwrap(), "user");
         assert_eq!(input[0].get("content").unwrap(), "Hello world");
+    }
+
+    #[test]
+    fn test_anthropic_sse_event_to_openai_chunk() {
+        let event = "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"Hello\"}}\n\n";
+        let chunk = anthropic_sse_event_to_openai_chunk(event, "claude-3-5-sonnet", 1700000000, "chatcmpl-test");
+        assert!(chunk.is_some());
+        let chunk_str = chunk.unwrap();
+        assert!(chunk_str.starts_with("data: "));
+        assert!(chunk_str.contains("Hello"));
+        assert!(chunk_str.contains("chatcmpl-test"));
+
+        let stop_event = "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n";
+        let stop_chunk = anthropic_sse_event_to_openai_chunk(stop_event, "claude-3-5-sonnet", 1700000000, "chatcmpl-test");
+        assert_eq!(stop_chunk, Some("data: [DONE]\n\n".to_string()));
+    }
+
+    #[test]
+    fn test_convert_anthropic_to_openai_chat_response() {
+        let anthropic_resp = serde_json::json!({
+            "id": "msg_123",
+            "type": "message",
+            "role": "assistant",
+            "content": [{ "type": "text", "text": "Hi from Claude" }],
+            "model": "claude-3-5-sonnet",
+            "stop_reason": "end_turn",
+            "usage": { "input_tokens": 12, "output_tokens": 8 }
+        });
+
+        let openai = convert_anthropic_to_openai_chat_response(&anthropic_resp, "claude-3-5-sonnet");
+        assert_eq!(openai.get("model").unwrap(), "claude-3-5-sonnet");
+        let choices = openai.get("choices").unwrap().as_array().unwrap();
+        assert_eq!(choices[0].pointer("/message/content").unwrap(), "Hi from Claude");
+        assert_eq!(openai.pointer("/usage/prompt_tokens").unwrap(), 12);
+        assert_eq!(openai.pointer("/usage/completion_tokens").unwrap(), 8);
     }
 }

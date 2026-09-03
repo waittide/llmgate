@@ -67,7 +67,10 @@ struct StreamFinalizer<S> {
     done:             bool,
     log_template:     RequestLog,
     previous_rounds:  Vec<crate::model::RoundLog>,
-    response_capture: Vec<u8>,
+    response_capture:    Vec<u8>,
+    adapt_anthropic_sse: bool,
+    chatcmpl_id:         String,
+    pending_chunks:      Vec<Bytes>,
 }
 
 /// Drains complete SSE events from `buffer`, accumulating any `usage` found.
@@ -243,24 +246,74 @@ where
             return Poll::Ready(None);
         }
         let this = self.as_mut().get_mut();
+
+        if this.adapt_anthropic_sse && !this.pending_chunks.is_empty() {
+            return Poll::Ready(Some(Ok(this.pending_chunks.remove(0))));
+        }
+
         match Pin::new(&mut this.inner).poll_next(cx) {
             Poll::Ready(Some(Ok(bytes))) => {
                 this.output_bytes += bytes.len();
                 this.buffer.extend_from_slice(&bytes);
-                this.extract_usage_from_sse();
+
                 if this.response_capture.len() < RESPONSE_CAPTURE_LIMIT {
                     let take = (RESPONSE_CAPTURE_LIMIT - this.response_capture.len()).min(bytes.len());
                     this.response_capture.extend_from_slice(&bytes[..take]);
                 }
-                Poll::Ready(Some(Ok(bytes)))
+
+                if this.adapt_anthropic_sse {
+                    let created = chrono::Utc::now().timestamp();
+                    while let Some(end) = sse_event_end(&this.buffer) {
+                        let event_str = String::from_utf8_lossy(&this.buffer[..end]).to_string();
+                        if this.buffer[..end].windows(7).any(|w| w == b"\"usage\"") {
+                            for line in event_str.lines() {
+                                if let Some(data) = line.strip_prefix("data:") {
+                                    let trimmed = data.trim();
+                                    if !trimmed.is_empty() && trimmed != "[DONE]" {
+                                        if let Ok(val) = serde_json::from_str::<serde_json::Value>(trimmed)
+                                            && let Some(u) = extract_usage_from_json(&val)
+                                        {
+                                            this.usage = Some(u);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        if let Some(chunk) = protocol::anthropic_sse_event_to_openai_chunk(
+                            &event_str,
+                            &this.log_template.model,
+                            created,
+                            &this.chatcmpl_id,
+                        ) {
+                            this.pending_chunks.push(Bytes::from(chunk));
+                        }
+                        this.buffer.drain(..end);
+                    }
+
+                    if !this.pending_chunks.is_empty() {
+                        Poll::Ready(Some(Ok(this.pending_chunks.remove(0))))
+                    } else {
+                        cx.waker().wake_by_ref();
+                        Poll::Pending
+                    }
+                } else {
+                    this.extract_usage_from_sse();
+                    Poll::Ready(Some(Ok(bytes)))
+                }
             }
             Poll::Ready(Some(Err(e))) => {
                 this.finalize(false);
                 Poll::Ready(Some(Err(e)))
             }
             Poll::Ready(None) => {
+                let was_done = this.done;
                 this.finalize(true);
-                Poll::Ready(None)
+                if this.adapt_anthropic_sse && !was_done {
+                    Poll::Ready(Some(Ok(Bytes::from_static(b"data: [DONE]\n\n"))))
+                } else {
+                    Poll::Ready(None)
+                }
             }
             Poll::Pending => Poll::Pending,
         }
@@ -505,6 +558,9 @@ fn handle_successful_stream(
         log_template,
         previous_rounds: ctx.rounds,
         response_capture: Vec::new(),
+        adapt_anthropic_sse: ctx.channel.channel_type == ChannelProvider::Anthropic,
+        chatcmpl_id: format!("chatcmpl-{}", nanoid::nanoid!(24)),
+        pending_chunks: Vec::new(),
     };
 
     Response::builder()
@@ -547,8 +603,21 @@ async fn handle_successful_json(
     ctx: JsonSuccessContext<'_>,
 ) -> Response {
     let response_headers = serialize_headers(upstream_resp.headers());
-    let resp_bytes = upstream_resp.bytes().await.unwrap_or_default();
-    let resp_str = String::from_utf8_lossy(&resp_bytes).to_string();
+    let raw_bytes = upstream_resp.bytes().await.unwrap_or_default();
+    let (resp_bytes, resp_str) = if ctx.channel.channel_type == ChannelProvider::Anthropic {
+        if let Ok(val) = serde_json::from_slice::<serde_json::Value>(&raw_bytes) {
+            let converted = protocol::convert_anthropic_to_openai_chat_response(&val, ctx.model);
+            let b = serde_json::to_vec(&converted).unwrap_or_else(|_| raw_bytes.to_vec());
+            let s = String::from_utf8_lossy(&b).to_string();
+            (Bytes::from(b), s)
+        } else {
+            let s = String::from_utf8_lossy(&raw_bytes).to_string();
+            (raw_bytes, s)
+        }
+    } else {
+        let s = String::from_utf8_lossy(&raw_bytes).to_string();
+        (raw_bytes, s)
+    };
 
     let usage = match serde_json::from_slice::<serde_json::Value>(&resp_bytes) {
         Ok(val) => extract_usage_from_json(&val).unwrap_or(Usage {
