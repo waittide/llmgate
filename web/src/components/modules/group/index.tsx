@@ -1,6 +1,4 @@
 import { useMemo } from 'react';
-import { ArrowUpAZ } from 'lucide-react';
-import { useTranslations } from 'use-intl';
 import { GroupCard } from './Card';
 import { CreateDialogContent } from './Create';
 import { useRuntimeClock } from './MemberStatus';
@@ -10,36 +8,8 @@ import { VirtualizedGrid } from '@/components/common/VirtualizedGrid';
 
 // GroupActions 向稳定顶栏提供分组页面的搜索、视图选项和创建入口。
 export function GroupActions() {
-    const t = useTranslations('toolbar');
-    const searchTerm = usePageActionsStore((state) => state.searchTerms.group || '');
-    const sortOrder = usePageActionsStore((state) => state.sortOrders.group === 'desc' ? 'desc' : 'asc');
-    const filter = usePageActionsStore((state) => state.groupFilter);
-    const setSearchTerm = usePageActionsStore((state) => state.setSearchTerm);
-    const setSort = usePageActionsStore((state) => state.setSort);
-    const setFilter = usePageActionsStore((state) => state.setGroupFilter);
-
     return (
-        <PageActions
-            searchTerm={searchTerm}
-            onSearchTermChange={(value) => setSearchTerm('group', value)}
-            sortOptions={[
-                { value: 'asc', label: t('popover.nameAsc'), icon: ArrowUpAZ },
-                { value: 'desc', label: t('popover.nameDesc'), icon: ArrowUpAZ },
-            ]}
-            sortValue={sortOrder}
-            onSortChange={(value) => {
-                if (value === 'asc' || value === 'desc') setSort('group', value);
-            }}
-            filterOptions={[
-                { value: 'all', label: t('popover.filter.group.all') },
-                { value: 'with-members', label: t('popover.filter.group.withMembers') },
-                { value: 'empty', label: t('popover.filter.group.empty') },
-            ]}
-            filterValue={filter}
-            onFilterChange={(value) => {
-                if (value === 'all' || value === 'with-members' || value === 'empty') setFilter(value);
-            }}
-        >
+        <PageActions page="group">
             <CreateDialogContent />
         </PageActions>
     );

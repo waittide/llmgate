@@ -1,8 +1,7 @@
 import { useRef, useState, type ReactNode } from 'react';
 import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
-import type { LucideIcon } from 'lucide-react';
-import { LayoutGrid, List, Plus, Search, SlidersHorizontal, X } from 'lucide-react';
+import { ArrowUpAZ, LayoutGrid, List, Plus, Search, SlidersHorizontal, X } from 'lucide-react';
 import { useTranslations } from 'use-intl';
 import {
     MorphingDialog,
@@ -14,11 +13,6 @@ import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover
 import { buttonVariants } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
 
-interface PageActionOption {
-    value: string; // 操作选项的稳定标识。
-    label: string; // 操作选项显示的文案。
-    icon?: LucideIcon; // 操作选项左侧的可选图标。
-}
 
 type PageActionPage = 'channel' | 'group' | 'model';
 type PageActionLayout = 'grid' | 'list';
@@ -79,34 +73,52 @@ export const usePageActionsStore = create<PageActionsState>()(
 );
 
 interface PageActionsProps {
-    searchTerm: string; // 当前页面的搜索内容。
-    onSearchTermChange: (value: string) => void; // 更新当前页面的搜索内容。
-    layout?: PageActionLayout; // 当前页面可选的布局模式。
-    onLayoutChange?: (value: PageActionLayout) => void; // 更新当前页面的布局模式。
-    sortOptions: PageActionOption[]; // 当前页面支持的排序选项。
-    sortValue: string; // 当前页面选中的排序标识。
-    onSortChange: (value: string) => void; // 更新当前页面的排序方式。
-    filterOptions: PageActionOption[]; // 当前页面支持的筛选选项。
-    filterValue: string; // 当前页面选中的筛选标识。
-    onFilterChange: (value: string) => void; // 更新当前页面的筛选条件。
-    children: ReactNode; // 当前页面提供的创建表单内容。
+    page: PageActionPage;
+    children: ReactNode;
 }
 
-// PageActions 渲染不感知具体页面的搜索、视图选项和创建入口。
-export function PageActions({
-    searchTerm,
-    onSearchTermChange,
-    layout,
-    onLayoutChange,
-    sortOptions,
-    sortValue,
-    onSortChange,
-    filterOptions,
-    filterValue,
-    onFilterChange,
-    children,
-}: PageActionsProps) {
+// PageActions owns the three list-page presets; callers only identify the page and provide create content.
+export function PageActions({ page, children }: PageActionsProps) {
     const t = useTranslations('toolbar');
+    const searchTerm = usePageActionsStore((state) => state.searchTerms[page] || '');
+    const layout = usePageActionsStore((state) => state.layouts[page] || 'grid');
+    const sortValue = usePageActionsStore((state) => state.sortOrders[page] === 'desc' ? 'desc' : 'asc');
+    const setSearchTerm = usePageActionsStore((state) => state.setSearchTerm);
+    const setLayout = usePageActionsStore((state) => state.setLayout);
+    const setSort = usePageActionsStore((state) => state.setSort);
+    const channelFilter = usePageActionsStore((state) => state.channelFilter);
+    const groupFilter = usePageActionsStore((state) => state.groupFilter);
+    const modelFilter = usePageActionsStore((state) => state.modelFilter);
+    const setChannelFilter = usePageActionsStore((state) => state.setChannelFilter);
+    const setGroupFilter = usePageActionsStore((state) => state.setGroupFilter);
+    const setModelFilter = usePageActionsStore((state) => state.setModelFilter);
+    const filterValue = page === 'channel' ? channelFilter : page === 'group' ? groupFilter : modelFilter;
+    const filterOptions = page === 'channel'
+        ? [
+            { value: 'all', label: t('popover.filter.channel.all') },
+            { value: 'enabled', label: t('popover.filter.channel.enabled') },
+            { value: 'disabled', label: t('popover.filter.channel.disabled') },
+        ]
+        : page === 'group'
+            ? [
+                { value: 'all', label: t('popover.filter.group.all') },
+                { value: 'with-members', label: t('popover.filter.group.withMembers') },
+                { value: 'empty', label: t('popover.filter.group.empty') },
+            ]
+            : [
+                { value: 'all', label: t('popover.filter.model.all') },
+                { value: 'priced', label: t('popover.filter.model.priced') },
+                { value: 'free', label: t('popover.filter.model.free') },
+            ];
+    const setFilter = (value: string) => {
+        if (page === 'channel' && (value === 'all' || value === 'enabled' || value === 'disabled')) setChannelFilter(value);
+        if (page === 'group' && (value === 'all' || value === 'with-members' || value === 'empty')) setGroupFilter(value);
+        if (page === 'model' && (value === 'all' || value === 'priced' || value === 'free')) setModelFilter(value);
+    };
+    const sortOptions = [
+        { value: 'asc', label: t('popover.nameAsc'), icon: ArrowUpAZ },
+        { value: 'desc', label: t('popover.nameDesc'), icon: ArrowUpAZ },
+    ];
     const [searchExpanded, setSearchExpanded] = useState(false);
     const searchInputRef = useRef<HTMLInputElement>(null);
 
@@ -138,7 +150,7 @@ export function PageActions({
                         ref={searchInputRef}
                         type="text"
                         value={searchTerm}
-                        onChange={(event) => onSearchTermChange(event.target.value)}
+                        onChange={(event) => setSearchTerm(page, event.target.value)}
                         tabIndex={searchExpanded ? 0 : -1}
                         className="w-20 shrink-0 bg-transparent text-sm outline-none placeholder:text-muted-foreground"
                     />
@@ -146,7 +158,7 @@ export function PageActions({
                         type="button"
                         tabIndex={searchExpanded ? 0 : -1}
                         onClick={() => {
-                            onSearchTermChange('');
+                            setSearchTerm(page, '');
                             setSearchExpanded(false);
                         }}
                         className="shrink-0 rounded p-0.5 text-muted-foreground transition-colors hover:text-foreground"
@@ -177,13 +189,13 @@ export function PageActions({
                     className="w-64 rounded-2xl border border-border/60 bg-card p-3 shadow-xl"
                 >
                     <div className="grid gap-3">
-                        {layout !== undefined && onLayoutChange && (
+                        {page !== 'group' && (
                             <div className="grid gap-2">
                                 <p className="text-xs font-medium text-muted-foreground">{t('popover.layout')}</p>
                                 <div className="grid grid-cols-2 gap-2">
                                     <button
                                         type="button"
-                                        onClick={() => onLayoutChange('grid')}
+                                        onClick={() => setLayout(page, 'grid')}
                                         className={cn(
                                             'inline-flex h-8 items-center justify-center gap-1.5 rounded-lg border text-xs font-medium transition-colors',
                                             layout === 'grid'
@@ -196,7 +208,7 @@ export function PageActions({
                                     </button>
                                     <button
                                         type="button"
-                                        onClick={() => onLayoutChange('list')}
+                                        onClick={() => setLayout(page, 'list')}
                                         className={cn(
                                             'inline-flex h-8 items-center justify-center gap-1.5 rounded-lg border text-xs font-medium transition-colors',
                                             layout === 'list'
@@ -220,7 +232,7 @@ export function PageActions({
                                         <button
                                             key={option.value}
                                             type="button"
-                                            onClick={() => onSortChange(option.value)}
+                                            onClick={() => setSort(page, option.value === 'desc' ? 'desc' : 'asc')}
                                             className={cn(
                                                 'inline-flex h-8 items-center justify-center gap-1.5 rounded-lg border text-xs font-medium transition-colors',
                                                 sortValue === option.value
@@ -243,7 +255,7 @@ export function PageActions({
                                     <button
                                         key={option.value}
                                         type="button"
-                                        onClick={() => onFilterChange(option.value)}
+                                        onClick={() => setFilter(option.value)}
                                         className={cn(
                                             'h-8 rounded-lg border px-2 text-left text-xs font-medium transition-colors',
                                             filterValue === option.value
