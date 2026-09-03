@@ -125,8 +125,8 @@ pub async fn import_backup(state: &AppState, backup: BackupData) -> Result<DBImp
         let res = if ch.id > 0 {
             sqlx::query(
                 r#"
-                INSERT INTO channels (id, name, type, enabled, base_url, key, auto_sync, custom_header, param_override, match_regex, input_token, output_token, input_cost, output_cost, wait_time, request_success, request_failed)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO channels (id, name, type, enabled, base_url, key, auto_sync, custom_header, param_override, input_token, output_token, input_cost, output_cost, wait_time, request_success, request_failed)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(id) DO UPDATE SET
                     name = excluded.name,
                     type = excluded.type,
@@ -136,7 +136,6 @@ pub async fn import_backup(state: &AppState, backup: BackupData) -> Result<DBImp
                     auto_sync = excluded.auto_sync,
                     custom_header = excluded.custom_header,
                     param_override = excluded.param_override,
-                    match_regex = excluded.match_regex,
                     input_token = excluded.input_token,
                     output_token = excluded.output_token,
                     input_cost = excluded.input_cost,
@@ -155,7 +154,6 @@ pub async fn import_backup(state: &AppState, backup: BackupData) -> Result<DBImp
             .bind(ch.auto_sync as i64)
             .bind(&custom_header_json)
             .bind(&ch.param_override)
-            .bind(&ch.match_regex)
             .bind(ch.metrics.input_token)
             .bind(ch.metrics.output_token)
             .bind(ch.metrics.input_cost)
@@ -168,8 +166,8 @@ pub async fn import_backup(state: &AppState, backup: BackupData) -> Result<DBImp
         } else {
             sqlx::query(
                 r#"
-                INSERT INTO channels (name, type, enabled, base_url, key, auto_sync, custom_header, param_override, match_regex)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO channels (name, type, enabled, base_url, key, auto_sync, custom_header, param_override)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 "#,
             )
             .bind(&ch.name)
@@ -180,7 +178,6 @@ pub async fn import_backup(state: &AppState, backup: BackupData) -> Result<DBImp
             .bind(ch.auto_sync as i64)
             .bind(&custom_header_json)
             .bind(&ch.param_override)
-            .bind(&ch.match_regex)
             .execute(&mut *tx)
             .await
         };

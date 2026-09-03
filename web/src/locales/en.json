@@ -506,8 +506,6 @@
       "typeAnthropic": "Anthropic",
       "typeGemini": "Gemini",
       "autoSync": "Auto Sync",
-      "matchRegex": "Match Regex",
-      "matchRegexPlaceholder": "Optional: regex pattern to match request model names",
       "submit": "Create Channel",
       "submitting": "Creating...",
       "save": "Save",

@@ -120,7 +120,6 @@ pub async fn migrate(pool: &DbPool) -> Result<()> {
             auto_sync INTEGER NOT NULL DEFAULT 0,
             custom_header TEXT NOT NULL DEFAULT '[]',
             param_override TEXT,
-            match_regex TEXT,
             input_token INTEGER NOT NULL DEFAULT 0,
             output_token INTEGER NOT NULL DEFAULT 0,
             input_cost REAL NOT NULL DEFAULT 0,

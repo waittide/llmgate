@@ -10,7 +10,7 @@ use crate::{
 
 pub async fn refresh_channel_cache(state: &AppState) -> Result<()> {
     // 1. Fetch all channels into local map first to avoid cache-stampede / 404 race
-    let rows = sqlx::query("SELECT id, name, type, enabled, base_url, key, auto_sync, custom_header, param_override, match_regex, input_token, output_token, input_cost, output_cost, wait_time, request_success, request_failed FROM channels ORDER BY id ASC")
+    let rows = sqlx::query("SELECT id, name, type, enabled, base_url, key, auto_sync, custom_header, param_override, input_token, output_token, input_cost, output_cost, wait_time, request_success, request_failed FROM channels ORDER BY id ASC")
         .fetch_all(&state.db)
         .await?;
 
@@ -27,7 +27,6 @@ pub async fn refresh_channel_cache(state: &AppState) -> Result<()> {
         let custom_header_json: String = row.get("custom_header");
         let custom_header: Vec<CustomHeader> = serde_json::from_str(&custom_header_json).unwrap_or_default();
         let param_override: Option<String> = row.get("param_override");
-        let match_regex: Option<String> = row.get("match_regex");
 
         let metrics = StatsMetrics {
             input_token:     row.get("input_token"),
@@ -50,7 +49,6 @@ pub async fn refresh_channel_cache(state: &AppState) -> Result<()> {
             auto_sync,
             custom_header,
             param_override,
-            match_regex,
             metrics,
         };
 
@@ -130,8 +128,8 @@ pub async fn create_channel(state: &AppState, channel: &mut Channel) -> Result<(
     let mut tx = state.db.begin().await?;
     let result = sqlx::query(
         r#"
-        INSERT INTO channels (name, type, enabled, base_url, key, auto_sync, custom_header, param_override, match_regex)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO channels (name, type, enabled, base_url, key, auto_sync, custom_header, param_override)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         "#,
     )
     .bind(&channel.name)
@@ -142,7 +140,6 @@ pub async fn create_channel(state: &AppState, channel: &mut Channel) -> Result<(
     .bind(channel.auto_sync as i64)
     .bind(&custom_header_json)
     .bind(&channel.param_override)
-    .bind(&channel.match_regex)
     .execute(&mut *tx)
     .await?;
 
@@ -180,13 +177,12 @@ pub async fn update_channel(state: &AppState, req: &ChannelUpdateRequest) -> Res
         .param_override
         .as_ref()
         .or(current.param_override.as_ref());
-    let match_regex = req.match_regex.as_ref().or(current.match_regex.as_ref());
 
     let mut tx = state.db.begin().await?;
     sqlx::query(
         r#"
         UPDATE channels
-        SET name = ?, type = ?, enabled = ?, base_url = ?, key = ?, auto_sync = ?, custom_header = ?, param_override = ?, match_regex = ?
+        SET name = ?, type = ?, enabled = ?, base_url = ?, key = ?, auto_sync = ?, custom_header = ?, param_override = ?
         WHERE id = ?
         "#,
     )
@@ -198,7 +194,6 @@ pub async fn update_channel(state: &AppState, req: &ChannelUpdateRequest) -> Res
     .bind(auto_sync as i64)
     .bind(&custom_header_json)
     .bind(param_override)
-    .bind(match_regex)
     .bind(req.id)
     .execute(&mut *tx)
     .await?;
@@ -342,7 +337,6 @@ mod tests {
             auto_sync:      None,
             custom_header:  None,
             param_override: None,
-            match_regex:    None,
         };
 
         let updated_channel = update_channel(&state, &update_req).await.unwrap();

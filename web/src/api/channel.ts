@@ -46,7 +46,6 @@ export type Channel = StatsMetrics & {
     auto_sync: boolean;
     custom_header: CustomHeader[];
     param_override?: string | null;
-    match_regex?: string | null;
 };
 
 // ChannelServer 表示后端可能返回空 custom_header 的原始渠道数据。
@@ -73,7 +72,6 @@ type CreateChannelRequest = {
     auto_sync?: boolean;
     custom_header?: CustomHeader[];
     param_override?: string | null;
-    match_regex?: string | null;
 };
 
 /**
@@ -90,14 +88,12 @@ export type UpdateChannelRequest = {
     auto_sync?: boolean;
     custom_header?: CustomHeader[];
     param_override?: string | null;
-    match_regex?: string | null;
 };
 
 type FetchModelRequest = {
     type: ChannelType;
     base_url: string;
     key: string;
-    match_regex?: string | null;
     custom_header?: CustomHeader[];
 };
 

@@ -506,8 +506,6 @@
       "typeAnthropic": "Anthropic",
       "typeGemini": "Gemini",
       "autoSync": "自動同步",
-      "matchRegex": "匹配正規",
-      "matchRegexPlaceholder": "可選：用於匹配請求模型名稱的正規表示式",
       "submit": "建立供應源",
       "submitting": "建立中...",
       "save": "儲存",

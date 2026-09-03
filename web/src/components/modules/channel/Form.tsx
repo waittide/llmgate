@@ -41,7 +41,6 @@ interface ChannelFormData {
     models: ChannelModelInput[];
     enabled: boolean;
     auto_sync: boolean;
-    match_regex: string;
 }
 
 // 新建渠道的初始表单值, 自定义 Header 至少保留一行
@@ -55,7 +54,6 @@ const emptyFormData: ChannelFormData = {
     models: [],
     auto_sync: false,
     enabled: true,
-    match_regex: '',
 };
 
 // 忽略顺序生成模型集合的比较键
@@ -77,7 +75,6 @@ export function ChannelForm({ channel }: { channel?: Channel }) {
         param_override: channel.param_override ?? '',
         models: channel.models.map(({ name, source }) => ({ name, source })),
         auto_sync: channel.auto_sync,
-        match_regex: channel.match_regex ?? '',
     } : emptyFormData);
     // 新建和编辑共存时隔离表单控件的 id
     const idPrefix = channel ? `channel-${channel.id}` : 'new-channel';
@@ -110,7 +107,6 @@ export function ChannelForm({ channel }: { channel?: Channel }) {
                 type: formData.type,
                 base_url: formData.base_url.trim(),
                 key: formData.key.trim(),
-                match_regex: formData.match_regex.trim() || null,
                 custom_header: formData.custom_header.filter((h) => h.header_key.trim()),
             },
             {
@@ -168,7 +164,6 @@ export function ChannelForm({ channel }: { channel?: Channel }) {
                 auto_sync: formData.auto_sync,
                 custom_header,
                 param_override: formData.param_override.trim(),
-                match_regex: formData.match_regex.trim(),
             }, { onSuccess: () => setIsOpen(false) });
             return;
         }
@@ -182,9 +177,9 @@ export function ChannelForm({ channel }: { channel?: Channel }) {
         if (modelsKey(formData.models) !== modelsKey(channel.models)) req.models = formData.models;
         if (formData.auto_sync !== channel.auto_sync) req.auto_sync = formData.auto_sync;
         if (JSON.stringify(custom_header) !== JSON.stringify(channel.custom_header)) req.custom_header = custom_header;
-        for (const key of ['param_override', 'match_regex'] as const) {
-            const next = formData[key].trim();
-            if (next !== (channel[key] ?? '')) req[key] = next;
+        {
+            const next = formData.param_override.trim();
+            if (next !== (channel.param_override ?? '')) req.param_override = next;
         }
 
         updateChannel.mutate(req, { onSuccess: () => setIsOpen(false) });
@@ -461,19 +456,6 @@ export function ChannelForm({ channel }: { channel?: Channel }) {
                             </div>
                         </div>
 
-                        <div className="space-y-2">
-                            <label htmlFor={`${idPrefix}-match-regex`} className="text-sm font-medium text-card-foreground">
-                                {t('matchRegex')}
-                            </label>
-                            <Input
-                                id={`${idPrefix}-match-regex`}
-                                type="text"
-                                value={formData.match_regex}
-                                onChange={(e) => setFormData({ ...formData, match_regex: e.target.value })}
-                                placeholder={t('matchRegexPlaceholder')}
-                                className="rounded-xl"
-                            />
-                        </div>
 
                         <div className="space-y-2">
                             <label htmlFor={`${idPrefix}-param-override`} className="text-sm font-medium text-card-foreground">

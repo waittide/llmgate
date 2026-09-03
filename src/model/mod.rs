@@ -170,13 +170,13 @@ pub struct Channel {
     pub enabled:        bool,
     pub base_url:       String,
     pub key:            String,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[serde(default)]
     pub models:         Vec<ChannelModel>,
+    #[serde(default)]
     pub auto_sync:      bool,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub custom_header:  Vec<CustomHeader>,
     pub param_override: Option<String>,
-    pub match_regex:    Option<String>,
-    #[serde(flatten, default)]
     pub metrics:        StatsMetrics,
 }
 
@@ -197,7 +197,6 @@ pub struct ChannelUpdateRequest {
     pub auto_sync:      Option<bool>,
     pub custom_header:  Option<Vec<CustomHeader>>,
     pub param_override: Option<String>,
-    pub match_regex:    Option<String>,
 }
 
 // ---------------- Group ----------------

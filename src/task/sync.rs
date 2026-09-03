@@ -47,12 +47,6 @@ pub async fn fetch_upstream_models(channel: &Channel) -> Result<Vec<String>> {
         }
     }
 
-    if let Some(regex_str) = &channel.match_regex
-        && !regex_str.trim().is_empty()
-        && let Ok(re) = regex::Regex::new(regex_str)
-    {
-        models.retain(|m| re.is_match(m));
-    }
 
     Ok(models)
 }
@@ -101,7 +95,6 @@ pub async fn sync_all_channel_models(state: &AppState) -> Result<()> {
                     auto_sync:      None,
                     custom_header:  None,
                     param_override: None,
-                    match_regex:    None,
                 };
                 let _ = channel::update_channel(state, &update_req).await;
             }
