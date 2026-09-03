@@ -31,22 +31,6 @@ use crate::{
     server::{middleware::AuthContext, resp::error},
     utils::estimate_tokens,
 };
-/// Request-side data captured once and reused to build the persistent log.
-#[derive(Clone)]
-struct RequestLogInfo {
-    request_id:       i64,
-    model:            String,
-    target_channel:   String,
-    target_model:     String,
-    request_url:      String,
-    request_headers:  String,
-    request_body:     String,
-    response_url:     String,
-    response_headers: String,
-    started_at:       i64,
-    round:            i64,
-}
-
 /// Cap for captured streaming response bodies to bound log storage.
 const RESPONSE_CAPTURE_LIMIT: usize = 64 * 1024;
 
@@ -81,7 +65,7 @@ struct StreamFinalizer<S> {
     usage:            Option<Usage>,
     start_time:       Instant,
     done:             bool,
-    log_info:         RequestLogInfo,
+    log_template:     RequestLog,
     previous_rounds:  Vec<crate::model::RoundLog>,
     response_capture: Vec<u8>,
 }
@@ -200,14 +184,14 @@ impl<S> StreamFinalizer<S> {
 
         let mut all_rounds = self.previous_rounds.clone();
         all_rounds.push(crate::model::RoundLog {
-            round:            self.log_info.round,
-            channel_name:     self.log_info.target_channel.clone(),
-            model_name:       self.log_info.target_model.clone(),
-            request_url:      self.log_info.request_url.clone(),
-            request_headers:  self.log_info.request_headers.clone(),
-            request_body:     self.log_info.request_body.clone(),
-            response_url:     self.log_info.response_url.clone(),
-            response_headers: self.log_info.response_headers.clone(),
+            round:            self.log_template.round,
+            channel_name:     self.log_template.target_channel.clone(),
+            model_name:       self.log_template.target_model.clone(),
+            request_url:      self.log_template.request_url.clone(),
+            request_headers:  self.log_template.request_headers.clone(),
+            request_body:     self.log_template.request_body.clone(),
+            response_url:     self.log_template.response_url.clone(),
+            response_headers: self.log_template.response_headers.clone(),
             response_body:    response_body_str.clone(),
             status:           if completed { 200 } else { 500 },
             duration_ms:      elapsed_ms,
@@ -229,36 +213,22 @@ impl<S> StreamFinalizer<S> {
         );
 
         // Persist the completed request/response log.
-        log::record_request_log(
-            self.state.clone(),
-            RequestLog {
-                request_id: self.log_info.request_id,
-                status: if completed {
-                    "success".to_string()
-                } else {
-                    "stream_error".to_string()
-                },
-                model: self.log_info.model.clone(),
-                target_channel: self.log_info.target_channel.clone(),
-                target_model: self.log_info.target_model.clone(),
-                request_url: self.log_info.request_url.clone(),
-                request_headers: self.log_info.request_headers.clone(),
-                request_body: self.log_info.request_body.clone(),
-                response_url: self.log_info.response_url.clone(),
-                response_headers: self.log_info.response_headers.clone(),
-                response_body: response_body_str,
-                prompt_tokens,
-                completion_tokens,
-                total_tokens: prompt_tokens + completion_tokens,
-                cost,
-                wait_time: elapsed_ms,
-                round: self.log_info.round,
-                error: error_opt,
-                rounds_detail: serde_json::to_string(&all_rounds).unwrap_or_default(),
-                created_at: self.log_info.started_at,
-                ..Default::default()
-            },
-        );
+        let mut req_log = self.log_template.clone();
+        req_log.status = if completed {
+            "success".to_string()
+        } else {
+            "stream_error".to_string()
+        };
+        req_log.response_body = response_body_str;
+        req_log.prompt_tokens = prompt_tokens;
+        req_log.completion_tokens = completion_tokens;
+        req_log.total_tokens = prompt_tokens + completion_tokens;
+        req_log.cost = cost;
+        req_log.wait_time = elapsed_ms;
+        req_log.error = error_opt;
+        req_log.rounds_detail = serde_json::to_string(&all_rounds).unwrap_or_default();
+
+        log::record_request_log(self.state.clone(), req_log);
     }
 }
 
@@ -443,7 +413,7 @@ fn handle_successful_stream(
 ) -> Response {
     state.request_state_manager.mark_committed(ctx.req_id);
 
-    let log_info = RequestLogInfo {
+    let log_template = RequestLog {
         request_id: ctx.request_id,
         model: ctx.model.to_string(),
         target_channel: ctx.channel.name.clone(),
@@ -453,8 +423,9 @@ fn handle_successful_stream(
         request_body: ctx.rewritten_body_str.to_string(),
         response_url: ctx.target_req_url.to_string(),
         response_headers: serialize_headers(upstream_resp.headers()),
-        started_at: ctx.started_at,
+        created_at: ctx.started_at,
         round: ctx.round,
+        ..Default::default()
     };
 
     let raw_stream = upstream_resp.bytes_stream();
@@ -478,7 +449,7 @@ fn handle_successful_stream(
         usage: None,
         start_time: ctx.start_time,
         done: false,
-        log_info,
+        log_template,
         previous_rounds: ctx.rounds,
         response_capture: Vec::new(),
     };
