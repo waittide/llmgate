@@ -44,11 +44,13 @@ pub struct ApiKeyCache {
 
 #[derive(Clone)]
 pub struct AppState {
-    pub db:                    DbPool,
     // NOTE: All caches below are Arc-wrapped so `AppState::clone()` shares the
     // underlying storage across handlers, background tasks and router instances.
     // A bare `DashMap`/`RwLock` would be deep-cloned on every clone and cause
     // request paths to observe stale/inconsistent configuration.
+    //
+    // Shared across all AppState clones:
+    pub db:                    DbPool,
     pub channels:              Arc<DashMap<i64, Channel>>,
     pub channel_models:        Arc<DashMap<i64, ChannelModel>>,
     pub groups:                Arc<RwLock<GroupCache>>,
@@ -60,6 +62,7 @@ pub struct AppState {
     pub route_manager:         Arc<RouteManager>,
     pub request_state_manager: Arc<RequestStateManager>,
     pub jwt_secret:            Arc<RwLock<String>>,
+    // NOTE: `log_sender` is a cheap clone (shared channel), not a deep copy.
     pub log_sender:            mpsc::Sender<RequestLog>,
     pub log_shutdown:          Arc<parking_lot::Mutex<Option<LogShutdown>>>,
 }
