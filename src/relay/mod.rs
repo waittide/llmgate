@@ -1,6 +1,7 @@
 pub mod protocol;
 pub mod route;
 pub mod state;
+pub mod stream;
 pub mod upstream;
 
 use std::{
@@ -27,6 +28,7 @@ use crate::{
             ApiFormat, calculate_cost, extract_usage_from_json, parse_request_metadata, rewrite_request_body_in_json,
         },
         state::Usage,
+        stream::ChatCompletionsToResponsesStream,
         upstream::{build_upstream_request, get_client, normalize_base_url},
     },
     server::{middleware::AuthContext, resp::error},
@@ -75,7 +77,7 @@ struct StreamFinalizer<S> {
 const SSE_BUFFER_LIMIT: usize = 64 * 1024; // 64KB max temporary SSE accumulation buffer
 
 /// Handles events split across arbitrary stream chunk boundaries.
-fn sse_event_end(buf: &[u8]) -> Option<usize> {
+pub(crate) fn sse_event_end(buf: &[u8]) -> Option<usize> {
     for i in 0..buf.len().saturating_sub(1) {
         if buf[i] == b'\n' && buf[i + 1] == b'\n' {
             return Some(i + 2);
@@ -396,7 +398,6 @@ fn gemini_endpoint(ch: &Channel, model: &str, stream: bool) -> String {
 
 fn prepare_upstream_payload(
     format: ApiFormat,
-    default_endpoint: &'static str,
     stream: bool,
     body_bytes: &Bytes,
     ch: &Channel,
@@ -639,6 +640,13 @@ fn handle_successful_stream(
         .boxed(),
         _ => mapped_stream.boxed(),
     };
+    let output_stream = if ctx.format == ApiFormat::OpenAIResponse
+        && ctx.channel.channel_type != ChannelProvider::OpenaiResponses
+    {
+        ChatCompletionsToResponsesStream::new(output_stream, ctx.model.to_string()).boxed()
+    } else {
+        output_stream
+    };
     let finalizer = StreamFinalizer {
         inner: output_stream,
         state: state.clone(),
@@ -674,7 +682,6 @@ fn handle_successful_stream(
         })
 }
 
-
 async fn handle_successful_json(
     state: &AppState,
     upstream_resp: reqwest::Response,
@@ -682,17 +689,26 @@ async fn handle_successful_json(
 ) -> Response {
     let response_headers = serialize_headers(upstream_resp.headers());
     let raw_bytes = upstream_resp.bytes().await.unwrap_or_default();
-    let converted = serde_json::from_slice::<serde_json::Value>(&raw_bytes)
-        .ok()
-        .and_then(|val| match ctx.channel.channel_type {
-            ChannelProvider::Anthropic if ctx.format != ApiFormat::AnthropicMessage => {
-                Some(protocol::convert_anthropic_to_openai_chat_response(&val, ctx.model))
-            }
-            ChannelProvider::Gemini => {
-                Some(protocol::convert_gemini_to_openai_chat_response(&val, ctx.model))
-            }
-            _ => None,
-        });
+    let parsed = serde_json::from_slice::<serde_json::Value>(&raw_bytes).ok();
+    let converted_to_chat = parsed.as_ref().and_then(|val| match ctx.channel.channel_type {
+        ChannelProvider::Anthropic if ctx.format != ApiFormat::AnthropicMessage => {
+            Some(protocol::convert_anthropic_to_openai_chat_response(val, ctx.model))
+        }
+        ChannelProvider::Gemini => {
+            Some(protocol::convert_gemini_to_openai_chat_response(val, ctx.model))
+        }
+        _ => None,
+    });
+    let converted = if ctx.format == ApiFormat::OpenAIResponse
+        && ctx.channel.channel_type != ChannelProvider::OpenaiResponses
+    {
+        converted_to_chat
+            .as_ref()
+            .or(parsed.as_ref())
+            .map(|val| protocol::convert_openai_chat_to_responses_response(val, ctx.model))
+    } else {
+        converted_to_chat
+    };
     let resp_bytes = converted
         .and_then(|val| serde_json::to_vec(&val).ok())
         .map(Bytes::from)
@@ -925,12 +941,6 @@ pub async fn forward_relay(
         Err(err_resp) => return err_resp,
     };
 
-    let default_endpoint = match format {
-        ApiFormat::AnthropicMessage => "/messages",
-        ApiFormat::OpenAIResponse => "/responses",
-        _ => "/chat/completions",
-    };
-
     let body_str = String::from_utf8_lossy(&body_bytes).to_string();
     let req_id = state
         .request_state_manager
@@ -991,7 +1001,6 @@ pub async fn forward_relay(
 
         let (target_endpoint, final_body) = prepare_upstream_payload(
             format,
-            default_endpoint,
             metadata.stream,
             &body_bytes,
             &ch,

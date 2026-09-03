@@ -165,6 +165,61 @@ pub fn convert_chat_completions_to_responses(val: &Value) -> Value {
     Value::Object(obj)
 }
 
+/// Converts a non-streaming Chat Completion response into an OpenAI Responses response.
+pub fn convert_openai_chat_to_responses_response(val: &Value, model_name: &str) -> Value {
+    let choice = val.pointer("/choices/0");
+    let message = choice.and_then(|choice| choice.get("message"));
+    let text = message
+        .and_then(|message| message.get("content"))
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let mut output = Vec::new();
+    if !text.is_empty() {
+        output.push(serde_json::json!({
+            "id": format!("msg_{}", nanoid::nanoid!(24)),
+            "type": "message",
+            "status": "completed",
+            "role": "assistant",
+            "content": [{ "type": "output_text", "text": text, "annotations": [], "logprobs": [] }]
+        }));
+    }
+    if let Some(tool_calls) = message
+        .and_then(|message| message.get("tool_calls"))
+        .and_then(Value::as_array)
+    {
+        for call in tool_calls {
+            output.push(serde_json::json!({
+                "id": format!("fc_{}", nanoid::nanoid!(20)),
+                "type": "function_call",
+                "status": "completed",
+                "call_id": call.get("id").cloned().unwrap_or(Value::String(format!("call_{}", nanoid::nanoid!(20)))),
+                "name": call.pointer("/function/name").cloned().unwrap_or(Value::String(String::new())),
+                "arguments": call.pointer("/function/arguments").cloned().unwrap_or(Value::String("{}".to_string()))
+            }));
+        }
+    }
+
+    let input_tokens = val.pointer("/usage/prompt_tokens").and_then(Value::as_i64).unwrap_or(0);
+    let output_tokens = val.pointer("/usage/completion_tokens").and_then(Value::as_i64).unwrap_or(0);
+    let total_tokens = val.pointer("/usage/total_tokens").and_then(Value::as_i64).unwrap_or(input_tokens + output_tokens);
+    serde_json::json!({
+        "id": format!("resp_{}", nanoid::nanoid!(24)),
+        "object": "response",
+        "created_at": chrono::Utc::now().timestamp(),
+        "completed_at": chrono::Utc::now().timestamp(),
+        "status": "completed",
+        "model": model_name,
+        "output": output,
+        "error": null,
+        "incomplete_details": null,
+        "usage": {
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "total_tokens": total_tokens
+        }
+    })
+}
+
 /// Converts an Anthropic Messages request into an OpenAI Chat Completions request.
 pub fn convert_anthropic_to_openai_chat_request(val: &Value) -> Value {
     let mut obj = match val.as_object() {
@@ -1378,5 +1433,17 @@ mod tests {
         assert_eq!(openai.pointer("/messages/1/content").unwrap(), "Hello");
         assert_eq!(openai.pointer("/tools/0/function/name").unwrap(), "read_file");
         assert_eq!(openai.pointer("/tools/0/function/parameters/type").unwrap(), "object");
+    }
+
+    #[test]
+    fn test_convert_openai_chat_to_responses_response() {
+        let chat = serde_json::json!({
+            "choices": [{ "message": { "role": "assistant", "content": "Hello" }, "finish_reason": "stop" }],
+            "usage": { "prompt_tokens": 2, "completion_tokens": 1, "total_tokens": 3 }
+        });
+        let response = convert_openai_chat_to_responses_response(&chat, "test-model");
+        assert_eq!(response.get("object").unwrap(), "response");
+        assert_eq!(response.pointer("/output/0/content/0/text").unwrap(), "Hello");
+        assert_eq!(response.pointer("/usage/total_tokens").unwrap(), 3);
     }
 }
