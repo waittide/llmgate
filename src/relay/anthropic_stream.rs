@@ -260,14 +260,16 @@ impl<S> OpenaiToAnthropicStream<S> {
         } else {
             "end_turn"
         };
-        let output_tokens = self
+        // message_start 里的 input_tokens 恒为 0（构造时尚未知）；在此补发真实值，
+        // 供 StreamFinalizer 的 SSE usage 合并捕获，避免计费退化为字符估算。
+        let (input_tokens, output_tokens) = self
             .usage
             .as_ref()
-            .map(|u| u.completion_tokens)
-            .unwrap_or(0);
+            .map(|u| (u.prompt_tokens, u.completion_tokens))
+            .unwrap_or((0, 0));
         self.push(
             "message_delta",
-            json!({ "delta": { "stop_reason": stop_reason, "stop_sequence": null }, "usage": { "output_tokens": output_tokens } }),
+            json!({ "delta": { "stop_reason": stop_reason, "stop_sequence": null }, "usage": { "input_tokens": input_tokens, "output_tokens": output_tokens } }),
         );
         self.push("message_stop", json!({}));
     }
@@ -346,5 +348,35 @@ mod tests {
         assert!(output.contains("event: content_block_delta"));
         assert!(output.contains("\"text\":\"Hello\""));
         assert_eq!(output.matches("event: message_stop").count(), 1);
+    }
+
+    #[tokio::test]
+    async fn forwards_real_usage_in_message_delta() {
+        let chunks = vec![
+            Ok(Bytes::from_static(
+                b"data: {\"choices\":[{\"delta\":{\"content\":\"Hi\"},\"finish_reason\":null}]}\n\n",
+            )),
+            Ok(Bytes::from_static(
+                b"data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\",\"usage\":{\"prompt_tokens\":42,\"completion_tokens\":7,\"total_tokens\":49}}]}\n\ndata: [DONE]\n\n",
+            )),
+        ];
+        let output = OpenaiToAnthropicStream::new(
+            stream::iter(chunks),
+            "test-model".to_string(),
+            OpenaiStreamFormat::ChatCompletions,
+        )
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .map(Result::unwrap)
+        .fold(String::new(), |mut output, chunk| {
+            output.push_str(&String::from_utf8_lossy(&chunk));
+            output
+        });
+
+        // message_start 的 input_tokens 恒为 0；message_delta 必须携带真实用量供计费捕获
+        assert!(output.contains("\"input_tokens\":0"));
+        assert!(output.contains("\"input_tokens\":42"));
+        assert!(output.contains("\"output_tokens\":7"));
     }
 }
