@@ -115,14 +115,11 @@ pub async fn get_recent_logs(state: &AppState, limit: i64) -> Result<Vec<Request
 /// Returns the number of rows removed.
 pub async fn purge_expired_logs(state: &AppState) -> Result<i64> {
     let days = get_log_retention_days(state);
-    let cutoff_sec = chrono::Utc::now().timestamp() - days * 86400;
     let cutoff_ms = chrono::Utc::now().timestamp_millis() - days * 86400 * 1000;
-    let res =
-        sqlx::query("DELETE FROM request_logs WHERE (created_at < ? AND created_at < 1000000000000) OR created_at < ?")
-            .bind(cutoff_sec)
-            .bind(cutoff_ms)
-            .execute(&state.db)
-            .await?;
+    let res = sqlx::query("DELETE FROM request_logs WHERE created_at < ?")
+        .bind(cutoff_ms)
+        .execute(&state.db)
+        .await?;
     Ok(res.rows_affected() as i64)
 }
 

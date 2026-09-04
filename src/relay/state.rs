@@ -35,15 +35,9 @@ pub struct RequestOverview {
 
 impl From<&RequestLog> for RequestOverview {
     fn from(log: &RequestLog) -> Self {
-        let started_at = if log.created_at >= 1_000_000_000_000 {
-            chrono::DateTime::from_timestamp_millis(log.created_at)
-                .map(|dt| dt.to_rfc3339())
-                .unwrap_or_default()
-        } else {
-            chrono::DateTime::from_timestamp(log.created_at, 0)
-                .map(|dt| dt.to_rfc3339())
-                .unwrap_or_default()
-        };
+        let started_at = chrono::DateTime::from_timestamp_millis(log.created_at)
+            .map(|dt| dt.to_rfc3339())
+            .unwrap_or_default();
         RequestOverview {
             id: log.id as u64,
             status: log.status.clone(),

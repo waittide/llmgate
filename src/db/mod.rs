@@ -284,19 +284,5 @@ pub async fn migrate(pool: &DbPool) -> Result<()> {
     )
     .execute(pool)
     .await?;
-
-    // Ensure rounds_detail column exists for existing databases
-    let _ = sqlx::query("ALTER TABLE request_logs ADD COLUMN rounds_detail TEXT NOT NULL DEFAULT '[]'")
-        .execute(pool)
-        .await;
-
-    // Drop request_id column and index if still present in existing databases
-    let _ = sqlx::query("DROP INDEX IF EXISTS idx_request_logs_request_id")
-        .execute(pool)
-        .await;
-    let _ = sqlx::query("ALTER TABLE request_logs DROP COLUMN request_id")
-        .execute(pool)
-        .await;
-
     Ok(())
 }

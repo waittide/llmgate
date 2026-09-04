@@ -162,7 +162,7 @@ mod tests {
             r#"
             INSERT INTO request_logs (
                 id, status, model, request_body, response_body, created_at
-            ) VALUES (999, 'success', 'gpt-4o', 'body for request 999', 'response for request 999', 1700000000)
+            ) VALUES (999, 'success', 'gpt-4o', 'body for request 999', 'response for request 999', 1700000000000)
             "#,
         )
         .execute(&state.db)
@@ -176,7 +176,7 @@ mod tests {
             "/v1/chat/completions",
             "{}",
             "body for active request",
-            1700000001,
+            1700000001000,
         )
         .await
         .unwrap() as u64;

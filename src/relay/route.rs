@@ -46,11 +46,6 @@ impl RouteManager {
         })
     }
 
-    #[allow(dead_code)]
-    pub fn pick_group_item(&self, group: &Group) -> Option<GroupItem> {
-        self.pick_candidate_item(group, &HashSet::new())
-    }
-
     pub fn pick_candidate_item(&self, group: &Group, attempted_items: &HashSet<i64>) -> Option<GroupItem> {
         if group.mode == GroupMode::Manual {
             // Prefer active_item if not yet attempted in this request
@@ -167,7 +162,7 @@ mod tests {
             items:          vec![item1.clone(), item2.clone()],
         };
         let picked = manager
-            .pick_group_item(&group_unselected)
+            .pick_candidate_item(&group_unselected, &HashSet::new())
             .expect("should pick item");
         assert_eq!(picked.id, 10);
 
@@ -177,7 +172,7 @@ mod tests {
             ..group_unselected.clone()
         };
         let picked_stale = manager
-            .pick_group_item(&group_stale_active)
+            .pick_candidate_item(&group_stale_active, &HashSet::new())
             .expect("should pick item");
         assert_eq!(picked_stale.id, 10);
 
@@ -187,7 +182,7 @@ mod tests {
             ..group_unselected.clone()
         };
         let picked2 = manager
-            .pick_group_item(&group_selected_item2)
+            .pick_candidate_item(&group_selected_item2, &HashSet::new())
             .expect("should pick item");
         assert_eq!(picked2.id, 20);
 
@@ -196,7 +191,11 @@ mod tests {
             items: Vec::new(),
             ..group_unselected
         };
-        assert!(manager.pick_group_item(&group_empty).is_none());
+        assert!(
+            manager
+                .pick_candidate_item(&group_empty, &HashSet::new())
+                .is_none()
+        );
     }
 
     #[test]
@@ -225,9 +224,6 @@ mod tests {
             ],
             relay_config:   Default::default(),
         };
-
-        // pick_group_item defaults to empty attempted_items
-        assert_eq!(manager.pick_group_item(&group).unwrap().id, 101);
 
         let mut attempted = HashSet::new();
         // First pick: item 101
