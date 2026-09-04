@@ -3,7 +3,6 @@ use anyhow::{Result, anyhow};
 use crate::{
     model::{User, UserChangePassword, UserChangeUsername},
     op::AppState,
-    utils::{store_password, verify_password},
 };
 
 pub async fn refresh_user_cache(state: &AppState) -> Result<()> {
@@ -30,17 +29,16 @@ pub async fn verify_user(state: &AppState, username: &str, password: &str) -> Re
     if user.username != username {
         return Ok(false);
     }
-    Ok(verify_password(password, &user.password))
+    Ok(user.password == password)
 }
 
 pub async fn change_password(state: &AppState, req: &UserChangePassword) -> Result<()> {
     let user = get_user(state).await?;
-    if !verify_password(&req.old_password, &user.password) {
+    if user.password != req.old_password {
         return Err(anyhow!("Incorrect old password"));
     }
-    let new_password = store_password(&req.new_password);
     sqlx::query("UPDATE users SET password = ? WHERE id = ?")
-        .bind(&new_password)
+        .bind(&req.new_password)
         .bind(user.id)
         .execute(&state.db)
         .await?;

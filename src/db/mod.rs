@@ -53,10 +53,9 @@ pub async fn migrate(pool: &DbPool) -> Result<()> {
         .fetch_one(pool)
         .await?;
     if user_count.0 == 0 {
-        let default_password = crate::utils::store_password("admin");
         sqlx::query("INSERT INTO users (username, password) VALUES (?, ?)")
             .bind("admin")
-            .bind(default_password)
+            .bind("admin")
             .execute(pool)
             .await?;
         info!("Default admin user created (admin / admin)");

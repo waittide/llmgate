@@ -87,6 +87,7 @@ impl AppState {
         };
 
         state.refresh_all_caches().await?;
+        stats::refresh_stats_cache(&state).await?;
         info!("All in-memory caches initialized");
         Ok(state)
     }
@@ -98,7 +99,6 @@ impl AppState {
         channel::refresh_channel_cache(self).await?;
         group::refresh_group_cache(self).await?;
         llm::refresh_llm_cache(self).await?;
-        stats::refresh_stats_cache(self).await?;
         Ok(())
     }
 }
