@@ -385,7 +385,7 @@ fn prepare_upstream_payload(
             "/messages".to_string(),
             parsed.as_ref().map(protocol::convert_openai_to_anthropic),
         ),
-        (ApiFormat::OpenAIResponse, ChannelProvider::Anthropic) => {
+        (ApiFormat::OpenaiResponse, ChannelProvider::Anthropic) => {
             let val = parsed.as_ref().map(|v| {
                 let completions = protocol::convert_responses_to_chat_completions(v);
                 protocol::convert_openai_to_anthropic(&completions)
@@ -396,7 +396,7 @@ fn prepare_upstream_payload(
             gemini_endpoint(ch, &channel_model.name, stream),
             parsed.as_ref().map(protocol::convert_openai_to_gemini),
         ),
-        (ApiFormat::OpenAIResponse, ChannelProvider::Gemini) => {
+        (ApiFormat::OpenaiResponse, ChannelProvider::Gemini) => {
             let val = parsed.as_ref().map(|v| {
                 let completions = protocol::convert_responses_to_chat_completions(v);
                 protocol::convert_openai_to_gemini(&completions)
@@ -423,7 +423,7 @@ fn prepare_upstream_payload(
             });
             (gemini_endpoint(ch, &channel_model.name, stream), val)
         }
-        (ApiFormat::OpenAIResponse, ChannelProvider::OpenaiCompletion) => (
+        (ApiFormat::OpenaiResponse, ChannelProvider::OpenaiCompletion) => (
             "/chat/completions".to_string(),
             parsed
                 .as_ref()
@@ -607,7 +607,7 @@ fn handle_successful_stream(state: &AppState, upstream_resp: reqwest::Response, 
             OpenaiStreamFormat::ChatCompletions
         };
         OpenaiToAnthropicStream::new(output_stream, ctx.model.to_string(), source_format).boxed()
-    } else if ctx.format == ApiFormat::OpenAIResponse && ctx.channel.channel_type != ChannelProvider::OpenaiResponses {
+    } else if ctx.format == ApiFormat::OpenaiResponse && ctx.channel.channel_type != ChannelProvider::OpenaiResponses {
         ChatCompletionsToResponsesStream::new(output_stream, ctx.model.to_string()).boxed()
     } else {
         output_stream
@@ -677,7 +677,7 @@ async fn handle_successful_json(
                 protocol::convert_openai_chat_to_anthropic_response(chat, ctx.model)
             }
         })
-    } else if ctx.format == ApiFormat::OpenAIResponse && ctx.channel.channel_type != ChannelProvider::OpenaiResponses {
+    } else if ctx.format == ApiFormat::OpenaiResponse && ctx.channel.channel_type != ChannelProvider::OpenaiResponses {
         converted_to_chat
             .as_ref()
             .or(parsed.as_ref())

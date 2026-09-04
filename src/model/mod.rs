@@ -51,6 +51,19 @@ impl StatsMetrics {
         self.request_success += delta.request_success;
         self.request_failed += delta.request_failed;
     }
+
+    pub fn from_sql_row(row: &sqlx::sqlite::SqliteRow) -> Self {
+        use sqlx::Row;
+        Self {
+            input_token:     row.get("input_token"),
+            output_token:    row.get("output_token"),
+            input_cost:      row.get("input_cost"),
+            output_cost:     row.get("output_cost"),
+            wait_time:       row.get("wait_time"),
+            request_success: row.get("request_success"),
+            request_failed:  row.get("request_failed"),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, sqlx::FromRow)]

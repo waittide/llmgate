@@ -78,11 +78,12 @@ pub async fn get_model_list(
     }
 
     if auth_ctx.is_anthropic_header {
+        let now_str = chrono::Utc::now().to_rfc3339();
         let anthropic_models: Vec<AnthropicModel> = models
             .into_iter()
             .map(|m| AnthropicModel {
                 id:           m.clone(),
-                created_at:   "2024-01-01T00:00:00Z".to_string(),
+                created_at:   now_str.clone(),
                 display_name: m,
                 model_type:   "model".to_string(),
             })
@@ -99,12 +100,13 @@ pub async fn get_model_list(
         };
         Json(res).into_response()
     } else {
+        let now_sec = chrono::Utc::now().timestamp();
         let open_ai_models: Vec<OpenAIModel> = models
             .into_iter()
             .map(|m| OpenAIModel {
                 id:       m,
                 object:   "model".to_string(),
-                created:  1763395200,
+                created:  now_sec,
                 owned_by: "octopus".to_string(),
             })
             .collect();

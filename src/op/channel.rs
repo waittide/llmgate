@@ -28,15 +28,7 @@ pub async fn refresh_channel_cache(state: &AppState) -> Result<()> {
         let custom_header: Vec<CustomHeader> = serde_json::from_str(&custom_header_json).unwrap_or_default();
         let param_override: Option<String> = row.get("param_override");
 
-        let metrics = StatsMetrics {
-            input_token:     row.get("input_token"),
-            output_token:    row.get("output_token"),
-            input_cost:      row.get("input_cost"),
-            output_cost:     row.get("output_cost"),
-            wait_time:       row.get("wait_time"),
-            request_success: row.get("request_success"),
-            request_failed:  row.get("request_failed"),
-        };
+        let metrics = StatsMetrics::from_sql_row(&row);
 
         let channel = Channel {
             id,
@@ -66,15 +58,7 @@ pub async fn refresh_channel_cache(state: &AppState) -> Result<()> {
         let channel_id: i64 = row.get("channel_id");
         let name: String = row.get("name");
         let source_str: String = row.get("source");
-        let metrics = StatsMetrics {
-            input_token:     row.get("input_token"),
-            output_token:    row.get("output_token"),
-            input_cost:      row.get("input_cost"),
-            output_cost:     row.get("output_cost"),
-            wait_time:       row.get("wait_time"),
-            request_success: row.get("request_success"),
-            request_failed:  row.get("request_failed"),
-        };
+        let metrics = StatsMetrics::from_sql_row(&row);
 
         let channel_model = ChannelModel {
             id,

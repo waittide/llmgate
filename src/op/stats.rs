@@ -16,15 +16,7 @@ pub async fn refresh_stats_cache(state: &AppState) -> Result<()> {
     {
         StatsTotal {
             id:      1,
-            metrics: StatsMetrics {
-                input_token:     row.get("input_token"),
-                output_token:    row.get("output_token"),
-                input_cost:      row.get("input_cost"),
-                output_cost:     row.get("output_cost"),
-                wait_time:       row.get("wait_time"),
-                request_success: row.get("request_success"),
-                request_failed:  row.get("request_failed"),
-            },
+            metrics: StatsMetrics::from_sql_row(&row),
         }
     } else {
         StatsTotal {
@@ -41,15 +33,7 @@ pub async fn refresh_stats_cache(state: &AppState) -> Result<()> {
     {
         StatsDaily {
             date:    now_date.clone(),
-            metrics: StatsMetrics {
-                input_token:     row.get("input_token"),
-                output_token:    row.get("output_token"),
-                input_cost:      row.get("input_cost"),
-                output_cost:     row.get("output_cost"),
-                wait_time:       row.get("wait_time"),
-                request_success: row.get("request_success"),
-                request_failed:  row.get("request_failed"),
-            },
+            metrics: StatsMetrics::from_sql_row(&row),
         }
     } else {
         StatsDaily {
@@ -76,15 +60,7 @@ pub async fn refresh_stats_cache(state: &AppState) -> Result<()> {
             hourlies[hour as usize] = StatsHourly {
                 hour,
                 date: now_date.clone(),
-                metrics: StatsMetrics {
-                    input_token:     row.get("input_token"),
-                    output_token:    row.get("output_token"),
-                    input_cost:      row.get("input_cost"),
-                    output_cost:     row.get("output_cost"),
-                    wait_time:       row.get("wait_time"),
-                    request_success: row.get("request_success"),
-                    request_failed:  row.get("request_failed"),
-                },
+                metrics: StatsMetrics::from_sql_row(&row),
             };
         }
     }
@@ -101,15 +77,7 @@ pub async fn refresh_stats_cache(state: &AppState) -> Result<()> {
         .await?;
     for row in apikey_rows {
         let api_key_id: i64 = row.get("api_key_id");
-        let metrics = StatsMetrics {
-            input_token:     row.get("input_token"),
-            output_token:    row.get("output_token"),
-            input_cost:      row.get("input_cost"),
-            output_cost:     row.get("output_cost"),
-            wait_time:       row.get("wait_time"),
-            request_success: row.get("request_success"),
-            request_failed:  row.get("request_failed"),
-        };
+        let metrics = StatsMetrics::from_sql_row(&row);
         state
             .stats_api_keys
             .insert(api_key_id, StatsAPIKey { api_key_id, metrics });
@@ -281,20 +249,11 @@ pub async fn get_stats_daily(state: &AppState) -> Result<Vec<StatsDaily>> {
     for row in rows {
         list.push(StatsDaily {
             date:    row.get("date"),
-            metrics: StatsMetrics {
-                input_token:     row.get("input_token"),
-                output_token:    row.get("output_token"),
-                input_cost:      row.get("input_cost"),
-                output_cost:     row.get("output_cost"),
-                wait_time:       row.get("wait_time"),
-                request_success: row.get("request_success"),
-                request_failed:  row.get("request_failed"),
-            },
+            metrics: StatsMetrics::from_sql_row(&row),
         });
     }
 
-    // Ensure today's in-memory is merged/represented
-    let today = state.stats.read().daily.clone();
+    let today = get_stats_today(state);
     if let Some(pos) = list.iter().position(|d| d.date == today.date) {
         list[pos] = today;
     } else {

@@ -30,7 +30,7 @@ pub async fn responses(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    forward_relay(state, auth_ctx, ApiFormat::OpenAIResponse, uri, headers, body).await
+    forward_relay(state, auth_ctx, ApiFormat::OpenaiResponse, uri, headers, body).await
 }
 
 pub async fn messages(

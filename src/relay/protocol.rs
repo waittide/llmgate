@@ -6,7 +6,7 @@ use crate::{model::LLMPrice, relay::state::Usage};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ApiFormat {
     OpenaiCompletion,
-    OpenAIResponse,
+    OpenaiResponse,
     AnthropicMessage,
 }
 
