@@ -148,22 +148,14 @@ pub async fn clear_all_logs(state: &AppState) -> Result<i64> {
         .await?;
     Ok(res.rows_affected() as i64)
 }
-/// Fetches a single request log by its database id (or fallback to latest request_id).
+/// Fetches a single request log by its request_id.
 pub async fn get_request_log(state: &AppState, request_id: i64) -> Result<Option<RequestLog>> {
     let row =
         sqlx::query_as::<_, RequestLog>("SELECT * FROM request_logs WHERE request_id = ? ORDER BY id DESC LIMIT 1")
             .bind(request_id)
             .fetch_optional(&state.db)
             .await?;
-    if row.is_some() {
-        return Ok(row);
-    }
-
-    let row_by_row_id = sqlx::query_as::<_, RequestLog>("SELECT * FROM request_logs WHERE id = ? LIMIT 1")
-        .bind(request_id)
-        .fetch_optional(&state.db)
-        .await?;
-    Ok(row_by_row_id)
+    Ok(row)
 }
 pub struct LogListQuery<'a> {
     pub page:      i64,
