@@ -455,6 +455,8 @@ fn prepare_upstream_payload(
 
 struct RoundFailure<'a> {
     round:               i64,
+    model:               &'a str,
+    started_at:          &'a str,
     channel_name:        &'a str,
     model_name:          &'a str,
     target_req_url:      &'a str,
@@ -466,7 +468,6 @@ struct RoundFailure<'a> {
     err_body:            &'a str,
     should_cooldown:     bool,
 }
-
 fn record_round_failure(
     state: &AppState,
     group_id: i64,
@@ -507,9 +508,9 @@ fn record_round_failure(
     state.in_flight.broadcast(RequestOverview {
         id:             req_id,
         status:         "running".to_string(),
-        started_at:     String::new(),
+        started_at:     fail.started_at.to_string(),
         duration:       fail.duration_ms,
-        model:          String::new(),
+        model:          fail.model.to_string(),
         usage:          Usage::default(),
         cost:           0.0,
         round:          fail.round,
@@ -743,11 +744,15 @@ async fn handle_successful_json(
         created_at: ctx.started_at,
     };
 
-    if let Err(e) = log::update_completed_log(state, &req_log).await {
-        tracing::error!("Failed to update completed log in db: {}", e);
-    }
     state.in_flight.broadcast(RequestOverview::from(&req_log));
     state.in_flight.unregister(ctx.request_id);
+
+    let state_clone = state.clone();
+    tokio::spawn(async move {
+        if let Err(e) = log::update_completed_log(&state_clone, &req_log).await {
+            tracing::error!("Failed to update completed log in db: {}", e);
+        }
+    });
 
     let delta = StatsMetrics {
         input_token:     usage.prompt_tokens,
@@ -919,11 +924,15 @@ pub async fn forward_relay(
     {
         Ok(id) => id as u64,
         Err(e) => {
-            tracing::error!("Failed to create initial request log: {}", e);
-            return error(StatusCode::INTERNAL_SERVER_ERROR, "Failed to initialize request log");
+            tracing::warn!(
+                "Failed to create initial request log, continuing without DB log ID: {}",
+                e
+            );
+            chrono::Utc::now()
+                .timestamp_nanos_opt()
+                .unwrap_or(started_at) as u64
         }
     };
-
     let cancel_rx = state.in_flight.register(request_id);
     let started_at_rfc3339 = chrono::DateTime::from_timestamp_millis(started_at)
         .map(|dt| dt.to_rfc3339())
@@ -1061,6 +1070,8 @@ pub async fn forward_relay(
                     &mut rounds,
                     RoundFailure {
                         round,
+                        model: &metadata.model,
+                        started_at: &started_at_rfc3339,
                         channel_name: &ch.name,
                         model_name: &channel_model.name,
                         target_req_url: &target_req_url,
@@ -1177,6 +1188,8 @@ pub async fn forward_relay(
                         &mut rounds,
                         RoundFailure {
                             round,
+                            model: &metadata.model,
+                            started_at: &started_at_rfc3339,
                             channel_name: &ch.name,
                             model_name: &channel_model.name,
                             target_req_url: &target_req_url,
@@ -1217,6 +1230,8 @@ pub async fn forward_relay(
                     &mut rounds,
                     RoundFailure {
                         round,
+                        model: &metadata.model,
+                        started_at: &started_at_rfc3339,
                         channel_name: &ch.name,
                         model_name: &channel_model.name,
                         target_req_url: &target_req_url,
