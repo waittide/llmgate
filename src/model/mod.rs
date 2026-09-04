@@ -184,6 +184,7 @@ pub struct Channel {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub custom_header:  Vec<CustomHeader>,
     pub param_override: Option<String>,
+    #[serde(flatten, default)]
     pub metrics:        StatsMetrics,
 }
 
@@ -449,4 +450,38 @@ pub struct BackupData {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct DBImportResult {
     pub rows_affected: std::collections::HashMap<String, i64>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_channel_metrics_flattened_in_json() {
+        let ch = Channel {
+            id: 1,
+            name: "test-channel".to_string(),
+            metrics: StatsMetrics {
+                input_token:     100,
+                output_token:    200,
+                input_cost:      0.05,
+                output_cost:     0.10,
+                wait_time:       150,
+                request_success: 10,
+                request_failed:  2,
+            },
+            ..Default::default()
+        };
+
+        let json_val = serde_json::to_value(&ch).expect("serialize channel");
+        // metrics fields must be flattened at top-level
+        assert_eq!(json_val.get("input_token").unwrap(), 100);
+        assert_eq!(json_val.get("output_token").unwrap(), 200);
+        assert_eq!(json_val.get("input_cost").unwrap(), 0.05);
+        assert_eq!(json_val.get("output_cost").unwrap(), 0.10);
+        assert_eq!(json_val.get("request_success").unwrap(), 10);
+        assert_eq!(json_val.get("request_failed").unwrap(), 2);
+        assert_eq!(json_val.get("wait_time").unwrap(), 150);
+        assert!(json_val.get("metrics").is_none());
+    }
 }
