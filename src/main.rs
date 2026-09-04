@@ -66,9 +66,6 @@ async fn main() -> Result<()> {
         }
     }
 
-    info!("Flushing request logs to database before shutdown...");
-    state.flush_and_stop_log_worker().await;
-
     info!("Flushing in-memory stats to database before shutdown...");
     if let Err(e) = op::stats::flush_stats_to_db(&state).await {
         tracing::error!("Failed to flush stats on shutdown: {}", e);

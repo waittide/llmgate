@@ -12,15 +12,18 @@ use futures::{StreamExt, stream};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    model::RequestLog,
     op::{AppState, log as op_log},
-    relay::state::Usage,
+    relay::state::RequestOverview,
     server::resp::{error, success, success_msg},
 };
 
 pub async fn stream_overview(State(state): State<AppState>) -> Response {
-    let rx = state.request_state_manager.subscribe();
-    let initial_recent = state.request_state_manager.get_recent_overviews();
+    let initial_logs = op_log::get_recent_logs(&state, 50)
+        .await
+        .unwrap_or_default();
+    let initial_recent: Vec<RequestOverview> = initial_logs.iter().map(RequestOverview::from).collect();
+
+    let rx = state.in_flight.subscribe();
 
     let initial_stream = stream::iter(initial_recent.into_iter().map(|overview| {
         let json_str = serde_json::to_string(&overview).unwrap_or_default();
@@ -55,9 +58,9 @@ pub async fn stream_overview(State(state): State<AppState>) -> Response {
 
 #[derive(Debug, Deserialize)]
 pub struct LogListParams {
-    #[serde(default)]
+    #[serde(default = "default_page")]
     pub page:      i64,
-    #[serde(default)]
+    #[serde(default = "default_page_size")]
     pub page_size: i64,
     #[serde(default)]
     pub model:     String,
@@ -67,61 +70,18 @@ pub struct LogListParams {
     pub keyword:   String,
 }
 
-/// Overview DTO shaped to match the live SSE `RequestOverview` so the same
-/// frontend cards render persisted history.
-#[derive(Serialize)]
-pub struct LogOverviewDto {
-    pub id:             u64,
-    pub status:         String,
-    pub started_at:     String,
-    pub duration:       i64,
-    pub model:          String,
-    pub usage:          Usage,
-    pub cost:           f64,
-    pub round:          i64,
-    pub target_channel: String,
-    pub target_model:   String,
-    pub sending:        bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub error:          Option<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub rounds:         Vec<crate::model::RoundLog>,
+fn default_page() -> i64 {
+    1
 }
+
+fn default_page_size() -> i64 {
+    20
+}
+
 #[derive(Serialize)]
 pub struct LogListPageDto {
     pub total: i64,
-    pub items: Vec<LogOverviewDto>,
-}
-
-fn to_overview(log: &RequestLog) -> LogOverviewDto {
-    let started_at = if log.created_at >= 1_000_000_000_000 {
-        chrono::DateTime::from_timestamp_millis(log.created_at)
-            .map(|dt| dt.to_rfc3339())
-            .unwrap_or_default()
-    } else {
-        chrono::DateTime::from_timestamp(log.created_at, 0)
-            .map(|dt| dt.to_rfc3339())
-            .unwrap_or_default()
-    };
-    LogOverviewDto {
-        id: log.id as u64,
-        status: log.status.clone(),
-        started_at,
-        duration: log.wait_time,
-        model: log.model.clone(),
-        usage: Usage {
-            prompt_tokens:     log.prompt_tokens,
-            completion_tokens: log.completion_tokens,
-            total_tokens:      log.total_tokens,
-        },
-        cost: log.cost,
-        round: log.round,
-        target_channel: log.target_channel.clone(),
-        target_model: log.target_model.clone(),
-        sending: false,
-        error: log.error.clone(),
-        rounds: serde_json::from_str(&log.rounds_detail).unwrap_or_default(),
-    }
+    pub items: Vec<RequestOverview>,
 }
 
 pub async fn list_logs(State(state): State<AppState>, Query(params): Query<LogListParams>) -> Response {
@@ -135,7 +95,7 @@ pub async fn list_logs(State(state): State<AppState>, Query(params): Query<LogLi
     match op_log::list_request_logs(&state, &query).await {
         Ok((total, items)) => success(LogListPageDto {
             total,
-            items: items.iter().map(to_overview).collect(),
+            items: items.iter().map(RequestOverview::from).collect(),
         }),
         Err(e) => error(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
     }
@@ -150,27 +110,21 @@ pub async fn get_log_detail(State(state): State<AppState>, Path(id): Path<u64>) 
 }
 
 pub async fn get_request_body(State(state): State<AppState>, Path(id): Path<u64>) -> Response {
-    if let Some(body) = state.request_state_manager.get_request_body(id) {
-        return success(body);
-    }
-    match op_log::get_request_log(&state, id as i64).await {
-        Ok(Some(log)) => success(log.request_body),
+    match op_log::get_request_body(&state, id as i64).await {
+        Ok(Some(body)) => success(body),
         _ => error(StatusCode::NOT_FOUND, "Request body not found"),
     }
 }
 
 pub async fn get_response_body(State(state): State<AppState>, Path(id): Path<u64>) -> Response {
-    if let Some(body) = state.request_state_manager.get_response_body(id) {
-        return success(body);
-    }
-    match op_log::get_request_log(&state, id as i64).await {
-        Ok(Some(log)) => success(log.response_body),
+    match op_log::get_response_body(&state, id as i64).await {
+        Ok(Some(body)) => success(body),
         _ => error(StatusCode::NOT_FOUND, "Response body not found"),
     }
 }
 
 pub async fn interrupt_round(State(state): State<AppState>, Path((id, _round)): Path<(u64, i64)>) -> Response {
-    if state.request_state_manager.interrupt(id) {
+    if state.in_flight.interrupt(id) {
         success_msg("interrupted successfully")
     } else {
         error(StatusCode::NOT_FOUND, "request not found or already finished")
@@ -178,7 +132,6 @@ pub async fn interrupt_round(State(state): State<AppState>, Path((id, _round)): 
 }
 
 pub async fn clear_log(State(state): State<AppState>) -> Response {
-    state.request_state_manager.clear();
     match op_log::clear_all_logs(&state).await {
         Ok(_) => success_msg("logs cleared"),
         Err(e) => error(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
@@ -216,10 +169,17 @@ mod tests {
         .await
         .unwrap();
 
-        // 2. Active runtime request in memory
-        let runtime_req_id = state
-            .request_state_manager
-            .new_request("gpt-4o".to_string(), "body for active request".to_string());
+        // 2. Active runtime request created via create_initial_log
+        let runtime_req_id = op_log::create_initial_log(
+            &state,
+            "gpt-4o",
+            "/v1/chat/completions",
+            "{}",
+            "body for active request",
+            1700000001,
+        )
+        .await
+        .unwrap() as u64;
 
         // 3. Querying request 999 returns its DB body
         let resp_hist = get_request_body(State(state.clone()), Path(999)).await;
@@ -229,7 +189,7 @@ mod tests {
             .unwrap();
         assert!(String::from_utf8_lossy(&body_hist).contains("body for request 999"));
 
-        // 4. Querying runtime request returns its active in-memory body
+        // 4. Querying runtime request returns its active DB body
         let resp_rt = get_request_body(State(state.clone()), Path(runtime_req_id)).await;
         assert_eq!(resp_rt.status(), StatusCode::OK);
         let body_rt = axum::body::to_bytes(resp_rt.into_body(), 1024)

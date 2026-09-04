@@ -16,117 +16,101 @@ pub fn get_log_retention_days(state: &AppState) -> i64 {
         .unwrap_or(DEFAULT_RETENTION_DAYS)
 }
 
-/// Worker that receives request logs from a bounded channel and batches writes to SQLite.
-pub fn start_log_worker(
-    db: crate::db::DbPool,
-    mut rx: tokio::sync::mpsc::Receiver<RequestLog>,
-    mut shutdown_rx: tokio::sync::oneshot::Receiver<()>,
-) -> tokio::task::JoinHandle<()> {
-    tokio::spawn(async move {
-        let mut batch = Vec::with_capacity(64);
-        let mut interval = tokio::time::interval(std::time::Duration::from_millis(200));
-
-        loop {
-            tokio::select! {
-                biased;
-                _ = &mut shutdown_rx => {
-                    break;
-                }
-                Some(log) = rx.recv() => {
-                    batch.push(log);
-                    if batch.len() >= 64 {
-                        flush_log_batch(&db, &mut batch).await;
-                    }
-                }
-                _ = interval.tick() => {
-                    if !batch.is_empty() {
-                        flush_log_batch(&db, &mut batch).await;
-                    }
-                }
-                else => break,
-            }
-        }
-
-        // Drain any remaining logs queued in rx before shutdown completes
-        while let Ok(log) = rx.try_recv() {
-            batch.push(log);
-            if batch.len() >= 64 {
-                flush_log_batch(&db, &mut batch).await;
-            }
-        }
-
-        if !batch.is_empty() {
-            flush_log_batch(&db, &mut batch).await;
-        }
-    })
+/// Creates an initial `running` request log row immediately when a request arrives,
+/// returning the database autoincrement row id as the request_id.
+pub async fn create_initial_log(
+    state: &AppState,
+    model: &str,
+    request_url: &str,
+    request_headers: &str,
+    request_body: &str,
+    created_at: i64,
+) -> Result<i64> {
+    let res = sqlx::query(
+        r#"
+        INSERT INTO request_logs (status, model, request_url, request_headers, request_body, created_at)
+        VALUES ('running', ?, ?, ?, ?, ?)
+        "#,
+    )
+    .bind(model)
+    .bind(request_url)
+    .bind(request_headers)
+    .bind(request_body)
+    .bind(created_at)
+    .execute(&state.db)
+    .await?;
+    Ok(res.last_insert_rowid())
 }
 
-async fn flush_log_batch(db: &crate::db::DbPool, batch: &mut Vec<RequestLog>) {
-    // Wrap the whole batch in one explicit transaction: a single commit/fsync
-    // per flush instead of one per row, which removes the per-row synchronous
-    // I/O stall from the log worker path.
-    let mut tx = match db.begin().await {
-        Ok(tx) => tx,
-        Err(e) => {
-            tracing::error!("failed to begin log batch transaction: {:?}", e);
-            batch.clear();
-            return;
-        }
-    };
-
-    for entry in batch.drain(..) {
-        if let Err(e) = sqlx::query(
-            r#"
-            INSERT INTO request_logs (
-                id, status, model, target_channel, target_model,
-                request_url, request_headers, request_body,
-                response_url, response_headers, response_body,
-                prompt_tokens, completion_tokens, total_tokens,
-                cost, wait_time, round, error, rounds_detail, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(id) DO NOTHING
-            "#,
-        )
-        .bind(entry.id)
-        .bind(&entry.status)
-        .bind(&entry.model)
-        .bind(&entry.target_channel)
-        .bind(&entry.target_model)
-        .bind(&entry.request_url)
-        .bind(&entry.request_headers)
-        .bind(&entry.request_body)
-        .bind(&entry.response_url)
-        .bind(&entry.response_headers)
-        .bind(&entry.response_body)
-        .bind(entry.prompt_tokens)
-        .bind(entry.completion_tokens)
-        .bind(entry.total_tokens)
-        .bind(entry.cost)
-        .bind(entry.wait_time)
-        .bind(entry.round)
-        .bind(&entry.error)
-        .bind(&entry.rounds_detail)
-        .bind(entry.created_at)
-        .execute(&mut *tx)
-        .await
-        {
-            // One malformed row aborts the transaction; roll back the rest.
-            tracing::error!("failed to insert request log in batch: {:?}", e);
-            return;
-        }
-    }
-
-    if let Err(e) = tx.commit().await {
-        tracing::error!("failed to commit log batch transaction: {:?}", e);
-    }
+/// Updates the log entry upon request completion/failure/interruption with full details.
+pub async fn update_completed_log(state: &AppState, log: &RequestLog) -> Result<()> {
+    sqlx::query(
+        r#"
+        UPDATE request_logs SET
+            status = ?,
+            target_channel = ?,
+            target_model = ?,
+            response_url = ?,
+            response_headers = ?,
+            response_body = ?,
+            prompt_tokens = ?,
+            completion_tokens = ?,
+            total_tokens = ?,
+            cost = ?,
+            wait_time = ?,
+            round = ?,
+            error = ?,
+            rounds_detail = ?
+        WHERE id = ?
+        "#,
+    )
+    .bind(&log.status)
+    .bind(&log.target_channel)
+    .bind(&log.target_model)
+    .bind(&log.response_url)
+    .bind(&log.response_headers)
+    .bind(&log.response_body)
+    .bind(log.prompt_tokens)
+    .bind(log.completion_tokens)
+    .bind(log.total_tokens)
+    .bind(log.cost)
+    .bind(log.wait_time)
+    .bind(log.round)
+    .bind(&log.error)
+    .bind(&log.rounds_detail)
+    .bind(log.id)
+    .execute(&state.db)
+    .await?;
+    Ok(())
 }
 
-/// Persists a completed request/response log via bounded channel queue.
-pub fn record_request_log(state: AppState, entry: RequestLog) {
-    if let Err(e) = state.log_sender.try_send(entry) {
-        tracing::warn!("Request log channel full or closed, dropping entry: {}", e);
-    }
+/// Reads the request body directly from SQLite.
+pub async fn get_request_body(state: &AppState, id: i64) -> Result<Option<String>> {
+    let row = sqlx::query_scalar::<_, String>("SELECT request_body FROM request_logs WHERE id = ?")
+        .bind(id)
+        .fetch_optional(&state.db)
+        .await?;
+    Ok(row)
 }
+
+/// Reads the response body directly from SQLite.
+pub async fn get_response_body(state: &AppState, id: i64) -> Result<Option<String>> {
+    let row = sqlx::query_scalar::<_, String>("SELECT response_body FROM request_logs WHERE id = ?")
+        .bind(id)
+        .fetch_optional(&state.db)
+        .await?;
+    Ok(row)
+}
+
+/// Returns recent logs ordered newest first for initial live stream feed.
+pub async fn get_recent_logs(state: &AppState, limit: i64) -> Result<Vec<RequestLog>> {
+    let rows = sqlx::query_as::<_, RequestLog>("SELECT * FROM request_logs ORDER BY id DESC LIMIT ?")
+        .bind(limit)
+        .fetch_all(&state.db)
+        .await?;
+    Ok(rows)
+}
+
 /// Deletes request logs older than the configured retention period.
 /// Returns the number of rows removed.
 pub async fn purge_expired_logs(state: &AppState) -> Result<i64> {
@@ -149,6 +133,7 @@ pub async fn clear_all_logs(state: &AppState) -> Result<i64> {
         .await?;
     Ok(res.rows_affected() as i64)
 }
+
 /// Fetches a single request log by its id.
 pub async fn get_request_log(state: &AppState, id: i64) -> Result<Option<RequestLog>> {
     let row = sqlx::query_as::<_, RequestLog>("SELECT * FROM request_logs WHERE id = ? LIMIT 1")
@@ -157,6 +142,7 @@ pub async fn get_request_log(state: &AppState, id: i64) -> Result<Option<Request
         .await?;
     Ok(row)
 }
+
 pub struct LogListQuery<'a> {
     pub page:      i64,
     pub page_size: i64,

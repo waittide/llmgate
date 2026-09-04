@@ -28,7 +28,7 @@ use crate::{
         protocol::{
             ApiFormat, calculate_cost, extract_usage_from_json, parse_request_metadata, rewrite_request_body_in_json,
         },
-        state::Usage,
+        state::{RequestOverview, Usage},
         stream::{ChatCompletionsToResponsesStream, ProviderToOpenaiStream},
         upstream::{build_upstream_request, get_client, normalize_base_url},
     },
@@ -234,21 +234,6 @@ impl<S> StreamFinalizer<S> {
             error:            error_opt.clone(),
         });
 
-        self.state.request_state_manager.finish(
-            self.req_id,
-            status_str,
-            Usage {
-                prompt_tokens,
-                completion_tokens,
-                total_tokens: prompt_tokens + completion_tokens,
-            },
-            cost,
-            response_body_str.clone(),
-            error_opt.clone(),
-            all_rounds.clone(),
-        );
-
-        // Persist the completed request/response log.
         let mut req_log = self.log_template.clone();
         req_log.status = status_str.to_string();
         req_log.response_body = response_body_str;
@@ -260,7 +245,16 @@ impl<S> StreamFinalizer<S> {
         req_log.error = error_opt;
         req_log.rounds_detail = serde_json::to_string(&all_rounds).unwrap_or_default();
 
-        log::record_request_log(self.state.clone(), req_log);
+        let overview = RequestOverview::from(&req_log);
+        self.state.in_flight.broadcast(overview);
+        self.state.in_flight.unregister(self.req_id);
+
+        let state = self.state.clone();
+        tokio::spawn(async move {
+            if let Err(e) = log::update_completed_log(&state, &req_log).await {
+                tracing::error!("Failed to update completed log in db: {}", e);
+            }
+        });
     }
 }
 
@@ -477,10 +471,6 @@ fn record_round_failure(
         error:            Some(fail.err_body.to_string()),
     };
     rounds.push(round_log.clone());
-    state
-        .request_state_manager
-        .record_round_attempt(req_id, round_log);
-
     if fail.should_cooldown {
         state
             .route_manager
@@ -494,13 +484,21 @@ fn record_round_failure(
         );
     }
 
-    state.request_state_manager.update_round_error(
-        req_id,
-        fail.round,
-        fail.channel_name.to_string(),
-        fail.model_name.to_string(),
-        fail.err_body.to_string(),
-    );
+    state.in_flight.broadcast(RequestOverview {
+        id:             req_id,
+        status:         "running".to_string(),
+        started_at:     String::new(),
+        duration:       fail.duration_ms,
+        model:          String::new(),
+        usage:          Usage::default(),
+        cost:           0.0,
+        round:          fail.round,
+        target_channel: fail.channel_name.to_string(),
+        target_model:   fail.model_name.to_string(),
+        sending:        false,
+        error:          Some(fail.err_body.to_string()),
+        rounds:         rounds.clone(),
+    });
 }
 
 struct SuccessContext<'a> {
@@ -523,7 +521,23 @@ struct SuccessContext<'a> {
 }
 
 fn handle_successful_stream(state: &AppState, upstream_resp: reqwest::Response, ctx: SuccessContext<'_>) -> Response {
-    state.request_state_manager.mark_committed(ctx.request_id);
+    state.in_flight.broadcast(RequestOverview {
+        id:             ctx.request_id,
+        status:         "committed".to_string(),
+        started_at:     chrono::DateTime::from_timestamp_millis(ctx.started_at)
+            .map(|dt| dt.to_rfc3339())
+            .unwrap_or_default(),
+        duration:       ctx.start_time.elapsed().as_millis() as i64,
+        model:          ctx.model.to_string(),
+        usage:          Usage::default(),
+        cost:           0.0,
+        round:          ctx.round,
+        target_channel: ctx.channel.name.clone(),
+        target_model:   ctx.channel_model.name.clone(),
+        sending:        true,
+        error:          None,
+        rounds:         ctx.rounds.clone(),
+    });
 
     let log_template = RequestLog {
         id: ctx.request_id as i64,
@@ -594,9 +608,7 @@ fn handle_successful_stream(state: &AppState, upstream_resp: reqwest::Response, 
         log_template,
         previous_rounds: ctx.rounds,
         response_capture: Vec::new(),
-        cancel_rx: state
-            .request_state_manager
-            .get_cancel_receiver(ctx.request_id),
+        cancel_rx: state.in_flight.get_cancel_receiver(ctx.request_id),
         interrupted: false,
     };
     let body = Body::from_stream(finalizer);
@@ -688,35 +700,34 @@ async fn handle_successful_json(
         error:            None,
     };
     ctx.rounds.push(round_log.clone());
-    state
-        .request_state_manager
-        .record_round_attempt(ctx.request_id, round_log);
+    let req_log = RequestLog {
+        id: ctx.request_id as i64,
+        status: "success".to_string(),
+        model: ctx.model.to_string(),
+        target_channel: ctx.channel.name.clone(),
+        target_model: ctx.channel_model.name.clone(),
+        request_url: ctx.target_req_url.to_string(),
+        request_headers: ctx.channel_req_headers.to_string(),
+        request_body: ctx.rewritten_body_str.to_string(),
+        response_url: ctx.target_req_url.to_string(),
+        response_headers,
+        response_body: resp_str.clone(),
+        prompt_tokens: usage.prompt_tokens,
+        completion_tokens: usage.completion_tokens,
+        total_tokens: usage.total_tokens,
+        cost,
+        wait_time: elapsed_ms,
+        round: ctx.round,
+        error: None,
+        rounds_detail: serde_json::to_string(&ctx.rounds).unwrap_or_default(),
+        created_at: ctx.started_at,
+    };
 
-    log::record_request_log(
-        state.clone(),
-        RequestLog {
-            id: ctx.request_id as i64,
-            status: "success".to_string(),
-            model: ctx.model.to_string(),
-            target_channel: ctx.channel.name.clone(),
-            target_model: ctx.channel_model.name.clone(),
-            request_url: ctx.target_req_url.to_string(),
-            request_headers: ctx.channel_req_headers.to_string(),
-            request_body: ctx.rewritten_body_str.to_string(),
-            response_url: ctx.target_req_url.to_string(),
-            response_headers,
-            response_body: resp_str.clone(),
-            prompt_tokens: usage.prompt_tokens,
-            completion_tokens: usage.completion_tokens,
-            total_tokens: usage.total_tokens,
-            cost,
-            wait_time: elapsed_ms,
-            round: ctx.round,
-            error: None,
-            rounds_detail: serde_json::to_string(&ctx.rounds).unwrap_or_default(),
-            created_at: ctx.started_at,
-        },
-    );
+    if let Err(e) = log::update_completed_log(state, &req_log).await {
+        tracing::error!("Failed to update completed log in db: {}", e);
+    }
+    state.in_flight.broadcast(RequestOverview::from(&req_log));
+    state.in_flight.unregister(ctx.request_id);
 
     let delta = StatsMetrics {
         input_token:     usage.prompt_tokens,
@@ -731,9 +742,6 @@ async fn handle_successful_json(
     };
 
     stats::record_metrics(state, ctx.api_key_id, ctx.channel.id, ctx.channel_model.id, &delta);
-    state
-        .request_state_manager
-        .finish(ctx.request_id, "success", usage, cost, resp_str, None, ctx.rounds);
 
     Response::builder()
         .status(StatusCode::OK)
@@ -809,41 +817,37 @@ fn build_failed_relay_response(state: &AppState, ctx: FailedRelayContext<'_>) ->
         )
     };
 
-    log::record_request_log(
-        state.clone(),
-        RequestLog {
-            id:                ctx.request_id as i64,
-            status:            "failed".to_string(),
-            model:             ctx.model.to_string(),
-            target_channel:    ctx.last_target_channel,
-            target_model:      ctx.last_target_model,
-            request_url:       ctx.request_url,
-            request_headers:   ctx.request_headers,
-            request_body:      ctx.request_body,
-            response_url:      ctx.last_response_url,
-            response_headers:  ctx.last_response_headers,
-            response_body:     ctx.last_error_body.clone(),
-            prompt_tokens:     0,
-            completion_tokens: 0,
-            total_tokens:      0,
-            cost:              0.0,
-            wait_time:         ctx.wait_time_ms,
-            round:             ctx.round,
-            error:             Some(error_message.clone()),
-            rounds_detail:     serde_json::to_string(&ctx.rounds).unwrap_or_default(),
-            created_at:        ctx.started_at,
-        },
-    );
+    let req_log = RequestLog {
+        id:                ctx.request_id as i64,
+        status:            "failed".to_string(),
+        model:             ctx.model.to_string(),
+        target_channel:    ctx.last_target_channel,
+        target_model:      ctx.last_target_model,
+        request_url:       ctx.request_url,
+        request_headers:   ctx.request_headers,
+        request_body:      ctx.request_body,
+        response_url:      ctx.last_response_url,
+        response_headers:  ctx.last_response_headers,
+        response_body:     ctx.last_error_body,
+        prompt_tokens:     0,
+        completion_tokens: 0,
+        total_tokens:      0,
+        cost:              0.0,
+        wait_time:         ctx.wait_time_ms,
+        round:             ctx.round,
+        error:             Some(error_message),
+        rounds_detail:     serde_json::to_string(&ctx.rounds).unwrap_or_default(),
+        created_at:        ctx.started_at,
+    };
+    state.in_flight.broadcast(RequestOverview::from(&req_log));
+    state.in_flight.unregister(ctx.request_id);
 
-    state.request_state_manager.finish(
-        ctx.request_id,
-        "failed",
-        Usage::default(),
-        0.0,
-        ctx.last_error_body,
-        Some(error_message),
-        ctx.rounds,
-    );
+    let state_clone = state.clone();
+    tokio::spawn(async move {
+        if let Err(e) = log::update_completed_log(&state_clone, &req_log).await {
+            tracing::error!("Failed to update failed log in db: {}", e);
+        }
+    });
     Response::builder()
         .status(
             if ctx.last_status.is_client_error() || ctx.last_status.is_server_error() {
@@ -877,15 +881,49 @@ pub async fn forward_relay(
     };
 
     let body_str = String::from_utf8_lossy(&body_bytes).to_string();
-    let request_id = state
-        .request_state_manager
-        .new_request(metadata.model.clone(), body_str.clone());
-
     let request_url = uri.path().to_string();
     let request_headers = serialize_headers(&headers);
     let request_body = body_str.clone();
     let started_at = chrono::Utc::now().timestamp_millis();
     let start_time = Instant::now();
+
+    let request_id = match log::create_initial_log(
+        &state,
+        &metadata.model,
+        &request_url,
+        &request_headers,
+        &request_body,
+        started_at,
+    )
+    .await
+    {
+        Ok(id) => id as u64,
+        Err(e) => {
+            tracing::error!("Failed to create initial request log: {}", e);
+            return error(StatusCode::INTERNAL_SERVER_ERROR, "Failed to initialize request log");
+        }
+    };
+
+    let cancel_rx = state.in_flight.register(request_id);
+    let started_at_rfc3339 = chrono::DateTime::from_timestamp_millis(started_at)
+        .map(|dt| dt.to_rfc3339())
+        .unwrap_or_default();
+    state.in_flight.broadcast(RequestOverview {
+        id:             request_id,
+        status:         "running".to_string(),
+        started_at:     started_at_rfc3339.clone(),
+        duration:       0,
+        model:          metadata.model.clone(),
+        usage:          Usage::default(),
+        cost:           0.0,
+        round:          1,
+        target_channel: String::new(),
+        target_model:   String::new(),
+        sending:        false,
+        error:          None,
+        rounds:         Vec::new(),
+    });
+
     let max_attempts = group_obj.relay_config.member_max_attempts.max(1);
 
     let mut round = 0;
@@ -898,10 +936,7 @@ pub async fn forward_relay(
     let mut rounds: Vec<crate::model::RoundLog> = Vec::new();
 
     while round < max_attempts {
-        let cancel_rx = state.request_state_manager.get_cancel_receiver(request_id);
-        if let Some(rx) = &cancel_rx
-            && *rx.borrow()
-        {
+        if *cancel_rx.borrow() {
             last_error_body = "request interrupted".to_string();
             last_status = StatusCode::from_u16(499).unwrap_or(StatusCode::BAD_REQUEST);
             break;
@@ -953,9 +988,21 @@ pub async fn forward_relay(
             .unwrap_or_else(|_| request_headers.clone());
         let rewritten_body_str = String::from_utf8_lossy(&final_body).to_string();
 
-        state
-            .request_state_manager
-            .update_round(request_id, round, ch.name.clone(), channel_model.name.clone(), true);
+        state.in_flight.broadcast(RequestOverview {
+            id: request_id,
+            status: "running".to_string(),
+            started_at: started_at_rfc3339.clone(),
+            duration: start_time.elapsed().as_millis() as i64,
+            model: metadata.model.clone(),
+            usage: Usage::default(),
+            cost: 0.0,
+            round,
+            target_channel: ch.name.clone(),
+            target_model: channel_model.name.clone(),
+            sending: true,
+            error: None,
+            rounds: rounds.clone(),
+        });
 
         let timeout_secs = if metadata.stream {
             None
@@ -1158,24 +1205,18 @@ pub async fn forward_relay(
         }
 
         if round < max_attempts && current_group.relay_config.member_retry_interval_seconds > 0 {
-            if let Some(mut rx) = cancel_rx.clone() {
-                tokio::select! {
-                    _ = rx.changed() => {
-                        if *rx.borrow() {
-                            last_error_body = "request interrupted".to_string();
-                            last_status = StatusCode::from_u16(499).unwrap_or(StatusCode::BAD_REQUEST);
-                            break;
-                        }
+            let mut rx = cancel_rx.clone();
+            tokio::select! {
+                _ = rx.changed() => {
+                    if *rx.borrow() {
+                        last_error_body = "request interrupted".to_string();
+                        last_status = StatusCode::from_u16(499).unwrap_or(StatusCode::BAD_REQUEST);
+                        break;
                     }
-                    _ = tokio::time::sleep(tokio::time::Duration::from_secs(
-                        current_group.relay_config.member_retry_interval_seconds as u64,
-                    )) => {}
                 }
-            } else {
-                tokio::time::sleep(tokio::time::Duration::from_secs(
+                _ = tokio::time::sleep(tokio::time::Duration::from_secs(
                     current_group.relay_config.member_retry_interval_seconds as u64,
-                ))
-                .await;
+                )) => {}
             }
         }
     }
