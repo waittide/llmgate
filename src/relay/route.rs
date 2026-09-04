@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
@@ -46,13 +46,26 @@ impl RouteManager {
         })
     }
 
+    #[allow(dead_code)]
     pub fn pick_group_item(&self, group: &Group) -> Option<GroupItem> {
+        self.pick_candidate_item(group, &HashSet::new())
+    }
+
+    pub fn pick_candidate_item(&self, group: &Group, attempted_items: &HashSet<i64>) -> Option<GroupItem> {
         if group.mode == GroupMode::Manual {
+            // Prefer active_item if not yet attempted in this request
+            if let Some(item) = group
+                .items
+                .iter()
+                .find(|item| item.id == group.active_item_id && !attempted_items.contains(&item.id))
+            {
+                return Some(item.clone());
+            }
+            // Failover to other unattempted items in the manual group if active item failed
             return group
                 .items
                 .iter()
-                .find(|item| item.id == group.active_item_id)
-                .or_else(|| group.items.first())
+                .find(|item| !attempted_items.contains(&item.id))
                 .cloned();
         }
 
@@ -60,8 +73,11 @@ impl RouteManager {
         let route = entry.value_mut();
         let now = chrono::Utc::now().timestamp_millis();
 
-        // Pick highest priority available item (group.items are pre-sorted by priority ASC)
+        // Pick highest priority available item not yet attempted in this request
         for item in &group.items {
+            if attempted_items.contains(&item.id) {
+                continue;
+            }
             if let Some(&deadline) = route.cooldowns.get(&item.id)
                 && deadline > now
             {
@@ -75,10 +91,11 @@ impl RouteManager {
             return Some(item.clone());
         }
 
-        // If all items are temporarily in cooldown, probe the one with the earliest expiring cooldown
+        // If all available items are in cooldown, probe the unattempted one with earliest expiring cooldown
         if let Some(item) = group
             .items
             .iter()
+            .filter(|item| !attempted_items.contains(&item.id))
             .min_by_key(|item| route.cooldowns.get(&item.id).copied().unwrap_or(0))
         {
             if route.current_item_id != item.id {
@@ -180,5 +197,50 @@ mod tests {
             ..group_unselected
         };
         assert!(manager.pick_group_item(&group_empty).is_none());
+    }
+
+    #[test]
+    fn test_pick_candidate_item_excludes_attempted() {
+        let manager = RouteManager::new();
+        let group = Group {
+            id:             1,
+            name:           "test-failover".to_string(),
+            mode:           GroupMode::Failover,
+            active_item_id: 0,
+            items:          vec![
+                GroupItem {
+                    id:               101,
+                    group_id:         1,
+                    channel_model_id: 1,
+                    channel_model:    None,
+                    priority:         1,
+                },
+                GroupItem {
+                    id:               102,
+                    group_id:         1,
+                    channel_model_id: 2,
+                    channel_model:    None,
+                    priority:         2,
+                },
+            ],
+            relay_config:   Default::default(),
+        };
+
+        // pick_group_item defaults to empty attempted_items
+        assert_eq!(manager.pick_group_item(&group).unwrap().id, 101);
+
+        let mut attempted = HashSet::new();
+        // First pick: item 101
+        let first = manager.pick_candidate_item(&group, &attempted).unwrap();
+        assert_eq!(first.id, 101);
+
+        // Mark 101 attempted
+        attempted.insert(101);
+        let second = manager.pick_candidate_item(&group, &attempted).unwrap();
+        assert_eq!(second.id, 102);
+
+        // Mark 102 attempted -> None
+        attempted.insert(102);
+        assert!(manager.pick_candidate_item(&group, &attempted).is_none());
     }
 }

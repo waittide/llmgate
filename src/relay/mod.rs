@@ -6,6 +6,7 @@ pub mod stream;
 pub mod upstream;
 
 use std::{
+    collections::HashSet,
     future::Future,
     pin::Pin,
     sync::Arc,
@@ -953,6 +954,7 @@ pub async fn forward_relay(
     let mut last_status = StatusCode::BAD_GATEWAY;
     let mut last_error_body = String::new();
     let mut rounds: Vec<crate::model::RoundLog> = Vec::new();
+    let mut attempted_items = HashSet::new();
 
     while round < max_attempts {
         if *cancel_rx.borrow() {
@@ -968,16 +970,16 @@ pub async fn forward_relay(
             Err(_) => break,
         };
 
-        let item = match state.route_manager.pick_group_item(&current_group) {
+        let item = match state
+            .route_manager
+            .pick_candidate_item(&current_group, &attempted_items)
+        {
             Some(it) => it,
             None => {
-                if current_group.items.is_empty() {
-                    break;
-                }
-                tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-                continue;
+                break;
             }
         };
+        attempted_items.insert(item.id);
 
         let channel_model = match state.channel_models.get(&item.channel_model_id) {
             Some(cm) => cm.clone(),
