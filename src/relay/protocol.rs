@@ -1000,6 +1000,39 @@ pub fn anthropic_sse_event_to_openai_chunk(
     let val: serde_json::Value = serde_json::from_str(data_str).ok()?;
 
     match event_type {
+        "message_start" => {
+            if let Some(usage) = val.pointer("/message/usage") {
+                let prompt_tokens = usage
+                    .get("input_tokens")
+                    .and_then(Value::as_i64)
+                    .unwrap_or(0);
+                let completion_tokens = usage
+                    .get("output_tokens")
+                    .and_then(Value::as_i64)
+                    .unwrap_or(0);
+                let total_tokens = prompt_tokens + completion_tokens;
+                let chunk = serde_json::json!({
+                    "id": chatcmpl_id,
+                    "object": "chat.completion.chunk",
+                    "created": created,
+                    "model": model_name,
+                    "choices": [{
+                        "index": 0,
+                        "delta": {},
+                        "finish_reason": null
+                    }],
+                    "usage": {
+                        "prompt_tokens": prompt_tokens,
+                        "completion_tokens": completion_tokens,
+                        "total_tokens": total_tokens
+                    }
+                });
+                return Some(format!(
+                    "data: {}\n\n",
+                    serde_json::to_string(&chunk).unwrap_or_default()
+                ));
+            }
+        }
         "content_block_start" => {
             let index = val.get("index").and_then(Value::as_u64).unwrap_or(0);
             if let Some(cb) = val.get("content_block")
@@ -1558,7 +1591,11 @@ pub fn calculate_cost(prompt_tokens: i64, completion_tokens: i64, price: Option<
 pub fn extract_usage_from_json(val: &Value) -> Option<Usage> {
     // OpenAI-style `usage` object: prompt_tokens / completion_tokens / total_tokens
     // (also accepted via the Responses aliases input_tokens / output_tokens).
-    if let Some(usage_obj) = val.get("usage") {
+    let usage_candidate = val
+        .get("usage")
+        .or_else(|| val.pointer("/response/usage"))
+        .or_else(|| val.pointer("/message/usage"));
+    if let Some(usage_obj) = usage_candidate {
         let prompt_tokens = usage_obj
             .get("prompt_tokens")
             .or_else(|| usage_obj.get("input_tokens"))
@@ -2016,6 +2053,32 @@ mod tests {
             anthropic_sse_event_to_openai_chunk(message_delta, "claude-3-5-sonnet", 1700000000, "chatcmpl-test")
                 .unwrap();
         assert!(chunk3.contains("tool_calls"));
+    }
+
+    #[test]
+    fn test_anthropic_sse_event_message_start_usage() {
+        let start_event = "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"usage\":{\"input_tokens\":42,\"output_tokens\":0}}}\n\n";
+        let chunk =
+            anthropic_sse_event_to_openai_chunk(start_event, "claude-3-5-sonnet", 1700000000, "chatcmpl-test").unwrap();
+        assert!(chunk.contains("\"prompt_tokens\":42"));
+    }
+
+    #[test]
+    fn test_extract_usage_nested_response() {
+        let responses_json = serde_json::json!({
+            "type": "response.completed",
+            "response": {
+                "usage": {
+                    "input_tokens": 15,
+                    "output_tokens": 30,
+                    "total_tokens": 45
+                }
+            }
+        });
+        let usage = extract_usage_from_json(&responses_json).unwrap();
+        assert_eq!(usage.prompt_tokens, 15);
+        assert_eq!(usage.completion_tokens, 30);
+        assert_eq!(usage.total_tokens, 45);
     }
 
     #[test]

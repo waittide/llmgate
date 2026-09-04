@@ -261,9 +261,14 @@ impl<S> OpenaiToAnthropicStream<S> {
         } else {
             "end_turn"
         };
+        let output_tokens = self
+            .usage
+            .as_ref()
+            .map(|u| u.completion_tokens)
+            .unwrap_or(0);
         self.push(
             "message_delta",
-            json!({ "delta": { "stop_reason": stop_reason, "stop_sequence": null }, "usage": { "output_tokens": 0 } }),
+            json!({ "delta": { "stop_reason": stop_reason, "stop_sequence": null }, "usage": { "output_tokens": output_tokens } }),
         );
         self.push("message_stop", json!({}));
     }
