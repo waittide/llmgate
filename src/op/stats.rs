@@ -86,127 +86,144 @@ pub async fn refresh_stats_cache(state: &AppState) -> Result<()> {
     Ok(())
 }
 
-pub fn record_metrics(state: &AppState, api_key_id: i64, channel_id: i64, channel_model_id: i64, delta: &StatsMetrics) {
-    let now = chrono::Local::now();
-    let now_date = now.format("%Y%m%d").to_string();
-    let current_hour = now.format("%H").to_string().parse::<usize>().unwrap_or(0);
+fn today_date() -> String {
+    chrono::Local::now().format("%Y%m%d").to_string()
+}
 
-    // 1. 在单次写锁中原子更新总计、今日与当前小时统计
+/// 若内存统计仍停留在前一天，先结转：重置今日与小时统计，并将前一天数据异步落盘。
+/// record_metrics（有新流量时）与 flush_stats_to_db（定时）都会调用，保证跨天翻转不依赖流量。
+fn rollover_daily_if_needed(state: &AppState, now_date: &str) {
+    let (prev_daily, prev_hourlies) = {
+        let mut stats = state.stats.write();
+        if stats.daily.date == now_date {
+            return;
+        }
+        let prev_daily = stats.daily.clone();
+        let prev_hourlies: Vec<StatsHourly> = stats
+            .hourly
+            .iter()
+            .filter(|h| {
+                h.date != now_date
+                    && (h.metrics.input_token > 0
+                        || h.metrics.output_token > 0
+                        || h.metrics.request_success > 0
+                        || h.metrics.request_failed > 0)
+            })
+            .cloned()
+            .collect();
+
+        stats.daily.date = now_date.to_string();
+        stats.daily.metrics = StatsMetrics::default();
+        for (i, h) in stats.hourly.iter_mut().enumerate() {
+            *h = StatsHourly {
+                hour:    i as i64,
+                date:    now_date.to_string(),
+                metrics: StatsMetrics::default(),
+            };
+        }
+        (prev_daily, prev_hourlies)
+    };
+
+    // 写锁外异步落盘，不阻塞统计写入
+    let db = state.db.clone();
+    tokio::spawn(async move {
+        let mut tx = match db.begin().await {
+            Ok(tx) => tx,
+            Err(e) => {
+                tracing::error!("开启每日统计结转事务失败: {}", e);
+                return;
+            }
+        };
+
+        let res = sqlx::query(
+            r#"
+            INSERT INTO stats_dailies (date, input_token, output_token, input_cost, output_cost, wait_time, request_success, request_failed)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(date) DO UPDATE SET
+                input_token = excluded.input_token,
+                output_token = excluded.output_token,
+                input_cost = excluded.input_cost,
+                output_cost = excluded.output_cost,
+                wait_time = excluded.wait_time,
+                request_success = excluded.request_success,
+                request_failed = excluded.request_failed
+            "#,
+        )
+        .bind(&prev_daily.date)
+        .bind(prev_daily.metrics.input_token)
+        .bind(prev_daily.metrics.output_token)
+        .bind(prev_daily.metrics.input_cost)
+        .bind(prev_daily.metrics.output_cost)
+        .bind(prev_daily.metrics.wait_time)
+        .bind(prev_daily.metrics.request_success)
+        .bind(prev_daily.metrics.request_failed)
+        .execute(&mut *tx)
+        .await;
+
+        if let Err(e) = res {
+            tracing::error!("写入结转的每日统计失败: {}", e);
+            return;
+        }
+
+        for h in prev_hourlies {
+            let _ = sqlx::query(
+                r#"
+                INSERT INTO stats_hourlies (hour, date, input_token, output_token, input_cost, output_cost, wait_time, request_success, request_failed)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(hour, date) DO UPDATE SET
+                    input_token = excluded.input_token,
+                    output_token = excluded.output_token,
+                    input_cost = excluded.input_cost,
+                    output_cost = excluded.output_cost,
+                    wait_time = excluded.wait_time,
+                    request_success = excluded.request_success,
+                    request_failed = excluded.request_failed
+                "#,
+            )
+            .bind(h.hour)
+            .bind(&h.date)
+            .bind(h.metrics.input_token)
+            .bind(h.metrics.output_token)
+            .bind(h.metrics.input_cost)
+            .bind(h.metrics.output_cost)
+            .bind(h.metrics.wait_time)
+            .bind(h.metrics.request_success)
+            .bind(h.metrics.request_failed)
+            .execute(&mut *tx)
+            .await;
+        }
+
+        if let Err(e) = tx.commit().await {
+            tracing::error!("提交每日统计结转事务失败: {}", e);
+        }
+    });
+}
+pub fn record_metrics(state: &AppState, api_key_id: i64, channel_id: i64, channel_model_id: i64, delta: &StatsMetrics) {
+    let now_date = today_date();
+    let current_hour = chrono::Local::now()
+        .format("%H")
+        .to_string()
+        .parse::<usize>()
+        .unwrap_or(0);
+
+    // 0. 跨天先结转（独立写锁；落盘在锁外异步执行）
+    rollover_daily_if_needed(state, &now_date);
+
+    // 1. 原子更新总计、今日与当前小时统计
     {
         let mut stats = state.stats.write();
         stats.total.metrics.add(delta);
-
-        // 若跨越到新的一天，在重置前先将前一天的统计落盘
-        if stats.daily.date != now_date {
-            let prev_daily = stats.daily.clone();
-            let prev_hourlies: Vec<StatsHourly> = stats
-                .hourly
-                .iter()
-                .filter(|h| {
-                    h.date != now_date
-                        && (h.metrics.input_token > 0
-                            || h.metrics.output_token > 0
-                            || h.metrics.request_success > 0
-                            || h.metrics.request_failed > 0)
-                })
-                .cloned()
-                .collect();
-
-            stats.daily.date = now_date.clone();
-            stats.daily.metrics = StatsMetrics::default();
-
-            for (i, h) in stats.hourly.iter_mut().enumerate() {
-                *h = StatsHourly {
-                    hour:    i as i64,
-                    date:    now_date.clone(),
-                    metrics: StatsMetrics::default(),
-                };
-            }
-
-            let db = state.db.clone();
-            tokio::spawn(async move {
-                let mut tx = match db.begin().await {
-                    Ok(tx) => tx,
-                    Err(e) => {
-                        tracing::error!("开启每日统计结转事务失败: {}", e);
-                        return;
-                    }
-                };
-
-                let res = sqlx::query(
-                    r#"
-                    INSERT INTO stats_dailies (date, input_token, output_token, input_cost, output_cost, wait_time, request_success, request_failed)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                    ON CONFLICT(date) DO UPDATE SET
-                        input_token = excluded.input_token,
-                        output_token = excluded.output_token,
-                        input_cost = excluded.input_cost,
-                        output_cost = excluded.output_cost,
-                        wait_time = excluded.wait_time,
-                        request_success = excluded.request_success,
-                        request_failed = excluded.request_failed
-                    "#,
-                )
-                .bind(&prev_daily.date)
-                .bind(prev_daily.metrics.input_token)
-                .bind(prev_daily.metrics.output_token)
-                .bind(prev_daily.metrics.input_cost)
-                .bind(prev_daily.metrics.output_cost)
-                .bind(prev_daily.metrics.wait_time)
-                .bind(prev_daily.metrics.request_success)
-                .bind(prev_daily.metrics.request_failed)
-                .execute(&mut *tx)
-                .await;
-
-                if let Err(e) = res {
-                    tracing::error!("写入结转的每日统计失败: {}", e);
-                    return;
-                }
-
-                for h in prev_hourlies {
-                    let _ = sqlx::query(
-                        r#"
-                        INSERT INTO stats_hourlies (hour, date, input_token, output_token, input_cost, output_cost, wait_time, request_success, request_failed)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                        ON CONFLICT(hour, date) DO UPDATE SET
-                            input_token = excluded.input_token,
-                            output_token = excluded.output_token,
-                            input_cost = excluded.input_cost,
-                            output_cost = excluded.output_cost,
-                            wait_time = excluded.wait_time,
-                            request_success = excluded.request_success,
-                            request_failed = excluded.request_failed
-                        "#,
-                    )
-                    .bind(h.hour)
-                    .bind(&h.date)
-                    .bind(h.metrics.input_token)
-                    .bind(h.metrics.output_token)
-                    .bind(h.metrics.input_cost)
-                    .bind(h.metrics.output_cost)
-                    .bind(h.metrics.wait_time)
-                    .bind(h.metrics.request_success)
-                    .bind(h.metrics.request_failed)
-                    .execute(&mut *tx)
-                    .await;
-                }
-
-                if let Err(e) = tx.commit().await {
-                    tracing::error!("提交每日统计结转事务失败: {}", e);
-                }
-            });
-        }
         stats.daily.metrics.add(delta);
 
         if current_hour < 24 {
             if stats.hourly[current_hour].date != now_date {
-                stats.hourly[current_hour].date = now_date;
+                stats.hourly[current_hour].date = now_date.clone();
                 stats.hourly[current_hour].metrics = StatsMetrics::default();
             }
             stats.hourly[current_hour].metrics.add(delta);
         }
     }
-    // 4. 更新 API Key 内存统计
+    // 2. 更新 API Key 内存统计
     if api_key_id > 0 {
         state
             .stats_api_keys
@@ -219,7 +236,7 @@ pub fn record_metrics(state: &AppState, api_key_id: i64, channel_id: i64, channe
             .add(delta);
     }
 
-    // 5. 更新渠道及渠道模型内存指标
+    // 3. 更新渠道及渠道模型内存指标
     if let Some(mut ch) = state.channels.get_mut(&channel_id) {
         ch.metrics.add(delta);
     }
@@ -283,6 +300,8 @@ pub fn list_stats_api_keys(state: &AppState) -> Vec<StatsAPIKey> {
 }
 
 pub async fn flush_stats_to_db(state: &AppState) -> Result<()> {
+    // 落盘前先处理跨天结转：零流量时 /stats/today 也能及时翻转
+    rollover_daily_if_needed(state, &today_date());
     let mut tx = state.db.begin().await?;
 
     // 1. 落盘总计统计
