@@ -35,7 +35,7 @@ use crate::{
         upstream::{build_upstream_request, get_client, normalize_base_url},
     },
     server::{middleware::AuthContext, resp::error},
-    utils::estimate_tokens,
+    utils::{estimate_tokens, truncate_utf8},
 };
 /// 流式响应体内存捕获上限（64KB），用于防止大体量日志撑爆存储。
 const RESPONSE_CAPTURE_LIMIT: usize = 64 * 1024;
@@ -688,7 +688,8 @@ async fn handle_successful_json(
         .and_then(|val| serde_json::to_vec(val).ok())
         .map(Bytes::from)
         .unwrap_or(raw_bytes);
-    let resp_str = String::from_utf8_lossy(&resp_bytes).to_string();
+    // 入库用截断版本，避免大响应撑爆 request_logs；返回给客户端的 resp_bytes 不受影响
+    let resp_str = truncate_utf8(&String::from_utf8_lossy(&resp_bytes), RESPONSE_CAPTURE_LIMIT).to_string();
 
     let usage = converted
         .as_ref()
@@ -1167,7 +1168,9 @@ pub async fn forward_relay(
                     }
                 } else {
                     let resp_headers = serialize_headers(upstream_resp.headers());
-                    let err_body = upstream_resp.text().await.unwrap_or_default();
+                    let err_body =
+                        truncate_utf8(&upstream_resp.text().await.unwrap_or_default(), RESPONSE_CAPTURE_LIMIT)
+                            .to_string();
                     let round_duration_ms = round_start_time.elapsed().as_millis() as i64;
                     last_target_channel = ch.name.clone();
                     last_target_model = channel_model.name.clone();

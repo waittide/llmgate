@@ -10,3 +10,15 @@ pub fn estimate_tokens(text: &str) -> i64 {
     let char_count = text.chars().count();
     (char_count as f64 / 3.0).ceil() as i64
 }
+
+/// 按字节上限截断字符串（UTF-8 边界安全），用于限制入库的报文体大小。
+pub fn truncate_utf8(s: &str, limit: usize) -> &str {
+    if s.len() <= limit {
+        return s;
+    }
+    let mut end = limit;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    &s[..end]
+}
