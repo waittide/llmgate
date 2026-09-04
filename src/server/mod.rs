@@ -52,12 +52,12 @@ pub fn build_router(state: AppState) -> Router {
         .route("/apikey/update", post(apikey::update_api_key))
         .route("/apikey/delete/{id}", delete(apikey::delete_api_key))
         // 模型管理
-        .route("/model/list", get(model::list_llm))
-        .route("/model/create", post(model::create_llm))
-        .route("/model/update", post(model::update_llm))
-        .route("/model/delete", post(model::delete_llm))
-        .route("/model/update-price", post(model::update_llm_price))
-        .route("/model/rebuild-price", post(model::rebuild_llm_price))
+        .route("/model/list", get(model::list_model))
+        .route("/model/create", post(model::create_model))
+        .route("/model/update", post(model::update_model))
+        .route("/model/delete", post(model::delete_model))
+        .route("/model/update-price", post(model::update_model_price))
+        .route("/model/rebuild-price", post(model::rebuild_model_price))
         .route("/model/last-update-time", get(model::get_last_update_time))
         // 系统设置
         .route("/setting/list", get(setting::get_setting_list))
@@ -95,7 +95,7 @@ pub fn build_router(state: AppState) -> Router {
         .merge(admin_router)
         .merge(apikey_dashboard_router);
 
-    // 5. 客户端 LLM 代理中继路由 /v1（受 api_key_auth_middleware 保护）
+    // 5. 客户端模型代理中继路由 /v1（受 api_key_auth_middleware 保护）
     let client_v1 = Router::new()
         .route("/models", get(model::get_model_list))
         .route("/chat/completions", post(relay::chat_completions))

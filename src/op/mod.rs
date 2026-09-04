@@ -2,8 +2,8 @@ pub mod apikey;
 pub mod backup;
 pub mod channel;
 pub mod group;
-pub mod llm;
 pub mod log;
+pub mod model;
 pub mod setting;
 pub mod stats;
 pub mod user;
@@ -18,8 +18,8 @@ use tracing::info;
 use crate::{
     db::DbPool,
     model::{
-        APIKey, Channel, ChannelModel, Group, LLMPrice, StatsAPIKey, StatsDaily, StatsHourly, StatsMetrics, StatsTotal,
-        SystemStats,
+        APIKey, Channel, ChannelModel, Group, ModelPrice, StatsAPIKey, StatsDaily, StatsHourly, StatsMetrics,
+        StatsTotal, SystemStats,
     },
     relay::{route::RouteManager, state::InFlightRegistry},
 };
@@ -46,7 +46,7 @@ pub struct AppState {
     // 用 RwLock 包整块做原子快照，而不是两个 DashMap 各自为政。
     pub groups:         Arc<RwLock<GroupCache>>,
     pub api_keys:       Arc<RwLock<ApiKeyCache>>,
-    pub llm_prices:     Arc<DashMap<String, LLMPrice>>,
+    pub model_prices:   Arc<DashMap<String, ModelPrice>>,
     pub settings:       Arc<DashMap<String, String>>,
     pub stats:          Arc<RwLock<SystemStats>>,
     pub stats_api_keys: Arc<DashMap<i64, StatsAPIKey>>,
@@ -73,7 +73,7 @@ impl AppState {
             channel_models: Arc::new(DashMap::new()),
             groups:         Arc::new(RwLock::new(GroupCache::default())),
             api_keys:       Arc::new(RwLock::new(ApiKeyCache::default())),
-            llm_prices:     Arc::new(DashMap::new()),
+            model_prices:   Arc::new(DashMap::new()),
             settings:       Arc::new(DashMap::new()),
             stats:          Arc::new(RwLock::new(SystemStats {
                 total:  StatsTotal {
@@ -104,7 +104,7 @@ impl AppState {
         apikey::refresh_apikey_cache(self).await?;
         channel::refresh_channel_cache(self).await?;
         group::refresh_group_cache(self).await?;
-        llm::refresh_llm_cache(self).await?;
+        model::refresh_model_cache(self).await?;
         Ok(())
     }
 }

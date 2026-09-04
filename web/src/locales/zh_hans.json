@@ -241,7 +241,7 @@
         "failed": "价格数据重建失败"
       }
     },
-    "llmSync": {
+    "modelSync": {
       "title": "渠道同步",
       "syncInterval": {
         "label": "自动同步间隔（小时）",

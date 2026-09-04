@@ -2,19 +2,19 @@ use anyhow::{Result, anyhow};
 use sqlx::Row;
 
 use crate::{
-    model::{LLMInfo, LLMPrice},
+    model::{ModelInfo, ModelPrice},
     op::AppState,
 };
 
-pub async fn refresh_llm_cache(state: &AppState) -> Result<()> {
-    let rows = sqlx::query("SELECT name, input, output, cache_read, cache_write FROM llm_infos")
+pub async fn refresh_model_cache(state: &AppState) -> Result<()> {
+    let rows = sqlx::query("SELECT name, input, output, cache_read, cache_write FROM model_infos")
         .fetch_all(&state.db)
         .await?;
 
     let mut local_prices = std::collections::HashMap::new();
     for row in rows {
         let name: String = row.get("name");
-        let price = LLMPrice {
+        let price = ModelPrice {
             input:       row.get("input"),
             output:      row.get("output"),
             cache_read:  row.get("cache_read"),
@@ -24,17 +24,19 @@ pub async fn refresh_llm_cache(state: &AppState) -> Result<()> {
     }
     // 原子同步内存缓存，避免留出空窗期
     for (k, v) in &local_prices {
-        state.llm_prices.insert(k.clone(), v.clone());
+        state.model_prices.insert(k.clone(), v.clone());
     }
-    state.llm_prices.retain(|k, _| local_prices.contains_key(k));
+    state
+        .model_prices
+        .retain(|k, _| local_prices.contains_key(k));
     Ok(())
 }
 
-pub fn list_llm_infos(state: &AppState) -> Vec<LLMInfo> {
-    let mut list: Vec<LLMInfo> = state
-        .llm_prices
+pub fn list_model_infos(state: &AppState) -> Vec<ModelInfo> {
+    let mut list: Vec<ModelInfo> = state
+        .model_prices
         .iter()
-        .map(|entry| LLMInfo {
+        .map(|entry| ModelInfo {
             name:  entry.key().clone(),
             price: entry.value().clone(),
         })
@@ -43,20 +45,20 @@ pub fn list_llm_infos(state: &AppState) -> Vec<LLMInfo> {
     list
 }
 
-pub fn get_llm_price(state: &AppState, model_name: &str) -> Option<LLMPrice> {
+pub fn get_model_price(state: &AppState, model_name: &str) -> Option<ModelPrice> {
     let lower = model_name.to_lowercase();
-    if let Some(p) = state.llm_prices.get(&lower) {
+    if let Some(p) = state.model_prices.get(&lower) {
         return Some(p.clone());
     }
     crate::task::price::get_catalog_price(&lower)
 }
 
-pub async fn batch_create_llm_infos(state: &AppState, infos: Vec<LLMInfo>) -> Result<()> {
+pub async fn batch_create_model_infos(state: &AppState, infos: Vec<ModelInfo>) -> Result<()> {
     for info in infos {
         let name_lower = info.name.to_lowercase();
         sqlx::query(
             r#"
-            INSERT INTO llm_infos (name, input, output, cache_read, cache_write)
+            INSERT INTO model_infos (name, input, output, cache_read, cache_write)
             VALUES (?, ?, ?, ?, ?)
             ON CONFLICT(name) DO UPDATE SET
                 input = excluded.input,
@@ -73,16 +75,16 @@ pub async fn batch_create_llm_infos(state: &AppState, infos: Vec<LLMInfo>) -> Re
         .execute(&state.db)
         .await?;
 
-        state.llm_prices.insert(name_lower, info.price);
+        state.model_prices.insert(name_lower, info.price);
     }
     Ok(())
 }
 
-pub async fn update_llm_info(state: &AppState, info: &LLMInfo) -> Result<()> {
+pub async fn update_model_info(state: &AppState, info: &ModelInfo) -> Result<()> {
     let name_lower = info.name.to_lowercase();
     sqlx::query(
         r#"
-        UPDATE llm_infos
+        UPDATE model_infos
         SET input = ?, output = ?, cache_read = ?, cache_write = ?
         WHERE name = ?
         "#,
@@ -95,11 +97,11 @@ pub async fn update_llm_info(state: &AppState, info: &LLMInfo) -> Result<()> {
     .execute(&state.db)
     .await?;
 
-    state.llm_prices.insert(name_lower, info.price.clone());
+    state.model_prices.insert(name_lower, info.price.clone());
     Ok(())
 }
 
-pub async fn delete_llm_info(state: &AppState, name: &str) -> Result<()> {
+pub async fn delete_model_info(state: &AppState, name: &str) -> Result<()> {
     let name_lower = name.to_lowercase();
     // 检查是否仍被某个渠道模型引用
     for cm in state.channel_models.iter() {
@@ -108,21 +110,21 @@ pub async fn delete_llm_info(state: &AppState, name: &str) -> Result<()> {
         }
     }
 
-    sqlx::query("DELETE FROM llm_infos WHERE name = ?")
+    sqlx::query("DELETE FROM model_infos WHERE name = ?")
         .bind(&name_lower)
         .execute(&state.db)
         .await?;
 
-    state.llm_prices.remove(&name_lower);
+    state.model_prices.remove(&name_lower);
     Ok(())
 }
 
 pub async fn cleanup_ghosts(state: &AppState) -> Result<()> {
-    sqlx::query("DELETE FROM llm_infos WHERE LOWER(name) NOT IN (SELECT LOWER(name) FROM channel_models)")
+    sqlx::query("DELETE FROM model_infos WHERE LOWER(name) NOT IN (SELECT LOWER(name) FROM channel_models)")
         .execute(&state.db)
         .await?;
 
-    refresh_llm_cache(state).await?;
+    refresh_model_cache(state).await?;
     Ok(())
 }
 
@@ -134,30 +136,30 @@ mod tests {
 
     #[tokio::test]
     async fn test_cleanup_ghosts_removes_ghosts_from_db_and_cache() {
-        let (state, db_path) = setup_test_state("llm").await;
+        let (state, db_path) = setup_test_state("model").await;
 
         // 插入一个有效模型价格与一个无引用的幽灵模型价格
         let infos = vec![
-            LLMInfo {
+            ModelInfo {
                 name:  "valid-model".to_string(),
-                price: LLMPrice {
+                price: ModelPrice {
                     input: 1.0,
                     output: 2.0,
                     ..Default::default()
                 },
             },
-            LLMInfo {
+            ModelInfo {
                 name:  "ghost-model".to_string(),
-                price: LLMPrice {
+                price: ModelPrice {
                     input: 3.0,
                     output: 4.0,
                     ..Default::default()
                 },
             },
         ];
-        batch_create_llm_infos(&state, infos).await.unwrap();
-        assert!(state.llm_prices.contains_key("ghost-model"));
-        assert!(state.llm_prices.contains_key("valid-model"));
+        batch_create_model_infos(&state, infos).await.unwrap();
+        assert!(state.model_prices.contains_key("ghost-model"));
+        assert!(state.model_prices.contains_key("valid-model"));
 
         // 模拟创建引用 "valid-model" 的渠道模型
         let ch_res = sqlx::query(
@@ -177,10 +179,10 @@ mod tests {
         cleanup_ghosts(&state).await.unwrap();
 
         // 幽灵模型应从数据库与内存缓存中一并删除
-        assert!(!state.llm_prices.contains_key("ghost-model"));
-        assert!(state.llm_prices.contains_key("valid-model"));
+        assert!(!state.model_prices.contains_key("ghost-model"));
+        assert!(state.model_prices.contains_key("valid-model"));
 
-        let count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM llm_infos WHERE name = 'ghost-model'")
+        let count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM model_infos WHERE name = 'ghost-model'")
             .fetch_one(&state.db)
             .await
             .unwrap();

@@ -1,9 +1,9 @@
 import { SettingAppearance } from './Appearance';
 import { SettingSystem } from './System';
 import { SettingAPIKey } from './APIKey';
-import { SettingLLMPrice } from './LLMPrice';
+import { SettingModelPrice } from './ModelPrice';
 import { SettingAccount } from './Account';
-import { SettingLLMSync } from './LLMSync';
+import { SettingModelSync } from './ModelSync';
 import { SettingLog } from './Log';
 import { SettingBackup } from './Backup';
 
@@ -16,9 +16,9 @@ export function Setting() {
                 <SettingAccount />
                 <SettingSystem />
                 <SettingLog />
-                <SettingLLMPrice />
+                <SettingModelPrice />
                 <SettingAPIKey />
-                <SettingLLMSync />
+                <SettingModelSync />
                 <SettingBackup />
             </div>
         </div>

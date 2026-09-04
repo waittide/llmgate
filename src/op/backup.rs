@@ -10,7 +10,7 @@ use crate::{
         apikey::list_api_keys,
         channel::list_channels,
         group::list_groups,
-        llm::list_llm_infos,
+        model::list_model_infos,
         setting::list_settings,
         stats::{get_stats_daily, get_stats_hourly, get_stats_total, list_stats_api_keys},
     },
@@ -27,7 +27,7 @@ pub async fn export_backup(state: &AppState) -> Result<BackupData> {
         .collect();
     let groups = list_groups(state);
     let group_items: Vec<_> = groups.iter().flat_map(|g| g.items.clone()).collect();
-    let llm_infos = list_llm_infos(state);
+    let model_infos = list_model_infos(state);
     let stats_total = Some(vec![get_stats_total(state)]);
     let stats_daily = get_stats_daily(state).await.unwrap_or_default();
     let stats_hourly = get_stats_hourly(state).to_vec();
@@ -42,7 +42,7 @@ pub async fn export_backup(state: &AppState) -> Result<BackupData> {
         channel_models,
         groups,
         group_items,
-        llm_infos,
+        model_infos,
         stats_total,
         stats_daily,
         stats_hourly,
@@ -362,13 +362,13 @@ pub async fn import_backup(state: &AppState, backup: BackupData) -> Result<DBImp
     }
     rows_affected.insert("group_items".to_string(), gi_count);
 
-    // 7. 模型价格信息 (LLM Infos)
-    let mut llm_count = 0;
-    for info in backup.llm_infos {
+    // 7. 模型价格信息 (模型价格信息)
+    let mut model_count = 0;
+    for info in backup.model_infos {
         let name_lower = info.name.to_lowercase();
         let res = sqlx::query(
             r#"
-            INSERT INTO llm_infos (name, input, output, cache_read, cache_write)
+            INSERT INTO model_infos (name, input, output, cache_read, cache_write)
             VALUES (?, ?, ?, ?, ?)
             ON CONFLICT(name) DO UPDATE SET
                 input = excluded.input,
@@ -387,10 +387,10 @@ pub async fn import_backup(state: &AppState, backup: BackupData) -> Result<DBImp
         if let Err(e) = &res {
             warn!("导入模型价格失败（name={}）: {}", name_lower, e);
         } else {
-            llm_count += 1;
+            model_count += 1;
         }
     }
-    rows_affected.insert("llm_infos".to_string(), llm_count);
+    rows_affected.insert("model_infos".to_string(), model_count);
 
     tx.commit().await?;
     state.refresh_all_caches().await?;

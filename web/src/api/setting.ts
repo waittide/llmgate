@@ -12,7 +12,7 @@ export interface Setting {
 export const SettingKey = {
     StatsSaveInterval: 'stats_save_interval',
     ModelInfoUpdateInterval: 'model_info_update_interval',
-    SyncLLMInterval: 'sync_llm_interval',
+    SyncModelInterval: 'sync_model_interval',
     CORSAllowOrigins: 'cors_allow_origins',
     LogRetentionDays: 'log_retention_days',
 } as const;

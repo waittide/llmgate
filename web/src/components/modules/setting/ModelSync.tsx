@@ -7,7 +7,7 @@ import { useSettingList, useSetSetting, SettingKey } from '@/api/setting';
 import { useLastSyncTime, useSyncChannel } from '@/api/channel';
 import { toast } from 'sonner';
 
-export function SettingLLMSync() {
+export function SettingModelSync() {
     const t = useTranslations('setting');
     const { data: settings } = useSettingList();
     const setSetting = useSetSetting();
@@ -19,7 +19,7 @@ export function SettingLLMSync() {
 
     useEffect(() => {
         if (settings) {
-            const interval = settings.find(s => s.key === SettingKey.SyncLLMInterval);
+            const interval = settings.find(s => s.key === SettingKey.SyncModelInterval);
             if (interval) {
                 queueMicrotask(() => setSyncInterval(interval.value));
                 initialSyncInterval.current = interval.value;
@@ -41,18 +41,18 @@ export function SettingLLMSync() {
     const handleManualSync = () => {
         syncChannel.mutate(undefined, {
             onSuccess: () => {
-                toast.success(t('llmSync.syncSuccess'));
+                toast.success(t('modelSync.syncSuccess'));
             },
             onError: () => {
-                toast.error(t('llmSync.syncFailed'));
+                toast.error(t('modelSync.syncFailed'));
             }
         });
     };
 
     const formatLastSyncTime = (timeStr: string | undefined) => {
-        if (!timeStr) return t('llmSync.neverSynced');
+        if (!timeStr) return t('modelSync.neverSynced');
         const date = new Date(Number(timeStr) * 1000);
-        if (date.getFullYear() === 1) return t('llmSync.neverSynced');
+        if (date.getFullYear() === 1) return t('modelSync.neverSynced');
         return date.toLocaleString();
     };
 
@@ -60,21 +60,21 @@ export function SettingLLMSync() {
         <div className="rounded-3xl border border-border bg-card p-6 space-y-5">
             <h2 className="text-lg font-bold text-card-foreground flex items-center gap-2">
                 <RefreshCw className="h-5 w-5" />
-                {t('llmSync.title')}
+                {t('modelSync.title')}
             </h2>
 
             {/* 同步间隔 */}
             <div className="flex items-center justify-between gap-4">
                 <div className="flex items-center gap-3">
                     <Clock className="h-5 w-5 text-muted-foreground" />
-                    <span className="text-sm font-medium">{t('llmSync.syncInterval.label')}</span>
+                    <span className="text-sm font-medium">{t('modelSync.syncInterval.label')}</span>
                 </div>
                 <Input
                     type="number"
                     value={syncInterval}
                     onChange={(e) => setSyncInterval(e.target.value)}
-                    onBlur={() => handleSave(SettingKey.SyncLLMInterval, syncInterval, initialSyncInterval.current)}
-                    placeholder={t('llmSync.syncInterval.placeholder')}
+                    onBlur={() => handleSave(SettingKey.SyncModelInterval, syncInterval, initialSyncInterval.current)}
+                    placeholder={t('modelSync.syncInterval.placeholder')}
                     className="w-48 rounded-xl"
                 />
             </div>
@@ -84,10 +84,10 @@ export function SettingLLMSync() {
                 <div className="flex flex-col gap-1">
                     <div className="flex items-center gap-3">
                         <RefreshCw className="h-5 w-5 text-muted-foreground" />
-                        <span className="text-sm font-medium">{t('llmSync.manualSync.label')}</span>
+                        <span className="text-sm font-medium">{t('modelSync.manualSync.label')}</span>
                     </div>
                     <span className="text-xs text-muted-foreground ml-8">
-                        {t('llmSync.lastSync')}: {formatLastSyncTime(lastSyncTime)}
+                        {t('modelSync.lastSync')}: {formatLastSyncTime(lastSyncTime)}
                     </span>
                 </div>
                 <Button
@@ -97,7 +97,7 @@ export function SettingLLMSync() {
                     disabled={syncChannel.isPending}
                     className="rounded-xl"
                 >
-                    {syncChannel.isPending ? t('llmSync.manualSync.syncing') : t('llmSync.manualSync.button')}
+                    {syncChannel.isPending ? t('modelSync.manualSync.syncing') : t('modelSync.manualSync.button')}
                 </Button>
             </div>
         </div>

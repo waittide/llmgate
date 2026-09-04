@@ -8,7 +8,7 @@ import { useSettingList, useSetSetting, SettingKey } from '@/api/setting';
 import { useRebuildModelPrice, useUpdateModelPrice, useLastUpdateTime } from '@/api/model';
 import { toast } from 'sonner';
 
-export function SettingLLMPrice() {
+export function SettingModelPrice() {
     const t = useTranslations('setting');
     const { data: settings } = useSettingList();
     const setSetting = useSetSetting();

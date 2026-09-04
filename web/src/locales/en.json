@@ -241,7 +241,7 @@
         "failed": "Failed to rebuild price data"
       }
     },
-    "llmSync": {
+    "modelSync": {
       "title": "Channel Sync",
       "syncInterval": {
         "label": "Auto Sync Interval (hours)",

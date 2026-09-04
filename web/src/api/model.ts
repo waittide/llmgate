@@ -3,9 +3,9 @@ import { apiRequest } from './client';
 import { modelListQueryOptions } from './queries';
 
 /**
- * LLM 价格信息
+ * 模型价格信息
  */
-export interface LLMPrice {
+export interface ModelPrice {
     input: number;
     output: number;
     cache_read: number;
@@ -13,14 +13,14 @@ export interface LLMPrice {
 }
 
 /**
- * LLM 模型信息
+ * 模型信息
  */
-export interface LLMInfo extends LLMPrice {
+export interface ModelInfo extends ModelPrice {
     name: string;
 }
 
 /**
- * 获取 LLM 模型列表 Hook
+ * 获取 模型列表 Hook
  * 
  * @example
  * const { data: models, isLoading, error } = useModelList();
@@ -39,7 +39,7 @@ export function useModelList() {
 }
 
 /**
- * 更新 LLM 模型 Hook
+ * 更新 模型 Hook
  * 
  * @example
  * const updateModel = useUpdateModel();
@@ -56,14 +56,14 @@ export function useUpdateModel() {
     const queryClient = useQueryClient();
 
     return useMutation({
-        mutationFn: (data: LLMInfo) =>
-            apiRequest<LLMInfo>('/api/v1/model/update', { method: 'POST', body: data }),
+        mutationFn: (data: ModelInfo) =>
+            apiRequest<ModelInfo>('/api/v1/model/update', { method: 'POST', body: data }),
         onSuccess: () => queryClient.invalidateQueries({ queryKey: modelListQueryOptions.queryKey }),
     });
 }
 
 /**
- * 创建 LLM 模型 Hook
+ * 创建 模型 Hook
  * 
  * @example
  * const createModel = useCreateModel();
@@ -80,14 +80,14 @@ export function useCreateModel() {
     const queryClient = useQueryClient();
 
     return useMutation({
-        mutationFn: (data: LLMInfo) =>
-            apiRequest<LLMInfo>('/api/v1/model/create', { method: 'POST', body: data }),
+        mutationFn: (data: ModelInfo) =>
+            apiRequest<ModelInfo>('/api/v1/model/create', { method: 'POST', body: data }),
         onSuccess: () => queryClient.invalidateQueries({ queryKey: modelListQueryOptions.queryKey }),
     });
 }
 
 /**
- * 删除 LLM 模型 Hook
+ * 删除 模型 Hook
  * 
  * @example
  * const deleteModel = useDeleteModel();
@@ -105,7 +105,7 @@ export function useDeleteModel() {
 }
 
 /**
- * 更新 LLM 模型价格 Hook
+ * 更新 模型价格 Hook
  * 
  * @example
  * const updatePrice = useUpdateModelPrice();
@@ -134,7 +134,7 @@ export function useRebuildModelPrice() {
 }
 
 /**
- * 获取 LLM 模型价格最后更新时间 Hook
+ * 获取 模型价格最后更新时间 Hook
  * 
  * @example
  * const { data: lastUpdateTime } = useLastUpdateTime();

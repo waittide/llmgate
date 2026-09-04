@@ -35,14 +35,14 @@ pub fn start_background_tasks(state: AppState) {
         if let Err(e) = sync::sync_all_channel_models(&state_sync).await {
             warn!("启动同步渠道模型失败: {}", e);
         }
-        if let Err(e) = price::update_llm_prices(&state_sync).await {
+        if let Err(e) = price::update_model_prices(&state_sync).await {
             warn!("启动更新模型价格失败: {}", e);
         }
 
         loop {
             let sync_hours = state_sync
                 .settings
-                .get("sync_llm_interval")
+                .get("sync_model_interval")
                 .and_then(|e| e.value().parse::<u64>().ok())
                 .filter(|v| *v > 0)
                 .unwrap_or(24);
@@ -59,7 +59,7 @@ pub fn start_background_tasks(state: AppState) {
             if let Err(e) = sync::sync_all_channel_models(&state_sync).await {
                 warn!("定时同步渠道模型失败: {}", e);
             }
-            if let Err(e) = price::update_llm_prices(&state_sync).await {
+            if let Err(e) = price::update_model_prices(&state_sync).await {
                 warn!("定时更新模型价格失败: {}", e);
             }
         }

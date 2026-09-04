@@ -23,8 +23,8 @@ use bytes::Bytes;
 use futures::{Stream, StreamExt};
 
 use crate::{
-    model::{Channel, ChannelModel, ChannelProvider, Group, LLMPrice, RequestLog, StatsMetrics, request_status},
-    op::{AppState, channel, group, llm, log, stats},
+    model::{Channel, ChannelModel, ChannelProvider, Group, ModelPrice, RequestLog, StatsMetrics, request_status},
+    op::{AppState, channel, group, log, model, stats},
     relay::{
         anthropic_stream::{OpenaiStreamFormat, OpenaiToAnthropicStream},
         protocol::{
@@ -67,7 +67,7 @@ struct StreamFinalizer<S> {
     api_key_id:       i64,
     channel_id:       i64,
     channel_model_id: i64,
-    price:            Option<LLMPrice>,
+    price:            Option<ModelPrice>,
     prompt_tokens:    i64,
     buffer:           Vec<u8>,
     output_bytes:     usize,
@@ -549,7 +549,7 @@ struct SuccessContext<'a> {
     body_str:         &'a str,
     round_start_time: Instant,
     start_time:       Instant,
-    price_opt:        Option<LLMPrice>,
+    price_opt:        Option<ModelPrice>,
     rounds:           Vec<crate::model::RoundLog>,
 }
 
@@ -1099,7 +1099,7 @@ pub async fn forward_relay(
                     state
                         .route_manager
                         .report_success(current_group.id, item.id);
-                    let price_opt = llm::get_llm_price(&state, &channel_model.name);
+                    let price_opt = model::get_model_price(&state, &channel_model.name);
 
                     let ctx = SuccessContext {
                         log_base: round_log_base,

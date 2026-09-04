@@ -9,46 +9,49 @@ use axum::{
 use serde::Deserialize;
 
 use crate::{
-    model::{AnthropicModel, AnthropicModelList, LLMInfo, OpenAIModel, OpenAIModelList},
-    op::{AppState, group, llm},
+    model::{AnthropicModel, AnthropicModelList, ModelInfo, OpenAIModel, OpenAIModelList},
+    op::{AppState, group, model},
     server::{
         middleware::AuthContext,
         resp::{error, msg_or_500, success, success_msg},
     },
 };
 
-pub async fn list_llm(State(state): State<AppState>) -> Response {
-    success(llm::list_llm_infos(&state))
+pub async fn list_model(State(state): State<AppState>) -> Response {
+    success(model::list_model_infos(&state))
 }
 
-pub async fn create_llm(State(state): State<AppState>, Json(payload): Json<LLMInfo>) -> Response {
-    msg_or_500(llm::batch_create_llm_infos(&state, vec![payload]).await, "模型已创建")
+pub async fn create_model(State(state): State<AppState>, Json(payload): Json<ModelInfo>) -> Response {
+    msg_or_500(
+        model::batch_create_model_infos(&state, vec![payload]).await,
+        "模型已创建",
+    )
 }
 
-pub async fn update_llm(State(state): State<AppState>, Json(payload): Json<LLMInfo>) -> Response {
-    msg_or_500(llm::update_llm_info(&state, &payload).await, "模型已更新")
+pub async fn update_model(State(state): State<AppState>, Json(payload): Json<ModelInfo>) -> Response {
+    msg_or_500(model::update_model_info(&state, &payload).await, "模型已更新")
 }
 
 #[derive(Deserialize)]
-pub struct DeleteLLMReq {
+pub struct DeleteModelReq {
     pub name: String,
 }
 
-pub async fn delete_llm(State(state): State<AppState>, Json(payload): Json<DeleteLLMReq>) -> Response {
-    match llm::delete_llm_info(&state, &payload.name).await {
+pub async fn delete_model(State(state): State<AppState>, Json(payload): Json<DeleteModelReq>) -> Response {
+    match model::delete_model_info(&state, &payload.name).await {
         Ok(_) => success_msg("模型已删除"),
         Err(e) => error(StatusCode::BAD_REQUEST, &e.to_string()),
     }
 }
 
-pub async fn update_llm_price(State(state): State<AppState>) -> Response {
+pub async fn update_model_price(State(state): State<AppState>) -> Response {
     msg_or_500(
-        crate::task::price::update_llm_prices(&state).await,
+        crate::task::price::update_model_prices(&state).await,
         "已从 models.dev 更新价格",
     )
 }
 
-pub async fn rebuild_llm_price(State(state): State<AppState>) -> Response {
+pub async fn rebuild_model_price(State(state): State<AppState>) -> Response {
     msg_or_500(crate::task::price::rebuild_all_prices(&state).await, "价格已重建")
 }
 

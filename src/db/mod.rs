@@ -35,6 +35,18 @@ pub async fn init_db(db_path: &Path) -> Result<DbPool> {
 }
 
 pub async fn migrate(pool: &DbPool) -> Result<()> {
+    // 历史库迁移（须先于建表）：llm_infos 表更名 model_infos。若先 CREATE
+    // model_infos 再 RENAME，旧库会因目标表已存在而失败。幂等：旧表不存在时空操作。
+    let has_old_table: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'llm_infos'")
+            .fetch_one(pool)
+            .await?;
+    if has_old_table > 0 {
+        sqlx::query("ALTER TABLE llm_infos RENAME TO model_infos")
+            .execute(pool)
+            .await?;
+    }
+
     // 1. 用户表 (users)
     sqlx::query(
         r#"
@@ -73,12 +85,18 @@ pub async fn migrate(pool: &DbPool) -> Result<()> {
     .execute(pool)
     .await?;
 
+    // 历史库迁移（须在 settings 建表后、默认插入前）：设置键 sync_llm_interval
+    // 更名 sync_model_interval，保留用户已自定义的值；幂等：旧键不存在时空操作。
+    sqlx::query("UPDATE settings SET key = 'sync_model_interval' WHERE key = 'sync_llm_interval'")
+        .execute(pool)
+        .await?;
+
     // 插入默认系统设置项
     let default_settings = [
         ("stats_save_interval", "10"),
         ("cors_allow_origins", ""),
         ("model_info_update_interval", "24"),
-        ("sync_llm_interval", "24"),
+        ("sync_model_interval", "24"),
         ("log_retention_days", "7"),
     ];
     for (k, v) in default_settings {
@@ -187,10 +205,10 @@ pub async fn migrate(pool: &DbPool) -> Result<()> {
     .execute(pool)
     .await?;
 
-    // 8. 模型价格信息表 (llm_infos)
+    // 8. 模型价格信息表 (model_infos)
     sqlx::query(
         r#"
-        CREATE TABLE IF NOT EXISTS llm_infos (
+        CREATE TABLE IF NOT EXISTS model_infos (
             name TEXT PRIMARY KEY,
             input REAL NOT NULL DEFAULT 0,
             output REAL NOT NULL DEFAULT 0,
@@ -286,4 +304,71 @@ pub async fn migrate(pool: &DbPool) -> Result<()> {
     .await?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::str::FromStr;
+
+    use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
+
+    use super::*;
+
+    /// 旧库（含 llm_infos 表与 sync_llm_interval 设置键）迁移后表名与键名均应就位。
+    #[tokio::test]
+    async fn test_migrate_renames_legacy_llm_table_and_settings_key() {
+        let rnd = nanoid::nanoid!(12);
+        let db_path = std::env::temp_dir().join(format!("octopus_legacy_rename_test_{rnd}.db"));
+
+        // 构造旧 schema
+        let legacy = SqliteConnectOptions::from_str(&format!("sqlite://{}", db_path.to_string_lossy()))
+            .unwrap()
+            .create_if_missing(true);
+        let pool = SqlitePoolOptions::new().connect_with(legacy).await.unwrap();
+        sqlx::query(
+            "CREATE TABLE llm_infos (name TEXT PRIMARY KEY, input REAL NOT NULL DEFAULT 0, output REAL NOT NULL DEFAULT 0, cache_read REAL NOT NULL DEFAULT 0, cache_write REAL NOT NULL DEFAULT 0)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query("INSERT INTO llm_infos (name) VALUES ('gpt-4o')")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO settings (key, value) VALUES ('sync_llm_interval', '24')")
+            .execute(&pool)
+            .await
+            .unwrap();
+        pool.close().await;
+
+        init_db(&db_path).await.unwrap();
+
+        let pool = SqlitePoolOptions::new()
+            .connect_with(
+                SqliteConnectOptions::from_str(&format!("sqlite://{}", db_path.to_string_lossy()))
+                    .unwrap()
+                    .create_if_missing(true),
+            )
+            .await
+            .unwrap();
+        let legacy_left: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM sqlite_master WHERE name = 'llm_infos'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        let model_infos_rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM model_infos")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        let key_migrated: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM settings WHERE key = 'sync_model_interval'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!((legacy_left, model_infos_rows, key_migrated), (0, 1, 1));
+
+        let _ = std::fs::remove_file(db_path);
+    }
 }

@@ -404,10 +404,10 @@ pub mod request_status {
     pub const STREAM_ERROR: &str = "stream_error";
 }
 
-// ---------------- 模型价格与模型列表 (LLM Pricing & Models) ----------------
+// ---------------- 模型价格与模型列表 (模型定价与模型列表) ----------------
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
-pub struct LLMPrice {
+pub struct ModelPrice {
     pub input:       f64,
     pub output:      f64,
     pub cache_read:  f64,
@@ -416,10 +416,10 @@ pub struct LLMPrice {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
-pub struct LLMInfo {
+pub struct ModelInfo {
     pub name:  String,
     #[serde(flatten, default)]
-    pub price: LLMPrice,
+    pub price: ModelPrice,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -468,7 +468,9 @@ pub struct BackupData {
     pub channel_models: Vec<ChannelModel>,
     pub groups:         Vec<Group>,
     pub group_items:    Vec<GroupItem>,
-    pub llm_infos:      Vec<LLMInfo>,
+    /// alias 兼容旧备份文件中的 `llm_infos` 字段名
+    #[serde(default, alias = "llm_infos")]
+    pub model_infos:    Vec<ModelInfo>,
 
     pub stats_total:   Option<Vec<StatsTotal>>,
     pub stats_daily:   Vec<StatsDaily>,

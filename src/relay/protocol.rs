@@ -1,7 +1,7 @@
 use serde::Deserialize;
 use serde_json::Value;
 
-use crate::{model::LLMPrice, relay::state::Usage};
+use crate::{model::ModelPrice, relay::state::Usage};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ApiFormat {
@@ -1560,7 +1560,7 @@ pub fn gemini_sse_event_to_openai_chunk(
     ))
 }
 
-pub fn calculate_cost(prompt_tokens: i64, completion_tokens: i64, price: Option<&LLMPrice>) -> f64 {
+pub fn calculate_cost(prompt_tokens: i64, completion_tokens: i64, price: Option<&ModelPrice>) -> f64 {
     match price {
         Some(p) => {
             // 价格按每 1M token 计算

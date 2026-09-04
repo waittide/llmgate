@@ -7,7 +7,7 @@ pub async fn refresh_setting_cache(state: &AppState) -> Result<()> {
         .fetch_all(&state.db)
         .await?;
 
-    // 原子同步内存缓存（与 llm 缓存同模式），避免 clear+insert 留出的读取空窗
+    // 原子同步内存缓存（与 model 缓存同模式），避免 clear+insert 留出的读取空窗
     for s in &settings {
         state.settings.insert(s.key.clone(), s.value.clone());
     }

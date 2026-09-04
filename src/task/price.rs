@@ -12,19 +12,19 @@ use serde_json::Value;
 use tracing::{debug, warn};
 
 use crate::{
-    model::{LLMInfo, LLMPrice},
-    op::{AppState, llm},
+    model::{ModelInfo, ModelPrice},
+    op::{AppState, model},
 };
 
 // 来自 models.dev 的所有上游模型价格内存目录缓存（不在数据库中持久化）
-static GLOBAL_CATALOG_PRICES: LazyLock<DashMap<String, LLMPrice>> = LazyLock::new(DashMap::new);
+static GLOBAL_CATALOG_PRICES: LazyLock<DashMap<String, ModelPrice>> = LazyLock::new(DashMap::new);
 static LAST_PRICE_UPDATE_TIME: AtomicI64 = AtomicI64::new(0);
 
 pub fn get_last_price_update_time() -> i64 {
     LAST_PRICE_UPDATE_TIME.load(Ordering::SeqCst)
 }
 
-pub fn get_catalog_price(model_name: &str) -> Option<LLMPrice> {
+pub fn get_catalog_price(model_name: &str) -> Option<ModelPrice> {
     GLOBAL_CATALOG_PRICES
         .get(&model_name.to_lowercase())
         .map(|p| p.clone())
@@ -70,7 +70,7 @@ pub async fn fetch_catalog_from_models_dev() -> Result<()> {
 
                         GLOBAL_CATALOG_PRICES.insert(
                             model_name.to_lowercase(),
-                            LLMPrice {
+                            ModelPrice {
                                 input,
                                 output,
                                 cache_read,
@@ -103,25 +103,25 @@ pub async fn ensure_model_prices(state: &AppState, model_names: &[String]) -> Re
     for name in model_names {
         let lower = name.to_lowercase();
         let price = get_catalog_price(&lower).unwrap_or_default();
-        new_infos.push(LLMInfo { name: lower, price });
+        new_infos.push(ModelInfo { name: lower, price });
     }
 
     if !new_infos.is_empty() {
-        llm::batch_create_llm_infos(state, new_infos).await?;
+        model::batch_create_model_infos(state, new_infos).await?;
     }
     Ok(())
 }
 
 /// 为当前在渠道中已配置的所有模型更新价格信息。
-pub async fn update_llm_prices(state: &AppState) -> Result<()> {
+pub async fn update_model_prices(state: &AppState) -> Result<()> {
     fetch_catalog_from_models_dev().await?;
 
-    let existing_infos = llm::list_llm_infos(state);
+    let existing_infos = model::list_model_infos(state);
     let mut updated_infos = Vec::new();
 
     for info in existing_infos {
         if let Some(new_price) = get_catalog_price(&info.name) {
-            updated_infos.push(LLMInfo {
+            updated_infos.push(ModelInfo {
                 name:  info.name,
                 price: new_price,
             });
@@ -129,7 +129,7 @@ pub async fn update_llm_prices(state: &AppState) -> Result<()> {
     }
 
     if !updated_infos.is_empty() {
-        llm::batch_create_llm_infos(state, updated_infos).await?;
+        model::batch_create_model_infos(state, updated_infos).await?;
     }
 
     debug!("渠道模型价格已更新");
@@ -139,7 +139,7 @@ pub async fn update_llm_prices(state: &AppState) -> Result<()> {
 /// 清理无渠道引用的幽灵模型，并根据现有渠道模型重建价格信息。
 pub async fn rebuild_all_prices(state: &AppState) -> Result<()> {
     fetch_catalog_from_models_dev().await?;
-    llm::cleanup_ghosts(state).await?;
+    model::cleanup_ghosts(state).await?;
 
     let mut channel_model_names = Vec::new();
     for cm in state.channel_models.iter() {

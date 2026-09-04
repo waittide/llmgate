@@ -2,7 +2,7 @@ import { memo, useCallback, useEffect, useId, useMemo, useRef, useState } from '
 import { Pencil, Trash2, ArrowDownToLine, ArrowUpFromLine } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { useTranslations } from 'use-intl';
-import { useUpdateModel, useDeleteModel, type LLMInfo } from '@/api/model';
+import { useUpdateModel, useDeleteModel, type ModelInfo } from '@/api/model';
 import { getModelIcon } from '@/lib/model-icons';
 import { toast } from 'sonner';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
@@ -11,7 +11,7 @@ import { cn } from '@/lib/utils';
 import { createPortal } from 'react-dom';
 
 interface ModelItemProps {
-    model: LLMInfo;
+    model: ModelInfo;
     layout?: 'grid' | 'list';
 }
 

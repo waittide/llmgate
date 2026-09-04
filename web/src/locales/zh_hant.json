@@ -241,7 +241,7 @@
         "failed": "價格資料重建失敗"
       }
     },
-    "llmSync": {
+    "modelSync": {
       "title": "供應源同步",
       "syncInterval": {
         "label": "自動同步間隔（小時）",
