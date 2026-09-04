@@ -20,7 +20,7 @@ pub async fn list_channel(State(state): State<AppState>) -> Response {
 pub async fn create_channel(State(state): State<AppState>, Json(mut payload): Json<Channel>) -> Response {
     match channel::create_channel(&state, &mut payload).await {
         Ok(_) => {
-            // Auto add price entries for these models if needed
+            // 如有需要，自动为这些模型添加价格字典条目
             let model_names: Vec<String> = payload.models.iter().map(|m| m.name.clone()).collect();
             let _ = crate::task::price::ensure_model_prices(&state, &model_names).await;
             success(payload)
@@ -48,14 +48,14 @@ pub struct EnableChannelReq {
 
 pub async fn enable_channel(State(state): State<AppState>, Json(payload): Json<EnableChannelReq>) -> Response {
     match channel::set_channel_enabled(&state, payload.id, payload.enabled).await {
-        Ok(_) => success_msg("channel enabled status updated"),
+        Ok(_) => success_msg("渠道启用状态已更新"),
         Err(e) => error(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
     }
 }
 
 pub async fn delete_channel(State(state): State<AppState>, Path(id): Path<i64>) -> Response {
     match channel::delete_channel(&state, id).await {
-        Ok(_) => success_msg("channel deleted"),
+        Ok(_) => success_msg("渠道已删除"),
         Err(e) => error(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
     }
 }
@@ -69,7 +69,7 @@ pub async fn fetch_model(State(_state): State<AppState>, Json(payload): Json<Cha
 
 pub async fn sync_channel(State(state): State<AppState>) -> Response {
     match crate::task::sync::sync_all_channel_models(&state).await {
-        Ok(_) => success_msg("channels synced successfully"),
+        Ok(_) => success_msg("渠道模型同步成功"),
         Err(e) => error(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
     }
 }

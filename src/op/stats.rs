@@ -9,7 +9,7 @@ use crate::{
 pub async fn refresh_stats_cache(state: &AppState) -> Result<()> {
     let now_date = chrono::Local::now().format("%Y%m%d").to_string();
 
-    // 1. Total stats
+    // 1. 全量总计统计 (Total)
     let total = if let Some(row) = sqlx::query("SELECT * FROM stats_totals WHERE id = 1")
         .fetch_optional(&state.db)
         .await?
@@ -25,7 +25,7 @@ pub async fn refresh_stats_cache(state: &AppState) -> Result<()> {
         }
     };
 
-    // 2. Today daily stats
+    // 2. 今日按天统计 (Daily)
     let daily = if let Some(row) = sqlx::query("SELECT * FROM stats_dailies WHERE date = ?")
         .bind(&now_date)
         .fetch_optional(&state.db)
@@ -42,7 +42,7 @@ pub async fn refresh_stats_cache(state: &AppState) -> Result<()> {
         }
     };
 
-    // 3. Hourly stats for today
+    // 3. 今日每小时统计 (Hourly)
     let hourly_rows = sqlx::query("SELECT * FROM stats_hourlies WHERE date = ?")
         .bind(&now_date)
         .fetch_all(&state.db)
@@ -70,7 +70,7 @@ pub async fn refresh_stats_cache(state: &AppState) -> Result<()> {
         hourly: hourlies,
     };
 
-    // 4. API Key stats
+    // 4. 按 API Key 统计
     state.stats_api_keys.clear();
     let apikey_rows = sqlx::query("SELECT * FROM stats_api_keys")
         .fetch_all(&state.db)
@@ -91,12 +91,12 @@ pub fn record_metrics(state: &AppState, api_key_id: i64, channel_id: i64, channe
     let now_date = now.format("%Y%m%d").to_string();
     let current_hour = now.format("%H").to_string().parse::<usize>().unwrap_or(0);
 
-    // 1. Atomic update for Total + Daily + Hourly in a single lock
+    // 1. 在单次写锁中原子更新总计、今日与当前小时统计
     {
         let mut stats = state.stats.write();
         stats.total.metrics.add(delta);
 
-        // If the date rolled over to a new day, persist previous day's metrics before resetting
+        // 若跨越到新的一天，在重置前先将前一天的统计落盘
         if stats.daily.date != now_date {
             let prev_daily = stats.daily.clone();
             let prev_hourlies: Vec<StatsHourly> = stats
@@ -128,7 +128,7 @@ pub fn record_metrics(state: &AppState, api_key_id: i64, channel_id: i64, channe
                 let mut tx = match db.begin().await {
                     Ok(tx) => tx,
                     Err(e) => {
-                        tracing::error!("Failed to begin tx for daily stats rollover: {}", e);
+                        tracing::error!("开启每日统计结转事务失败: {}", e);
                         return;
                     }
                 };
@@ -159,7 +159,7 @@ pub fn record_metrics(state: &AppState, api_key_id: i64, channel_id: i64, channe
                 .await;
 
                 if let Err(e) = res {
-                    tracing::error!("Failed to persist rolled-over daily stats: {}", e);
+                    tracing::error!("写入结转的每日统计失败: {}", e);
                     return;
                 }
 
@@ -192,7 +192,7 @@ pub fn record_metrics(state: &AppState, api_key_id: i64, channel_id: i64, channe
                 }
 
                 if let Err(e) = tx.commit().await {
-                    tracing::error!("Failed to commit daily stats rollover tx: {}", e);
+                    tracing::error!("提交每日统计结转事务失败: {}", e);
                 }
             });
         }
@@ -206,7 +206,7 @@ pub fn record_metrics(state: &AppState, api_key_id: i64, channel_id: i64, channe
             stats.hourly[current_hour].metrics.add(delta);
         }
     }
-    // 4. API Key
+    // 4. 更新 API Key 内存统计
     if api_key_id > 0 {
         state
             .stats_api_keys
@@ -219,7 +219,7 @@ pub fn record_metrics(state: &AppState, api_key_id: i64, channel_id: i64, channe
             .add(delta);
     }
 
-    // 5. Channel & ChannelModel in-memory metrics
+    // 5. 更新渠道及渠道模型内存指标
     if let Some(mut ch) = state.channels.get_mut(&channel_id) {
         ch.metrics.add(delta);
     }
@@ -285,7 +285,7 @@ pub fn list_stats_api_keys(state: &AppState) -> Vec<StatsAPIKey> {
 pub async fn flush_stats_to_db(state: &AppState) -> Result<()> {
     let mut tx = state.db.begin().await?;
 
-    // 1. Flush Total
+    // 1. 落盘总计统计
     let (total, daily, hourlies) = {
         let s = state.stats.read();
         (s.total.clone(), s.daily.clone(), s.hourly.clone())
@@ -314,7 +314,7 @@ pub async fn flush_stats_to_db(state: &AppState) -> Result<()> {
     .execute(&mut *tx)
     .await?;
 
-    // 2. Flush Daily
+    // 2. 落盘今日统计
     sqlx::query(
         r#"
         INSERT INTO stats_dailies (date, input_token, output_token, input_cost, output_cost, wait_time, request_success, request_failed)
@@ -340,7 +340,7 @@ pub async fn flush_stats_to_db(state: &AppState) -> Result<()> {
     .execute(&mut *tx)
     .await?;
 
-    // 3. Flush Hourlies
+    // 3. 落盘每小时统计
     for h in &hourlies {
         sqlx::query(
             r#"
@@ -369,7 +369,7 @@ pub async fn flush_stats_to_db(state: &AppState) -> Result<()> {
         .await?;
     }
 
-    // 4. Flush API Keys
+    // 4. 落盘各 API Key 统计
     for entry in state.stats_api_keys.iter() {
         let k = entry.value();
         sqlx::query(
@@ -398,7 +398,7 @@ pub async fn flush_stats_to_db(state: &AppState) -> Result<()> {
         .await?;
     }
 
-    // 5. Flush Channels & Channel Models
+    // 5. 落盘渠道与渠道模型指标
     for entry in state.channels.iter() {
         let ch = entry.value();
         sqlx::query(
@@ -466,7 +466,7 @@ mod tests {
     async fn test_cross_day_stats_rollover_persists_previous_day() {
         let (state, db_path) = setup_test_state().await;
 
-        // Setup initial previous day's metrics
+        // 设置初始前一日指标数据
         let yesterday = "20250101".to_string();
         {
             let mut stats = state.stats.write();
@@ -480,7 +480,7 @@ mod tests {
             stats.hourly[23].metrics.request_success = 5;
         }
 
-        // Trigger a new metric record today
+        // 触发今日一条新的用量记录
         let delta = StatsMetrics {
             input_token: 10,
             output_token: 5,
@@ -489,10 +489,10 @@ mod tests {
         };
         record_metrics(&state, 0, 0, 0, &delta);
 
-        // Yield to allow background spawn task to persist
+        // 短暂等待后台异步落盘任务执行
         tokio::time::sleep(std::time::Duration::from_millis(150)).await;
 
-        // Verify previous day's stats exist in database table stats_dailies
+        // 验证前一日统计数据已成功写入 stats_dailies 表中
         let row = sqlx::query("SELECT input_token, output_token, request_success FROM stats_dailies WHERE date = ?")
             .bind(&yesterday)
             .fetch_optional(&state.db)
@@ -505,7 +505,7 @@ mod tests {
         assert_eq!(r.get::<i64, _>("output_token"), 200);
         assert_eq!(r.get::<i64, _>("request_success"), 5);
 
-        // Verify today's in-memory daily starts fresh with delta
+        // 验证今日内存指标已重置并累加上最新增量
         let today_stats = state.stats.read().daily.clone();
         assert_ne!(today_stats.date, yesterday);
         assert_eq!(today_stats.metrics.input_token, 10);

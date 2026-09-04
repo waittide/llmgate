@@ -11,10 +11,10 @@ use serde_json::{Value, json};
 use super::sse_event_end;
 use crate::relay::{protocol::extract_usage_from_json, state::Usage};
 
-/// Converts one provider-native SSE event into an OpenAI Chat Completion SSE chunk.
+/// 将单个供应商原生 SSE 事件转换为 OpenAI Chat Completion SSE chunk 字符串。
 pub type SseChunkConverter = fn(&str, &str, i64, &str) -> Option<String>;
 
-/// Adapts a provider-native SSE byte stream into standard OpenAI Chat Completion SSE chunks.
+/// 将供应商原生 SSE 字节流转换为标准 OpenAI Chat Completion SSE chunk 流。
 pub struct ProviderToOpenaiStream<S> {
     inner:          S,
     buffer:         Vec<u8>,
@@ -100,7 +100,7 @@ struct ToolCallState {
     output_index: usize,
 }
 
-/// Adapts OpenAI Chat Completions SSE into OpenAI Responses SSE.
+/// 将 OpenAI Chat Completions SSE 流适配转换为 OpenAI Responses SSE 流。
 pub struct ChatCompletionsToResponsesStream<S> {
     inner:           S,
     buffer:          Vec<u8>,
@@ -211,8 +211,7 @@ impl<S> ChatCompletionsToResponsesStream<S> {
         let Ok(value) = serde_json::from_str::<Value>(data) else {
             return;
         };
-        // Carry real usage (e.g. from a ChatGPT chunk) into the Responses
-        // response.completed event instead of emitting hard-coded zeros.
+        // 将提取到的真实 Token 用量记录到 self.usage，供 response.completed 事件发送真实用量
         if let Some(u) = extract_usage_from_json(&value) {
             self.usage = Some(u);
         }

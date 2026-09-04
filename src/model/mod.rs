@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-// ---------------- User ----------------
+// ---------------- 用户 (User) ----------------
 #[derive(Debug, Clone, Default, Serialize, Deserialize, sqlx::FromRow)]
 #[serde(default)]
 pub struct User {
@@ -28,7 +28,7 @@ pub struct UserChangeUsername {
     pub new_username: String,
 }
 
-// ---------------- Stats ----------------
+// ---------------- 统计指标 (Stats) ----------------
 #[derive(Debug, Clone, Default, Serialize, Deserialize, sqlx::FromRow)]
 #[serde(default)]
 pub struct StatsMetrics {
@@ -106,7 +106,7 @@ pub struct StatsAPIKey {
     pub metrics:    StatsMetrics,
 }
 
-// ---------------- Channel & ChannelModel ----------------
+// ---------------- 渠道与渠道模型 (Channel & ChannelModel) ----------------
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ChannelProvider {
@@ -220,7 +220,7 @@ pub struct ChannelUpdateRequest {
     pub param_override: Option<String>,
 }
 
-// ---------------- Group ----------------
+// ---------------- 分组 (Group) ----------------
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum GroupMode {
@@ -322,7 +322,7 @@ pub struct GroupActiveItemUpdateRequest {
     pub item_id: Option<i64>,
 }
 
-// ---------------- APIKey ----------------
+// ---------------- API 密钥 (APIKey) ----------------
 #[derive(Debug, Clone, Default, Serialize, Deserialize, sqlx::FromRow)]
 #[serde(default)]
 pub struct APIKey {
@@ -336,7 +336,7 @@ pub struct APIKey {
     pub supported_models: String,
 }
 
-// ---------------- Setting ----------------
+// ---------------- 系统设置 (Setting) ----------------
 #[derive(Debug, Clone, Default, Serialize, Deserialize, sqlx::FromRow)]
 #[serde(default)]
 pub struct Setting {
@@ -344,7 +344,7 @@ pub struct Setting {
     pub value: String,
 }
 
-// ---------------- Request Log ----------------
+// ---------------- 请求日志 (Request Log) ----------------
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct RoundLog {
@@ -387,7 +387,7 @@ pub struct RequestLog {
     pub created_at:        i64,
 }
 
-// ---------------- LLM Pricing & Models ----------------
+// ---------------- 模型价格与模型列表 (LLM Pricing & Models) ----------------
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct LLMPrice {
@@ -438,7 +438,7 @@ pub struct AnthropicModelList {
     pub last_id:  Option<String>,
 }
 
-// ---------------- Backup ----------------
+// ---------------- 数据备份与导入 (Backup) ----------------
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct BackupData {
@@ -485,8 +485,8 @@ mod tests {
             ..Default::default()
         };
 
-        let json_val = serde_json::to_value(&ch).expect("serialize channel");
-        // metrics fields must be flattened at top-level
+        let json_val = serde_json::to_value(&ch).expect("序列化渠道失败");
+        // 指标字段必须展平在顶层 (flatten)
         assert_eq!(json_val.get("input_token").unwrap(), 100);
         assert_eq!(json_val.get("output_token").unwrap(), 200);
         assert_eq!(json_val.get("input_cost").unwrap(), 0.05);

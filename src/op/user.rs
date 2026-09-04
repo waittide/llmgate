@@ -21,7 +21,7 @@ pub async fn get_user(state: &AppState) -> Result<User> {
     let user: Option<User> = sqlx::query_as("SELECT id, username, password FROM users LIMIT 1")
         .fetch_optional(&state.db)
         .await?;
-    user.ok_or_else(|| anyhow!("User not found"))
+    user.ok_or_else(|| anyhow!("用户不存在"))
 }
 
 pub async fn verify_user(state: &AppState, username: &str, password: &str) -> Result<bool> {
@@ -35,7 +35,7 @@ pub async fn verify_user(state: &AppState, username: &str, password: &str) -> Re
 pub async fn change_password(state: &AppState, req: &UserChangePassword) -> Result<()> {
     let user = get_user(state).await?;
     if user.password != req.old_password {
-        return Err(anyhow!("Incorrect old password"));
+        return Err(anyhow!("旧密码错误"));
     }
     sqlx::query("UPDATE users SET password = ? WHERE id = ?")
         .bind(&req.new_password)

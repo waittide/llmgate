@@ -34,7 +34,7 @@ pub async fn refresh_group_cache(state: &AppState) -> Result<()> {
         local_groups.insert(id, group);
     }
 
-    // Fetch all group items
+    // 获取所有分组成员项并按优先级排序
     let item_rows = sqlx::query(
         r#"
         SELECT gi.id, gi.group_id, gi.channel_model_id, gi.priority
@@ -93,12 +93,12 @@ pub fn get_group_by_name(state: &AppState, name: &str) -> Result<Group> {
     let group_id = cache
         .by_name
         .get(name)
-        .ok_or_else(|| anyhow!("Group not found for model: {}", name))?;
+        .ok_or_else(|| anyhow!("模型 {} 对应的分组不存在", name))?;
     cache
         .by_id
         .get(group_id)
         .cloned()
-        .ok_or_else(|| anyhow!("Group not found for model: {}", name))
+        .ok_or_else(|| anyhow!("模型 {} 对应的分组不存在", name))
 }
 
 pub fn get_group_by_id(state: &AppState, id: i64) -> Result<Group> {
@@ -108,7 +108,7 @@ pub fn get_group_by_id(state: &AppState, id: i64) -> Result<Group> {
         .by_id
         .get(&id)
         .cloned()
-        .ok_or_else(|| anyhow!("Group not found with id: {}", id))
+        .ok_or_else(|| anyhow!("分组不存在: {}", id))
 }
 
 pub async fn create_group(state: &AppState, group: &mut Group) -> Result<()> {

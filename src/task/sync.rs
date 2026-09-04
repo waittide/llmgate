@@ -98,7 +98,7 @@ pub async fn sync_all_channel_models(state: &AppState) -> Result<()> {
                 let _ = channel::update_channel(state, &update_req).await;
             }
             Err(e) => {
-                warn!("Auto-sync failed for channel {}: {}", ch.name, e);
+                warn!("渠道 {} 自动同步失败: {}", ch.name, e);
             }
         }
     }
@@ -108,6 +108,6 @@ pub async fn sync_all_channel_models(state: &AppState) -> Result<()> {
     }
 
     LAST_SYNC_TIME.store(chrono::Utc::now().timestamp(), Ordering::SeqCst);
-    info!("Channel models sync completed");
+    info!("渠道模型同步完成");
     Ok(())
 }

@@ -32,7 +32,7 @@ pub async fn admin_auth_middleware(State(state): State<AppState>, mut req: Reque
 
     let token = match token_opt {
         Some(t) if !t.is_empty() => t,
-        _ => return error(StatusCode::UNAUTHORIZED, "Authentication failed"),
+        _ => return error(StatusCode::UNAUTHORIZED, "鉴权失败"),
     };
 
     let secret = state.jwt_secret.read().clone();
@@ -41,7 +41,7 @@ pub async fn admin_auth_middleware(State(state): State<AppState>, mut req: Reque
             req.extensions_mut().insert(claims);
             next.run(req).await
         }
-        Err(_) => error(StatusCode::UNAUTHORIZED, "Authentication failed"),
+        Err(_) => error(StatusCode::UNAUTHORIZED, "鉴权失败"),
     }
 }
 
@@ -68,27 +68,27 @@ pub async fn api_key_auth_middleware(State(state): State<AppState>, mut req: Req
 
     let api_key_str = match api_key_str_opt {
         Some(k) if !k.is_empty() => k,
-        _ => return error(StatusCode::UNAUTHORIZED, "Authentication failed"),
+        _ => return error(StatusCode::UNAUTHORIZED, "鉴权失败"),
     };
 
     let api_key_obj = match get_api_key_by_key(&state, &api_key_str) {
         Ok(k) => k,
-        Err(_) => return error(StatusCode::UNAUTHORIZED, "Authentication failed"),
+        Err(_) => return error(StatusCode::UNAUTHORIZED, "鉴权失败"),
     };
 
     if !api_key_obj.enabled {
-        return error(StatusCode::UNAUTHORIZED, "API key is disabled");
+        return error(StatusCode::UNAUTHORIZED, "API 密钥已被禁用");
     }
 
     let now_sec = chrono::Utc::now().timestamp();
     if api_key_obj.expire_at > 0 && api_key_obj.expire_at < now_sec {
-        return error(StatusCode::UNAUTHORIZED, "API key has expired");
+        return error(StatusCode::UNAUTHORIZED, "API 密钥已过期");
     }
 
     let stats = get_stats_api_key(&state, api_key_obj.id);
     let total_cost = stats.metrics.input_cost + stats.metrics.output_cost;
     if api_key_obj.max_cost > 0.0 && total_cost >= api_key_obj.max_cost {
-        return error(StatusCode::UNAUTHORIZED, "API key has reached the max cost");
+        return error(StatusCode::UNAUTHORIZED, "API 密钥已达到费用上限");
     }
 
     let supported_models: Vec<String> = if api_key_obj.supported_models.trim().is_empty() {

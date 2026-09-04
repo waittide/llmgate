@@ -16,7 +16,7 @@ static SHARED_HTTP_CLIENT: LazyLock<Client> = LazyLock::new(|| {
         .pool_idle_timeout(Duration::from_secs(90))
         .pool_max_idle_per_host(32)
         .build()
-        .expect("Failed to initialize shared HTTP client")
+        .expect("初始化共享 HTTP 客户端失败")
 });
 
 pub fn get_client() -> &'static Client {
@@ -26,7 +26,7 @@ pub fn get_client() -> &'static Client {
 pub fn build_upstream_request(
     client: &Client,
     channel: &Channel,
-    endpoint: &str, // e.g. "/chat/completions", "/messages", "/models"
+    endpoint: &str, // 例如 "/chat/completions", "/messages", "/models"
     body: Option<Vec<u8>>,
     timeout_secs: Option<u64>,
     client_headers: Option<&HeaderMap>,
@@ -63,13 +63,13 @@ pub fn build_upstream_headers(channel: &Channel, client_headers: Option<&HeaderM
                 channel
                     .key
                     .parse()
-                    .map_err(|_| anyhow!("Invalid api key header"))?,
+                    .map_err(|_| anyhow!("无效的 api key 请求头"))?,
             );
             headers.insert(
                 "anthropic-version",
                 "2023-06-01"
                     .parse()
-                    .map_err(|_| anyhow!("Invalid anthropic-version header"))?,
+                    .map_err(|_| anyhow!("无效的 anthropic-version 请求头"))?,
             );
         }
         ChannelProvider::Gemini => {
@@ -78,7 +78,7 @@ pub fn build_upstream_headers(channel: &Channel, client_headers: Option<&HeaderM
                 channel
                     .key
                     .parse()
-                    .map_err(|_| anyhow!("Invalid gemini key header"))?,
+                    .map_err(|_| anyhow!("无效的 gemini key 请求头"))?,
             );
         }
         _ => {
@@ -86,7 +86,7 @@ pub fn build_upstream_headers(channel: &Channel, client_headers: Option<&HeaderM
                 "Authorization",
                 format!("Bearer {}", channel.key)
                     .parse()
-                    .map_err(|_| anyhow!("Invalid auth header"))?,
+                    .map_err(|_| anyhow!("无效的鉴权请求头"))?,
             );
         }
     }
@@ -95,10 +95,10 @@ pub fn build_upstream_headers(channel: &Channel, client_headers: Option<&HeaderM
         "Content-Type",
         "application/json"
             .parse()
-            .map_err(|_| anyhow!("Invalid content-type"))?,
+            .map_err(|_| anyhow!("无效的 content-type"))?,
     );
 
-    // 2. Passthrough client specific business headers (e.g. anthropic-beta, openai-organization)
+    // 2. 透传客户端特定的业务 Header（如 anthropic-beta, openai-organization）
     if let Some(client_hdrs) = client_headers {
         for (name, value) in client_hdrs.iter() {
             let name_str = name.as_str().to_lowercase();
@@ -111,7 +111,7 @@ pub fn build_upstream_headers(channel: &Channel, client_headers: Option<&HeaderM
         }
     }
 
-    // 3. Apply channel custom headers (highest precedence, overrides defaults or client headers)
+    // 3. 应用渠道自定义 Header（最高优先级，覆盖默认值或客户端透传头）
     for h in &channel.custom_header {
         if let (Ok(name), Ok(val)) = (
             reqwest::header::HeaderName::from_bytes(h.header_key.as_bytes()),
@@ -163,9 +163,9 @@ mod tests {
         client_headers.insert("authorization", HeaderValue::from_static("Bearer client-key"));
 
         let headers = build_upstream_headers(&channel, Some(&client_headers)).unwrap();
-        // anthropic-beta should be passed through
+        // 客户端传入的 anthropic-beta 应被正常透传
         assert_eq!(headers.get("anthropic-beta").unwrap(), "prompt-caching-2024-07-31");
-        // x-api-key should always come from channel.key, not client
+        // x-api-key 鉴权头必须强制使用渠道的 channel.key，不能被客户端覆盖
         assert_eq!(headers.get("x-api-key").unwrap(), "sk-ant-test");
     }
 }

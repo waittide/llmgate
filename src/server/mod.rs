@@ -24,13 +24,13 @@ use crate::{
 };
 
 pub fn build_router(state: AppState) -> Router {
-    // 1. Admin API Router (protected by admin_auth_middleware)
+    // 1. 管理后台 API 路由（受 admin_auth_middleware 保护）
     let admin_router = Router::new()
-        // User
+        // 用户管理
         .route("/user/change-password", post(user::change_password))
         .route("/user/change-username", post(user::change_username))
         .route("/user/status", get(user::status))
-        // Channel
+        // 渠道管理
         .route("/channel/list", get(channel::list_channel))
         .route("/channel/create", post(channel::create_channel))
         .route("/channel/update", post(channel::update_channel))
@@ -39,19 +39,19 @@ pub fn build_router(state: AppState) -> Router {
         .route("/channel/fetch-model", post(channel::fetch_model))
         .route("/channel/sync", post(channel::sync_channel))
         .route("/channel/last-sync-time", get(channel::get_last_sync_time))
-        // Group
+        // 分组管理
         .route("/group/list", get(group::list_groups))
         .route("/group/runtime/stream", get(group::stream_group_runtime))
         .route("/group/create", post(group::create_group))
         .route("/group/update", post(group::update_group))
         .route("/group/active/{id}", post(group::update_group_active_item))
         .route("/group/delete/{id}", delete(group::delete_group))
-        // APIKey
+        // API 密钥管理
         .route("/apikey/list", get(apikey::list_api_keys))
         .route("/apikey/create", post(apikey::create_api_key))
         .route("/apikey/update", post(apikey::update_api_key))
         .route("/apikey/delete/{id}", delete(apikey::delete_api_key))
-        // Model
+        // 模型管理
         .route("/model/list", get(model::list_llm))
         .route("/model/create", post(model::create_llm))
         .route("/model/update", post(model::update_llm))
@@ -59,18 +59,18 @@ pub fn build_router(state: AppState) -> Router {
         .route("/model/update-price", post(model::update_llm_price))
         .route("/model/rebuild-price", post(model::rebuild_llm_price))
         .route("/model/last-update-time", get(model::get_last_update_time))
-        // Setting
+        // 系统设置
         .route("/setting/list", get(setting::get_setting_list))
         .route("/setting/set", post(setting::set_setting))
         .route("/setting/export", get(setting::export_db))
         .route("/setting/import", post(setting::import_db))
-        // Stats
+        // 统计数据
         .route("/stats/today", get(stats::get_stats_today))
         .route("/stats/daily", get(stats::get_stats_daily))
         .route("/stats/hourly", get(stats::get_stats_hourly))
         .route("/stats/total", get(stats::get_stats_total))
         .route("/stats/apikey", get(stats::get_stats_apikey))
-        // Log
+        // 请求日志
         .route("/log/list", get(log::list_logs))
         .route("/log/{id}", get(log::get_log_detail))
         .route("/log/overview/stream", get(log::stream_overview))
@@ -80,22 +80,22 @@ pub fn build_router(state: AppState) -> Router {
         .route("/log/clear", delete(log::clear_log))
         .layer(from_fn_with_state(state.clone(), admin_auth_middleware));
 
-    // 2. API Key Dashboard Router (protected by api_key_auth_middleware)
+    // 2. API Key 控制台路由（受 api_key_auth_middleware 保护）
     let apikey_dashboard_router = Router::new()
         .route("/apikey/stats", get(apikey::get_api_key_stats_by_id))
         .route("/apikey/login", get(apikey::login_api_key))
         .layer(from_fn_with_state(state.clone(), api_key_auth_middleware));
 
-    // 3. Public Admin API Router (Login)
+    // 3. 公开管理员 API 路由（用户登录）
     let public_api_router = Router::new().route("/user/login", post(user::login));
 
-    // 4. Combined /api/v1 router
+    // 4. 合并 /api/v1 路由
     let api_v1 = Router::new()
         .merge(public_api_router)
         .merge(admin_router)
         .merge(apikey_dashboard_router);
 
-    // 5. Client LLM Proxy Router /v1 (protected by api_key_auth_middleware)
+    // 5. 客户端 LLM 代理中继路由 /v1（受 api_key_auth_middleware 保护）
     let client_v1 = Router::new()
         .route("/models", get(model::get_model_list))
         .route("/chat/completions", post(relay::chat_completions))
@@ -103,7 +103,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/messages", post(relay::messages))
         .layer(from_fn_with_state(state.clone(), api_key_auth_middleware));
 
-    // 6. CORS Configuration
+    // 6. CORS 跨域配置
     let cors = {
         let origins_setting = state
             .settings
@@ -137,7 +137,7 @@ pub fn build_router(state: AppState) -> Router {
         }
     };
 
-    // 7. Root Router with Fallback to SPA static files
+    // 7. 根路由，静态前端 SPA 单页文件回退
     Router::new()
         .nest("/api/v1", api_v1)
         .nest("/v1", client_v1)

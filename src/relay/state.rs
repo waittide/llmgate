@@ -19,7 +19,7 @@ pub struct RequestOverview {
     pub id:             u64,
     pub status:         String,
     pub started_at:     String,
-    pub duration:       i64, // ms
+    pub duration:       i64, // 耗时（毫秒）
     pub model:          String,
     pub usage:          Usage,
     pub cost:           f64,
@@ -60,8 +60,8 @@ impl From<&RequestLog> for RequestOverview {
     }
 }
 
-/// Lightweight registry for active in-flight request cancellation and SSE notifications.
-/// Does NOT store request bodies or completed log history in memory.
+/// 活跃请求轻量注册表，仅用于运行中请求的中断信号发送与 SSE 状态广播。
+/// 不在内存中保留请求体、响应体或历史日志。
 pub struct InFlightRegistry {
     cancels: DashMap<u64, watch::Sender<bool>>,
     tx:      broadcast::Sender<RequestOverview>,

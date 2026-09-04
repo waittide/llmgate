@@ -34,43 +34,43 @@ async fn main() -> Result<()> {
         .with(fmt_layer)
         .init();
 
-    info!("=== Starting {} (Rust Edition) v{} ===", conf::APP_NAME, conf::VERSION);
-    info!("Data directory: {:?}", config.data_dir);
+    info!("=== 正在启动 {} (Rust 版) v{} ===", conf::APP_NAME, conf::VERSION);
+    info!("数据目录: {:?}", config.data_dir);
 
-    // 1. Initialize SQLite Database & Migrations
+    // 1. 初始化 SQLite 数据库与表结构
     let db_path = config.db_path();
     let pool = db::init_db(&db_path).await?;
 
-    // 2. Initialize Application State & In-memory Caches
+    // 2. 初始化应用状态与内存缓存
     let state = AppState::init(pool).await?;
 
-    // 3. Start Background Tasks
+    // 3. 启动后台定时任务
     task::start_background_tasks(state.clone());
 
-    // 4. Build Axum Router
+    // 4. 构建 Axum 路由
     let app = server::build_router(state.clone());
 
-    // 5. Start Server
+    // 5. 启动 HTTP 服务
     let addr: SocketAddr = format!("{}:{}", config.host, config.port).parse()?;
-    info!("Server listening on http://{}", addr);
+    info!("服务已启动，监听 http://{}", addr);
 
     let listener = tokio::net::TcpListener::bind(addr).await?;
     tokio::select! {
         res = axum::serve(listener, app) => {
             if let Err(e) = res {
-                tracing::error!("Server error: {}", e);
+                tracing::error!("服务运行出错: {}", e);
             }
         }
         _ = shutdown_signal() => {
-            info!("Shutdown signal received, stopping server...");
+            info!("收到停机信号，正在停止服务...");
         }
     }
 
-    info!("Flushing in-memory stats to database before shutdown...");
+    info!("停机前正在将内存统计落盘到数据库...");
     if let Err(e) = op::stats::flush_stats_to_db(&state).await {
-        tracing::error!("Failed to flush stats on shutdown: {}", e);
+        tracing::error!("停机时落盘统计失败: {}", e);
     }
-    info!("Server stopped gracefully");
+    info!("服务已优雅退出");
     Ok(())
 }
 
@@ -78,13 +78,13 @@ async fn shutdown_signal() {
     let ctrl_c = async {
         tokio::signal::ctrl_c()
             .await
-            .expect("Failed to install Ctrl+C handler");
+            .expect("安装 Ctrl+C 信号处理器失败");
     };
 
     #[cfg(unix)]
     let terminate = async {
         tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-            .expect("Failed to install signal handler")
+            .expect("安装 terminate 信号处理器失败")
             .recv()
             .await;
     };

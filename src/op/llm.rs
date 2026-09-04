@@ -22,7 +22,7 @@ pub async fn refresh_llm_cache(state: &AppState) -> Result<()> {
         };
         local_prices.insert(name.to_lowercase(), price);
     }
-    // Atomically sync in-memory cache without leaving empty windows
+    // 原子同步内存缓存，避免留出空窗期
     for (k, v) in &local_prices {
         state.llm_prices.insert(k.clone(), v.clone());
     }
@@ -101,10 +101,10 @@ pub async fn update_llm_info(state: &AppState, info: &LLMInfo) -> Result<()> {
 
 pub async fn delete_llm_info(state: &AppState, name: &str) -> Result<()> {
     let name_lower = name.to_lowercase();
-    // Check if referenced by any channel model
+    // 检查是否仍被某个渠道模型引用
     for cm in state.channel_models.iter() {
         if cm.value().name.to_lowercase() == name_lower {
-            return Err(anyhow!("Model is referenced by a channel"));
+            return Err(anyhow!("模型仍被渠道引用"));
         }
     }
 
@@ -145,7 +145,7 @@ mod tests {
     async fn test_cleanup_ghosts_removes_ghosts_from_db_and_cache() {
         let (state, db_path) = setup_test_state().await;
 
-        // Insert a valid model price and a ghost model price
+        // 插入一个有效模型价格与一个无引用的幽灵模型价格
         let infos = vec![
             LLMInfo {
                 name:  "valid-model".to_string(),
@@ -168,7 +168,7 @@ mod tests {
         assert!(state.llm_prices.contains_key("ghost-model"));
         assert!(state.llm_prices.contains_key("valid-model"));
 
-        // Simulate a channel model pointing to "valid-model"
+        // 模拟创建引用 "valid-model" 的渠道模型
         let ch_res = sqlx::query(
             "INSERT INTO channels (name, type, base_url, key) VALUES ('c1', 'openai', 'https://api.openai.com', 'k1')",
         )
@@ -182,10 +182,10 @@ mod tests {
             .await
             .unwrap();
 
-        // Clean up ghosts
+        // 清理无渠道引用的幽灵模型
         cleanup_ghosts(&state).await.unwrap();
 
-        // Ghost should be deleted from DB and in-memory cache
+        // 幽灵模型应从数据库与内存缓存中一并删除
         assert!(!state.llm_prices.contains_key("ghost-model"));
         assert!(state.llm_prices.contains_key("valid-model"));
 

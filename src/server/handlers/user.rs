@@ -24,26 +24,26 @@ pub async fn login(State(state): State<AppState>, Json(payload): Json<UserLogin>
                 Err(e) => error(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
             }
         }
-        _ => error(StatusCode::UNAUTHORIZED, "Authentication failed"),
+        _ => error(StatusCode::UNAUTHORIZED, "鉴权失败"),
     }
 }
 
 pub async fn change_password(State(state): State<AppState>, Json(payload): Json<UserChangePassword>) -> Response {
     match user::change_password(&state, &payload).await {
-        Ok(_) => success_msg("password changed successfully"),
+        Ok(_) => success_msg("密码修改成功"),
         Err(e) => error(StatusCode::BAD_REQUEST, &e.to_string()),
     }
 }
 
 pub async fn change_username(State(state): State<AppState>, Json(payload): Json<UserChangeUsername>) -> Response {
     match user::change_username(&state, &payload).await {
-        Ok(_) => success_msg("username changed successfully"),
+        Ok(_) => success_msg("用户名修改成功"),
         Err(e) => error(StatusCode::BAD_REQUEST, &e.to_string()),
     }
 }
 
 pub async fn status() -> Response {
-    success_msg("ok")
+    success_msg("服务正常")
 }
 
 #[cfg(test)]

@@ -32,7 +32,7 @@ pub async fn serve_static(uri: Uri) -> Response<Body> {
             response.body(Body::from(content.data)).unwrap()
         }
         None => {
-            // Do NOT fallback to SPA index.html for API routes or static asset paths
+            // API 路由与静态资源路径不得回退到 SPA 的 index.html
             if uri.path().starts_with("/api/") || uri.path().starts_with("/v1/") || path.starts_with("assets/") {
                 return Response::builder()
                     .status(StatusCode::NOT_FOUND)
@@ -43,7 +43,7 @@ pub async fn serve_static(uri: Uri) -> Response<Body> {
                     .unwrap_or_default();
             }
 
-            // SPA Fallback: serve index.html for any frontend client-side route
+            // SPA 回退：前端客户端路由一律返回 index.html
             if let Some(index_content) = Asset::get("index.html") {
                 Response::builder()
                     .status(StatusCode::OK)

@@ -59,7 +59,7 @@ pub async fn import_db(State(state): State<AppState>, req: Request) -> Response 
         let dummy_req = Request::from_parts(parts, body);
         let mut multipart = match Multipart::from_request(dummy_req, &state).await {
             Ok(m) => m,
-            Err(e) => return error(StatusCode::BAD_REQUEST, &format!("Invalid multipart: {}", e)),
+            Err(e) => return error(StatusCode::BAD_REQUEST, &format!("无效的 multipart 请求: {}", e)),
         };
 
         let mut file_bytes = None;
@@ -71,25 +71,25 @@ pub async fn import_db(State(state): State<AppState>, req: Request) -> Response 
                         file_bytes = Some(b);
                         break;
                     }
-                    Err(e) => return error(StatusCode::BAD_REQUEST, &format!("Failed to read upload file: {}", e)),
+                    Err(e) => return error(StatusCode::BAD_REQUEST, &format!("读取上传文件失败: {}", e)),
                 }
             }
         }
 
         match file_bytes {
             Some(b) => b,
-            None => return error(StatusCode::BAD_REQUEST, "missing upload file field 'file'"),
+            None => return error(StatusCode::BAD_REQUEST, "缺少上传文件字段 'file'"),
         }
     } else {
         match axum::body::to_bytes(body, 50 * 1024 * 1024).await {
             Ok(b) => b,
-            Err(e) => return error(StatusCode::BAD_REQUEST, &format!("Failed to read request body: {}", e)),
+            Err(e) => return error(StatusCode::BAD_REQUEST, &format!("读取请求体失败: {}", e)),
         }
     };
 
     let backup_data: BackupData = match serde_json::from_slice(&json_bytes) {
         Ok(data) => data,
-        Err(e) => return error(StatusCode::BAD_REQUEST, &format!("Invalid JSON backup file: {}", e)),
+        Err(e) => return error(StatusCode::BAD_REQUEST, &format!("无效的 JSON 备份文件: {}", e)),
     };
 
     match backup::import_backup(&state, backup_data).await {

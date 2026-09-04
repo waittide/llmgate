@@ -30,12 +30,12 @@ pub async fn init_db(db_path: &Path) -> Result<DbPool> {
         .await?;
 
     migrate(&pool).await?;
-    info!("Database initialized successfully at {:?}", db_path);
+    info!("数据库初始化成功: {:?}", db_path);
     Ok(pool)
 }
 
 pub async fn migrate(pool: &DbPool) -> Result<()> {
-    // 1. users table
+    // 1. 用户表 (users)
     sqlx::query(
         r#"
         CREATE TABLE IF NOT EXISTS users (
@@ -48,7 +48,7 @@ pub async fn migrate(pool: &DbPool) -> Result<()> {
     .execute(pool)
     .await?;
 
-    // Seed default admin user (admin / admin) if users table is empty
+    // 如果用户表为空，插入默认管理员用户 (admin / admin)
     let user_count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM users")
         .fetch_one(pool)
         .await?;
@@ -58,10 +58,10 @@ pub async fn migrate(pool: &DbPool) -> Result<()> {
             .bind("admin")
             .execute(pool)
             .await?;
-        info!("Default admin user created (admin / admin)");
+        info!("已创建默认管理员用户 (admin / admin)");
     }
 
-    // 2. settings table
+    // 2. 系统设置表 (settings)
     sqlx::query(
         r#"
         CREATE TABLE IF NOT EXISTS settings (
@@ -73,7 +73,7 @@ pub async fn migrate(pool: &DbPool) -> Result<()> {
     .execute(pool)
     .await?;
 
-    // Seed default settings
+    // 插入默认系统设置项
     let default_settings = [
         ("stats_save_interval", "10"),
         ("cors_allow_origins", ""),
@@ -89,7 +89,7 @@ pub async fn migrate(pool: &DbPool) -> Result<()> {
             .await?;
     }
 
-    // 3. api_keys table
+    // 3. API 密钥表 (api_keys)
     sqlx::query(
         r#"
         CREATE TABLE IF NOT EXISTS api_keys (
@@ -106,7 +106,7 @@ pub async fn migrate(pool: &DbPool) -> Result<()> {
     .execute(pool)
     .await?;
 
-    // 4. channels table
+    // 4. 渠道表 (channels)
     sqlx::query(
         r#"
         CREATE TABLE IF NOT EXISTS channels (
@@ -132,7 +132,7 @@ pub async fn migrate(pool: &DbPool) -> Result<()> {
     .execute(pool)
     .await?;
 
-    // 5. channel_models table
+    // 5. 渠道模型表 (channel_models)
     sqlx::query(
         r#"
         CREATE TABLE IF NOT EXISTS channel_models (
@@ -155,7 +155,7 @@ pub async fn migrate(pool: &DbPool) -> Result<()> {
     .execute(pool)
     .await?;
 
-    // 6. groups table
+    // 6. 分组表 (groups)
     sqlx::query(
         r#"
         CREATE TABLE IF NOT EXISTS groups (
@@ -170,7 +170,7 @@ pub async fn migrate(pool: &DbPool) -> Result<()> {
     .execute(pool)
     .await?;
 
-    // 7. group_items table
+    // 7. 分组成员表 (group_items)
     sqlx::query(
         r#"
         CREATE TABLE IF NOT EXISTS group_items (
@@ -187,7 +187,7 @@ pub async fn migrate(pool: &DbPool) -> Result<()> {
     .execute(pool)
     .await?;
 
-    // 8. llm_infos table (pricing)
+    // 8. 模型价格信息表 (llm_infos)
     sqlx::query(
         r#"
         CREATE TABLE IF NOT EXISTS llm_infos (
@@ -202,7 +202,7 @@ pub async fn migrate(pool: &DbPool) -> Result<()> {
     .execute(pool)
     .await?;
 
-    // 9. stats tables
+    // 9. 统计数据表 (stats_totals, stats_dailies, stats_hourlies, stats_api_keys)
     sqlx::query(
         r#"
         CREATE TABLE IF NOT EXISTS stats_totals (
@@ -252,7 +252,7 @@ pub async fn migrate(pool: &DbPool) -> Result<()> {
     .execute(pool)
     .await?;
 
-    // 10. request_logs table (persistent request/response logging)
+    // 10. 请求日志表 (request_logs)
     sqlx::query(
         r#"
         CREATE TABLE IF NOT EXISTS request_logs (
@@ -284,5 +284,6 @@ pub async fn migrate(pool: &DbPool) -> Result<()> {
     )
     .execute(pool)
     .await?;
+
     Ok(())
 }

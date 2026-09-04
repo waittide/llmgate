@@ -47,7 +47,7 @@ pub async fn update_group_active_item(
 
 pub async fn delete_group(State(state): State<AppState>, Path(id): Path<i64>) -> Response {
     match group::delete_group(&state, id).await {
-        Ok(_) => success_msg("group deleted"),
+        Ok(_) => success_msg("分组已删除"),
         Err(e) => error(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
     }
 }

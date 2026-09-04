@@ -23,7 +23,7 @@ struct ToolState {
     block_index: usize,
 }
 
-/// Adapts Chat Completions or Responses SSE into Anthropic Messages SSE.
+/// 将 OpenAI Chat Completions 或 Responses SSE 流适配转换为 Anthropic Messages SSE 流。
 pub struct OpenaiToAnthropicStream<S> {
     inner:            S,
     format:           OpenaiStreamFormat,
@@ -140,8 +140,7 @@ impl<S> OpenaiToAnthropicStream<S> {
         let Ok(value) = serde_json::from_str::<Value>(data) else {
             return;
         };
-        // Carry real usage into the Anthropic message_delta usage field instead of
-        // emitting hard-coded zeros.
+        // 将提取到的真实 Token 用量记录到 self.usage，供结束时发射真实的 message_delta
         if let Some(u) = extract_usage_from_json(&value) {
             self.usage = Some(u);
         }

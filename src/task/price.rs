@@ -16,7 +16,7 @@ use crate::{
     op::{AppState, llm},
 };
 
-// In-memory catalog of all upstream model prices from models.dev (not in DB)
+// 来自 models.dev 的所有上游模型价格内存目录缓存（不在数据库中持久化）
 static GLOBAL_CATALOG_PRICES: LazyLock<DashMap<String, LLMPrice>> = LazyLock::new(DashMap::new);
 static LAST_PRICE_UPDATE_TIME: AtomicI64 = AtomicI64::new(0);
 
@@ -41,7 +41,7 @@ pub async fn fetch_catalog_from_models_dev() -> Result<()> {
         .await?;
 
     if !resp.status().is_success() {
-        warn!("Failed to fetch pricing from models.dev: {}", resp.status());
+        warn!("从 models.dev 获取价格失败: {}", resp.status());
         return Ok(());
     }
 
@@ -91,7 +91,7 @@ pub async fn fetch_catalog_from_models_dev() -> Result<()> {
     Ok(())
 }
 
-/// Ensures only the specified channel models exist in the database with catalog prices.
+/// 确保仅指定的渠道模型在数据库中拥有对应的目录参考价格。
 pub async fn ensure_model_prices(state: &AppState, model_names: &[String]) -> Result<()> {
     if GLOBAL_CATALOG_PRICES.is_empty() {
         let _ = fetch_catalog_from_models_dev().await;
@@ -110,7 +110,7 @@ pub async fn ensure_model_prices(state: &AppState, model_names: &[String]) -> Re
     Ok(())
 }
 
-/// Updates prices for the models currently configured in channels.
+/// 为当前在渠道中已配置的所有模型更新价格信息。
 pub async fn update_llm_prices(state: &AppState) -> Result<()> {
     fetch_catalog_from_models_dev().await?;
 
@@ -130,11 +130,11 @@ pub async fn update_llm_prices(state: &AppState) -> Result<()> {
         llm::batch_create_llm_infos(state, updated_infos).await?;
     }
 
-    debug!("Channel model prices updated");
+    debug!("渠道模型价格已更新");
     Ok(())
 }
 
-/// Cleans up ghost models and rebuilds prices from channels.
+/// 清理无渠道引用的幽灵模型，并根据现有渠道模型重建价格信息。
 pub async fn rebuild_all_prices(state: &AppState) -> Result<()> {
     fetch_catalog_from_models_dev().await?;
     llm::cleanup_ghosts(state).await?;

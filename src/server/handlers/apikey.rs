@@ -37,7 +37,7 @@ pub async fn update_api_key(State(state): State<AppState>, Json(payload): Json<A
 
 pub async fn delete_api_key(State(state): State<AppState>, Path(id): Path<i64>) -> Response {
     match apikey::delete_api_key(&state, id).await {
-        Ok(_) => success_msg("api key deleted"),
+        Ok(_) => success_msg("API 密钥已删除"),
         Err(e) => error(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
     }
 }
@@ -69,5 +69,5 @@ pub async fn get_api_key_stats_by_id(
 }
 
 pub async fn login_api_key(Extension(_auth_ctx): Extension<Arc<AuthContext>>) -> Response {
-    success_msg("login successfully")
+    success_msg("登录成功")
 }

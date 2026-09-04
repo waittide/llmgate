@@ -88,7 +88,7 @@ impl AppState {
 
         state.refresh_all_caches().await?;
         stats::refresh_stats_cache(&state).await?;
-        info!("All in-memory caches initialized");
+        info!("所有内存缓存初始化完成");
         Ok(state)
     }
 

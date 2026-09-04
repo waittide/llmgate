@@ -45,7 +45,7 @@ pub fn rewrite_request_body_in_json(body: &[u8], new_model: &str, param_override
     body.to_vec()
 }
 
-/// Converts a Responses API function tool into Chat Completions' nested shape.
+/// 将 Responses API 的 function tool 转换为 Chat Completions 的嵌套结构。
 fn convert_responses_tool_to_chat(tool: &Value) -> Option<Value> {
     let tool_type = tool
         .get("type")
@@ -78,14 +78,14 @@ fn convert_responses_tool_to_chat(tool: &Value) -> Option<Value> {
     }))
 }
 
-/// Converts an OpenAI Responses API payload (containing `input: [...]`)
+/// 将 OpenAI Responses API 请求载荷（包含 `input: [...]`）转换为 Chat Completions 请求。
 pub fn convert_responses_to_chat_completions(val: &Value) -> Value {
     let mut obj = match val.as_object() {
         Some(o) => o.clone(),
         None => return val.clone(),
     };
 
-    // Remove Responses API-only fields that cause 400 Bad Request on standard Chat Completions
+    // 移除 Responses API 专属字段，避免在标准 Chat Completions 上引发 400 Bad Request
     obj.remove("include");
     if let Some(tools) = obj.get_mut("tools").and_then(Value::as_array_mut) {
         *tools = tools
@@ -105,12 +105,10 @@ pub fn convert_responses_to_chat_completions(val: &Value) -> Value {
 
     if let Some(input) = obj.remove("input") {
         let mut messages: Vec<Value> = Vec::new();
-        // Accumulate consecutive assistant output items (message text + function calls)
-        // into a single Chat Completions assistant message, so tool calls stay
-        // attached to the assistant turn that produced them.
+        // 将连续的 assistant 输出项（消息文本 + 函数调用）聚合到单条 Chat Completions 消息中，
+        // 保证 tool calls 正确附加在生成它们的 assistant 回合内。
         let mut current_assistant: Option<serde_json::Map<String, Value>> = None;
-        // Generated function_call identifiers, keyed by the item's raw id when
-        // `call_id` is absent; reused for the matching `function_call_output`.
+        // 生成的 function_call 标识符映射表，当 `call_id` 缺失时记录并在对应的 `function_call_output` 中复用
         let mut call_lookup: Vec<(String, String)> = Vec::new();
 
         if let Some(items) = input.as_array() {
@@ -158,7 +156,7 @@ pub fn convert_responses_to_chat_completions(val: &Value) -> Value {
                         }
                     }
                     "function_call_output" => {
-                        // A tool result terminates the current assistant turn.
+                        // 工具结果输出将结束当前 assistant 轮次
                         if let Some(assistant) = current_assistant.take() {
                             messages.push(Value::Object(assistant));
                         }
@@ -218,9 +216,7 @@ pub fn convert_responses_to_chat_completions(val: &Value) -> Value {
                         };
 
                         if role == "assistant" {
-                            // Assistant output text belongs to the current assistant
-                            // turn; merge it into the ongoing assistant message so
-                            // text and following tool calls stay in one message.
+                            // 助手输出文本属于当前 assistant 轮次，合并至当前消息中
                             let entry = current_assistant.get_or_insert_with(serde_json::Map::new);
                             entry.insert("role".to_string(), Value::String("assistant".to_string()));
                             match entry.get("content") {
@@ -228,7 +224,7 @@ pub fn convert_responses_to_chat_completions(val: &Value) -> Value {
                                     entry.insert("content".to_string(), content_val);
                                 }
                                 Some(_) => {
-                                    // Append to existing text content.
+                                    // 追加至已有的文本内容之后
                                     let existing = entry.get("content").and_then(Value::as_str).unwrap_or("");
                                     let combined = if existing.is_empty() {
                                         content_val.as_str().unwrap_or("").to_string()
@@ -242,8 +238,7 @@ pub fn convert_responses_to_chat_completions(val: &Value) -> Value {
                                 }
                             }
                         } else {
-                            // A user message (or non-assistant item) terminates the
-                            // current assistant turn.
+                            // user 消息（或非 assistant 项）将结束当前 assistant 轮次
                             if let Some(assistant) = current_assistant.take() {
                                 messages.push(Value::Object(assistant));
                             }
@@ -265,8 +260,7 @@ pub fn convert_responses_to_chat_completions(val: &Value) -> Value {
     Value::Object(obj)
 }
 
-/// Converts an OpenAI Chat Completions payload (containing `messages: [...]`)
-/// into an OpenAI Responses payload (containing `input: [...]`).
+/// 将 OpenAI Chat Completions 请求载荷（包含 `messages: [...]`）转换为 OpenAI Responses 请求载荷（包含 `input: [...]`）。
 pub fn convert_chat_completions_to_responses(val: &Value) -> Value {
     let mut obj = match val.as_object() {
         Some(o) => o.clone(),
@@ -280,7 +274,7 @@ pub fn convert_chat_completions_to_responses(val: &Value) -> Value {
     Value::Object(obj)
 }
 
-/// Converts a non-streaming Chat Completion response into an OpenAI Responses response.
+/// 将非流式 Chat Completion 响应转换为 OpenAI Responses 响应结构。
 pub fn convert_openai_chat_to_responses_response(val: &Value, model_name: &str) -> Value {
     let choice = val.pointer("/choices/0");
     let message = choice.and_then(|choice| choice.get("message"));
@@ -352,7 +346,7 @@ fn anthropic_stop_reason(reason: Option<&str>) -> &str {
     }
 }
 
-/// Converts a non-streaming Chat Completion response into an Anthropic Message response.
+/// 将非流式 Chat Completion 响应转换为 Anthropic Message 响应结构。
 pub fn convert_openai_chat_to_anthropic_response(val: &Value, model_name: &str) -> Value {
     let choice = val.pointer("/choices/0");
     let message = choice.and_then(|choice| choice.get("message"));
@@ -402,7 +396,7 @@ pub fn convert_openai_chat_to_anthropic_response(val: &Value, model_name: &str) 
     })
 }
 
-/// Converts a non-streaming Responses response into an Anthropic Message response.
+/// 将非流式 Responses 响应转换为 Anthropic Message 响应结构。
 pub fn convert_responses_to_anthropic_response(val: &Value, model_name: &str) -> Value {
     let mut content = Vec::new();
     if let Some(output) = val.get("output").and_then(Value::as_array) {
@@ -454,7 +448,7 @@ pub fn convert_responses_to_anthropic_response(val: &Value, model_name: &str) ->
     })
 }
 
-/// Converts an Anthropic Messages request into an OpenAI Chat Completions request.
+/// 将 Anthropic Messages 请求转换为 OpenAI Chat Completions 请求。
 pub fn convert_anthropic_to_openai_chat_request(val: &Value) -> Value {
     let mut obj = match val.as_object() {
         Some(obj) => obj.clone(),
@@ -578,7 +572,7 @@ pub fn convert_anthropic_to_openai_chat_request(val: &Value) -> Value {
 
     Value::Object(obj)
 }
-/// Extracts plain text from an OpenAI `content` value (string or content array).
+/// 从 OpenAI `content`（字符串或内容块数组）中提取纯文本。
 fn extract_text_content(content: &Value) -> String {
     match content {
         Value::String(s) => s.clone(),
@@ -591,9 +585,8 @@ fn extract_text_content(content: &Value) -> String {
     }
 }
 
-/// Converts an OpenAI `image_url` content part to an Anthropic `image` block.
-/// Base64 `data:` URIs become `source.type = "base64"`; public URLs are handed
-/// to Anthropic as `source.type = "url"` (Anthropic fetches them server-side).
+/// 将 OpenAI `image_url` 内容块转换为 Anthropic `image` 块。
+/// Base64 `data:` URI 转为 `source.type = "base64"`；公开 URL 则以 `source.type = "url"` 交由 Anthropic 处理。
 fn openai_image_to_anthropic(url: &str) -> Option<Value> {
     if url.is_empty() {
         return None;
@@ -618,8 +611,7 @@ fn openai_image_to_anthropic(url: &str) -> Option<Value> {
     }))
 }
 
-/// Converts an OpenAI `content` value (string or content array with text/image)
-/// into Anthropic's `content` shape: a string, a single block, or a block array.
+/// 将 OpenAI `content` 转换为 Anthropic 的 `content` 结构（字符串或块数组）。
 fn openai_content_to_anthropic(content: &Value) -> Value {
     match content {
         Value::String(s) => Value::String(s.clone()),
@@ -657,8 +649,7 @@ fn openai_content_to_anthropic(content: &Value) -> Value {
     }
 }
 
-/// Converts an OpenAI assistant message (content + optional `tool_calls`) into
-/// an Anthropic assistant message with `tool_use` content blocks.
+/// 将 OpenAI 助手消息（内容 + 可选的 `tool_calls`）转换为包含 `tool_use` 块的 Anthropic 助手消息。
 fn openai_assistant_to_anthropic(msg: &Value) -> Value {
     let mut blocks = Vec::new();
     if let Some(content) = msg.get("content") {
@@ -692,7 +683,7 @@ fn openai_assistant_to_anthropic(msg: &Value) -> Value {
     serde_json::json!({ "role": "assistant", "content": Value::Array(blocks) })
 }
 
-/// Converts an OpenAI `tool` role message into an Anthropic `tool_result` content block.
+/// 将 OpenAI `tool` 角色消息转换为 Anthropic `tool_result` 内容块。
 fn openai_tool_to_anthropic_block(msg: &Value) -> Value {
     let tool_use_id = msg
         .get("tool_call_id")
@@ -709,7 +700,7 @@ fn openai_tool_to_anthropic_block(msg: &Value) -> Value {
     })
 }
 
-/// Convert OpenAI /chat/completions payload to Anthropic /messages payload.
+/// 将 OpenAI /chat/completions 请求载荷转换为 Anthropic /messages 请求载荷。
 pub fn convert_openai_to_anthropic(val: &Value) -> Value {
     let mut anthropic_obj = serde_json::Map::new();
 
@@ -734,8 +725,8 @@ pub fn convert_openai_to_anthropic(val: &Value) -> Value {
         anthropic_obj.insert("top_p".to_string(), top_p.clone());
     }
 
-    // `tools`: OpenAI wraps each tool as `{type, function:{...}}`; Anthropic uses
-    // a flat `{name, description, input_schema}` object.
+    // `tools`：OpenAI 将每个工具包装为 `{type, function:{...}}`；Anthropic 使用扁平的
+    // `{name, description, input_schema}` 对象。
     if let Some(tools) = val.get("tools").and_then(|v| v.as_array()) {
         let mut anthropic_tools = Vec::new();
         for tool in tools {
@@ -767,8 +758,8 @@ pub fn convert_openai_to_anthropic(val: &Value) -> Value {
         }
     }
 
-    // `tool_choice`: OpenAI "auto"/"none"/"required" or a function object;
-    // Anthropic uses an object with `type: auto|none|any|tool`.
+    // `tool_choice`：OpenAI 为 "auto"/"none"/"required" 或函数对象；
+    // Anthropic 使用 `type: auto|none|any|tool` 的对象。
     if let Some(choice) = val.get("tool_choice") {
         match choice {
             Value::String(s) => {
@@ -899,7 +890,7 @@ fn anthropic_to_openai_finish_reason(reason: Option<&str>) -> &str {
     }
 }
 
-/// Converts a non-streaming Anthropic message response into an OpenAI Chat Completion response.
+/// 将非流式 Anthropic message 响应转换为 OpenAI Chat Completion 响应。
 pub fn convert_anthropic_to_openai_chat_response(val: &Value, model_name: &str) -> Value {
     let mut text_parts = Vec::new();
     let mut tool_calls = Vec::new();
@@ -974,7 +965,7 @@ pub fn convert_anthropic_to_openai_chat_response(val: &Value, model_name: &str) 
     })
 }
 
-/// Translates an Anthropic SSE event string into corresponding OpenAI Chat Completion SSE chunk lines.
+/// 将 Anthropic SSE 事件字符串转换为对应的 OpenAI Chat Completion SSE chunk 行。
 pub fn anthropic_sse_event_to_openai_chunk(
     event_str: &str,
     model_name: &str,
@@ -1124,8 +1115,8 @@ pub fn anthropic_sse_event_to_openai_chunk(
                     "finish_reason": finish_reason
                 }]
             });
-            // Preserve Anthropic output_tokens so the StreamFinalizer can recover
-            // real completion token counts instead of falling back to estimates.
+            // 保留 Anthropic 的 output_tokens，让 StreamFinalizer 能恢复
+            // 真实的补全 token 数，而不是退化为估算值。
             if let Some(usage) = val.get("usage") {
                 let output_tokens = usage
                     .get("output_tokens")
@@ -1149,9 +1140,7 @@ pub fn anthropic_sse_event_to_openai_chunk(
     None
 }
 
-/// Converts an OpenAI `image_url` content part to a Gemini content part. Base64
-/// `data:` URIs become `inlineData`; public URLs become `fileData` (Gemini
-/// fetches publicly accessible URIs server-side).
+/// 将 OpenAI `image_url` 内容块转换为 Gemini 格式。Base64 `data:` URI 转换为 `inlineData`；公开 URL 转换为 `fileData`。
 fn openai_image_to_gemini_part(url: &str) -> Option<Value> {
     if url.is_empty() {
         return None;
@@ -1174,8 +1163,7 @@ fn openai_image_to_gemini_part(url: &str) -> Option<Value> {
     }))
 }
 
-/// Converts an OpenAI `content` value (string or content array) into Gemini
-/// content `parts`.
+/// 将 OpenAI `content` 转换为 Gemini 的 `parts` 内容块。
 fn openai_content_to_gemini_parts(content: &Value) -> Vec<Value> {
     let mut parts = Vec::new();
     match content {
@@ -1205,12 +1193,11 @@ fn openai_content_to_gemini_parts(content: &Value) -> Vec<Value> {
     parts
 }
 
-/// Convert OpenAI /chat/completions payload to Google Gemini generateContent payload.
+/// 将 OpenAI /chat/completions 请求载荷转换为 Google Gemini generateContent 请求载荷。
 pub fn convert_openai_to_gemini(val: &Value) -> Value {
     let mut contents = Vec::new();
     let mut system_instruction = None;
-    // OpenAI `tool` messages only carry `tool_call_id`; remember the mapping to
-    // the function name so Gemini `functionResponse` can name the function.
+    // OpenAI 的 `tool` 消息仅携带 `tool_call_id`；记录其与函数名称的映射，供 Gemini 的 `functionResponse` 填充对应函数名
     let mut tool_call_names: std::collections::HashMap<String, String> = std::collections::HashMap::new();
 
     if let Some(messages) = val.get("messages").and_then(|m| m.as_array()) {
@@ -1295,8 +1282,7 @@ pub fn convert_openai_to_gemini(val: &Value) -> Value {
         gemini_obj.insert("system_instruction".to_string(), sys);
     }
 
-    // `tools`: OpenAI `{type:"function", function:{name,...}}` becomes a Gemini
-    // `functionDeclarations` entry.
+    // `tools`: 将 OpenAI `{type:"function", function:{name,...}}` 转换为 Gemini 的 `functionDeclarations` 列表
     if let Some(tools) = val.get("tools").and_then(|v| v.as_array()) {
         let mut funcs = Vec::new();
         for tool in tools {
@@ -1331,8 +1317,7 @@ pub fn convert_openai_to_gemini(val: &Value) -> Value {
         }
     }
 
-    // `tool_choice`: OpenAI "auto"/"none"/"required" or a function object maps to
-    // Gemini `toolConfig.functionCallingConfig`.
+    // `tool_choice`: 将 OpenAI "auto"/"none"/"required" 或指定函数映射到 Gemini 的 `toolConfig.functionCallingConfig`
     if let Some(choice) = val.get("tool_choice") {
         let mut cfg = serde_json::Map::new();
         match choice {
@@ -1392,7 +1377,7 @@ fn gemini_finish_reason(reason: &str) -> &str {
     }
 }
 
-/// Converts a native Gemini generateContent response into an OpenAI Chat Completion response.
+/// 将 Gemini 原生 generateContent 响应转换为 OpenAI Chat Completion 响应。
 pub fn convert_gemini_to_openai_chat_response(val: &Value, model_name: &str) -> Value {
     let candidate = val.pointer("/candidates/0");
     let parts = candidate
@@ -1474,7 +1459,7 @@ pub fn convert_gemini_to_openai_chat_response(val: &Value, model_name: &str) -> 
     })
 }
 
-/// Translates one native Gemini SSE event into an OpenAI Chat Completion SSE chunk.
+/// 将单个 Gemini 原生 SSE 事件转换为 OpenAI Chat Completion SSE chunk 行。
 pub fn gemini_sse_event_to_openai_chunk(
     event_str: &str,
     model_name: &str,
@@ -1549,8 +1534,7 @@ pub fn gemini_sse_event_to_openai_chunk(
             "finish_reason": finish_reason
         }]
     });
-    // Preserve Gemini usageMetadata so the StreamFinalizer can recover real token
-    // counts instead of falling back to estimates.
+    // 保留 Gemini usageMetadata，使 StreamFinalizer 能获得真实 Token 用量而非估算
     if let Some(usage) = val.get("usageMetadata") {
         let prompt_tokens = usage
             .get("promptTokenCount")
@@ -1579,7 +1563,7 @@ pub fn gemini_sse_event_to_openai_chunk(
 pub fn calculate_cost(prompt_tokens: i64, completion_tokens: i64, price: Option<&LLMPrice>) -> f64 {
     match price {
         Some(p) => {
-            // Price is per 1M tokens
+            // 价格按每 1M token 计算
             let input_cost = (prompt_tokens as f64 / 1_000_000.0) * p.input;
             let output_cost = (completion_tokens as f64 / 1_000_000.0) * p.output;
             input_cost + output_cost
@@ -1589,8 +1573,8 @@ pub fn calculate_cost(prompt_tokens: i64, completion_tokens: i64, price: Option<
 }
 
 pub fn extract_usage_from_json(val: &Value) -> Option<Usage> {
-    // OpenAI-style `usage` object: prompt_tokens / completion_tokens / total_tokens
-    // (also accepted via the Responses aliases input_tokens / output_tokens).
+    // OpenAI 风格的 `usage` 对象：prompt_tokens / completion_tokens / total_tokens
+    // （兼容 Responses 的 input_tokens / output_tokens 别名）。
     let usage_candidate = val
         .get("usage")
         .or_else(|| val.pointer("/response/usage"))
@@ -1623,7 +1607,7 @@ pub fn extract_usage_from_json(val: &Value) -> Option<Usage> {
         });
     }
 
-    // Gemini-style top-level `usageMetadata` object.
+    // Gemini 风格的顶层 `usageMetadata` 对象。
     if let Some(usage_obj) = val.get("usageMetadata") {
         let prompt_tokens = usage_obj
             .get("promptTokenCount")
@@ -1727,14 +1711,14 @@ mod tests {
 
         let messages = anthropic.get("messages").unwrap().as_array().unwrap();
         assert_eq!(messages.len(), 3);
-        // assistant -> tool_use block
+        // assistant -> tool_use 块
         let assistant = messages[1].as_object().unwrap();
         let blocks = assistant.get("content").unwrap().as_array().unwrap();
         assert_eq!(blocks[0].get("type").unwrap(), "tool_use");
         assert_eq!(blocks[0].get("id").unwrap(), "call_abc");
         assert_eq!(blocks[0].get("name").unwrap(), "get_weather");
         assert_eq!(blocks[0].pointer("/input/city").unwrap(), "Paris");
-        // tool role -> user message with tool_result
+        // tool 角色 -> 携带 tool_result 的 user 消息
         let tool_msg = messages[2].as_object().unwrap();
         assert_eq!(tool_msg.get("role").unwrap(), "user");
         let result = tool_msg.get("content").unwrap().as_array().unwrap();
@@ -1770,7 +1754,7 @@ mod tests {
 
         let anthropic = convert_openai_to_anthropic(&openai_req);
         let messages = anthropic.get("messages").unwrap().as_array().unwrap();
-        // Must be exactly 3 messages: user -> assistant -> user (merged tool results)
+        // 必须恰好 3 条消息：user -> assistant -> user（已合并 tool 结果）
         assert_eq!(messages.len(), 3);
         assert_eq!(messages[0].get("role").unwrap(), "user");
         assert_eq!(messages[1].get("role").unwrap(), "assistant");
@@ -1834,7 +1818,7 @@ mod tests {
         let model_parts = contents[1].get("parts").unwrap().as_array().unwrap();
         assert_eq!(model_parts[0].pointer("/functionCall/name").unwrap(), "get_weather");
         assert_eq!(model_parts[0].pointer("/functionCall/args/city").unwrap(), "Paris");
-        // tool message maps to functionResponse with the resolved function name
+        // tool 消息映射为 functionResponse，函数名取自解析出的映射
         let user_parts = contents[2].get("parts").unwrap().as_array().unwrap();
         assert_eq!(user_parts[0].pointer("/functionResponse/name").unwrap(), "get_weather");
     }
@@ -1963,7 +1947,7 @@ mod tests {
         });
         let chat = convert_responses_to_chat_completions(&responses_req);
         let messages = chat.get("messages").unwrap().as_array().unwrap();
-        // user + single assistant (text + tool_calls) + tool
+        // user + 单条 assistant（text + tool_calls）+ tool
         assert_eq!(messages.len(), 3);
         assert_eq!(messages[0].get("role").unwrap(), "user");
         assert_eq!(messages[1].get("role").unwrap(), "assistant");
@@ -1995,7 +1979,7 @@ mod tests {
             .unwrap();
         assert!(!call_id.is_empty());
         assert_eq!(messages[1].get("tool_call_id").unwrap(), call_id);
-        // object output should be serialized to a JSON string
+        // 对象输出应序列化为 JSON 字符串
         let content = messages[1].get("content").unwrap().as_str().unwrap();
         assert!(content.contains("\"ok\""));
     }

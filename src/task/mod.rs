@@ -8,7 +8,7 @@ use tracing::{error, info};
 use crate::op::{AppState, stats::flush_stats_to_db};
 
 pub fn start_background_tasks(state: AppState) {
-    // 1. Periodic Stats Flush (reads stats_save_interval in minutes, default 10m)
+    // 1. 定时落盘统计（读取 stats_save_interval，单位分钟，默认 10 分钟）
     let state_stats = state.clone();
     tokio::spawn(async move {
         loop {
@@ -21,17 +21,17 @@ pub fn start_background_tasks(state: AppState) {
             tokio::time::sleep(Duration::from_secs(minutes.max(1) * 60)).await;
 
             if let Err(e) = flush_stats_to_db(&state_stats).await {
-                error!("Periodic stats flush failed: {}", e);
+                error!("定时统计落盘失败: {}", e);
             }
         }
     });
 
-    // 2. Periodic Channel Auto-Sync & Price Update (startup sync after 5s, then interval)
+    // 2. 渠道自动同步与价格更新（启动 5 秒后首次执行，之后按间隔执行）
     let state_sync = state.clone();
     tokio::spawn(async move {
         tokio::time::sleep(Duration::from_secs(5)).await;
 
-        // Perform first sync once on startup
+        // 启动时先执行一次同步
         let _ = sync::sync_all_channel_models(&state_sync).await;
         let _ = price::update_llm_prices(&state_sync).await;
 
@@ -57,21 +57,21 @@ pub fn start_background_tasks(state: AppState) {
         }
     });
 
-    // 3. Periodic request-log purge (run once at startup, then every hour)
+    // 3. 定期清理过期请求日志（启动时先执行一次，之后每小时一次）
     let state_purge = state.clone();
     tokio::spawn(async move {
         let _ = crate::op::log::purge_expired_logs(&state_purge).await;
 
         let mut interval = tokio::time::interval(Duration::from_secs(3600));
-        interval.tick().await; // Consume immediate first tick
+        interval.tick().await; // 消耗立即触发的首次 tick
 
         loop {
             interval.tick().await;
             if let Err(e) = crate::op::log::purge_expired_logs(&state_purge).await {
-                error!("Request-log purge failed: {}", e);
+                error!("过期请求日志清理失败: {}", e);
             }
         }
     });
 
-    info!("Background workers initialized");
+    info!("后台任务已初始化");
 }

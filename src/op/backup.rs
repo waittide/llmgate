@@ -53,7 +53,7 @@ pub async fn import_backup(state: &AppState, backup: BackupData) -> Result<DBImp
     let mut tx = state.db.begin().await?;
     let mut rows_affected = HashMap::new();
 
-    // 1. Settings
+    // 1. 系统设置 (Settings)
     let mut setting_count = 0;
     for s in backup.settings {
         let res = sqlx::query(
@@ -69,7 +69,7 @@ pub async fn import_backup(state: &AppState, backup: BackupData) -> Result<DBImp
     }
     rows_affected.insert("settings".to_string(), setting_count);
 
-    // 2. API Keys
+    // 2. API 密钥 (API Keys)
     let mut key_count = 0;
     for key in backup.api_keys {
         let res = if key.id > 0 {
@@ -118,7 +118,7 @@ pub async fn import_backup(state: &AppState, backup: BackupData) -> Result<DBImp
     }
     rows_affected.insert("api_keys".to_string(), key_count);
 
-    // 3. Channels
+    // 3. 渠道配置 (Channels)
     let mut channel_count = 0;
     for ch in &backup.channels {
         let custom_header_json = serde_json::to_string(&ch.custom_header).unwrap_or_else(|_| "[]".to_string());
@@ -189,7 +189,7 @@ pub async fn import_backup(state: &AppState, backup: BackupData) -> Result<DBImp
             channel_count += 1;
         }
 
-        // Also insert nested channel models if present with correct channel_id
+        // 若存在内嵌渠道模型，同时插入并关联对应的 channel_id
         if inserted_id > 0 {
             for cm in &ch.models {
                 let _ = sqlx::query(
@@ -205,7 +205,7 @@ pub async fn import_backup(state: &AppState, backup: BackupData) -> Result<DBImp
     }
     rows_affected.insert("channels".to_string(), channel_count);
 
-    // 4. Channel Models (top-level)
+    // 4. 顶层渠道模型 (Channel Models)
     let mut cm_count = 0;
     for cm in backup.channel_models {
         let res = if cm.id > 0 {
@@ -255,7 +255,7 @@ pub async fn import_backup(state: &AppState, backup: BackupData) -> Result<DBImp
     }
     rows_affected.insert("channel_models".to_string(), cm_count);
 
-    // 5. Groups
+    // 5. 分组配置 (Groups)
     let mut group_count = 0;
     for grp in &backup.groups {
         let relay_config_json = serde_json::to_string(&grp.relay_config).unwrap_or_else(|_| "{}".to_string());
@@ -295,7 +295,7 @@ pub async fn import_backup(state: &AppState, backup: BackupData) -> Result<DBImp
             group_count += 1;
         }
 
-        // Also insert nested group items with correct group_id
+        // 若存在内嵌分组成员，同时插入并关联对应的 group_id
         if inserted_id > 0 {
             for item in &grp.items {
                 let _ = sqlx::query(
@@ -311,7 +311,7 @@ pub async fn import_backup(state: &AppState, backup: BackupData) -> Result<DBImp
     }
     rows_affected.insert("groups".to_string(), group_count);
 
-    // 6. Group Items (top-level)
+    // 6. 顶层分组成员 (Group Items)
     let mut gi_count = 0;
     for item in backup.group_items {
         let res = if item.id > 0 {
@@ -347,7 +347,7 @@ pub async fn import_backup(state: &AppState, backup: BackupData) -> Result<DBImp
     }
     rows_affected.insert("group_items".to_string(), gi_count);
 
-    // 7. LLM Infos
+    // 7. 模型价格信息 (LLM Infos)
     let mut llm_count = 0;
     for info in backup.llm_infos {
         let name_lower = info.name.to_lowercase();
@@ -404,7 +404,7 @@ mod tests {
 
         let backup = BackupData {
             channels: vec![Channel {
-                id: 0, // Zero id import
+                id: 0, // 零 ID 导入
                 name: "imported-channel".to_string(),
                 channel_type: ChannelProvider::OpenaiCompletion,
                 enabled: true,
@@ -420,7 +420,7 @@ mod tests {
                 ..Default::default()
             }],
             groups: vec![Group {
-                id:             0, // Zero id import
+                id:             0, // 零 ID 导入
                 name:           "imported-group".to_string(),
                 mode:           GroupMode::Manual,
                 active_item_id: 0,
@@ -434,13 +434,13 @@ mod tests {
         assert_eq!(res.rows_affected.get("channels").copied(), Some(1));
         assert_eq!(res.rows_affected.get("groups").copied(), Some(1));
 
-        // Verify channel model was inserted with foreign key to newly created channel
+        // 验证渠道模型已成功插入，且外键正确关联新创建的渠道
         let model_row: (i64, i64, String) =
             sqlx::query_as("SELECT id, channel_id, name FROM channel_models WHERE name = 'gpt-4o'")
                 .fetch_one(&state.db)
                 .await
                 .unwrap();
-        assert!(model_row.1 > 0, "Nested channel model must have valid channel_id");
+        assert!(model_row.1 > 0, "嵌套渠道模型必须关联有效的 channel_id");
 
         let _ = std::fs::remove_file(db_path);
     }

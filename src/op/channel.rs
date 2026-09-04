@@ -9,7 +9,7 @@ use crate::{
 };
 
 pub async fn refresh_channel_cache(state: &AppState) -> Result<()> {
-    // 1. Fetch all channels into local map first to avoid cache-stampede / 404 race
+    // 1. 先将所有渠道读取到本地映射，防止击穿和 404 竞争条件
     let rows = sqlx::query("SELECT id, name, type, enabled, base_url, key, auto_sync, custom_header, param_override, input_token, output_token, input_cost, output_cost, wait_time, request_success, request_failed FROM channels ORDER BY id ASC")
         .fetch_all(&state.db)
         .await?;
@@ -47,7 +47,7 @@ pub async fn refresh_channel_cache(state: &AppState) -> Result<()> {
         local_channels.insert(id, channel);
     }
 
-    // 2. Fetch all channel models into local map
+    // 2. 将所有渠道模型读取到本地映射
     let model_rows = sqlx::query("SELECT id, channel_id, name, source, input_token, output_token, input_cost, output_cost, wait_time, request_success, request_failed FROM channel_models ORDER BY id ASC")
         .fetch_all(&state.db)
         .await?;
@@ -74,8 +74,7 @@ pub async fn refresh_channel_cache(state: &AppState) -> Result<()> {
         local_models.insert(id, channel_model);
     }
 
-    // Atomically sync in-memory cache without leaving empty windows,
-    // preserving in-memory metrics so refreshes do not roll back un-flushed stats.
+    // 原子同步内存缓存，同时保留未落盘的内存实时指标，防止缓存刷新回滚统计
     let local_channel_ids: std::collections::HashSet<i64> = local_channels.keys().copied().collect();
     for (k, mut v) in local_channels {
         if let Some(existing) = state.channels.get(&k) {
@@ -118,7 +117,7 @@ pub fn get_channel(state: &AppState, id: i64) -> Result<Channel> {
         .channels
         .get(&id)
         .map(|c| c.value().clone())
-        .ok_or_else(|| anyhow!("Channel not found"))
+        .ok_or_else(|| anyhow!("渠道不存在"))
 }
 
 pub async fn create_channel(state: &AppState, channel: &mut Channel) -> Result<()> {
@@ -200,7 +199,7 @@ pub async fn update_channel(state: &AppState, req: &ChannelUpdateRequest) -> Res
     .execute(&mut *tx)
     .await?;
 
-    // Handle models update if provided (incremental update to preserve IDs and metrics)
+    // 若请求中携带了模型列表，进行增量更新以保留已有模型的 ID 与指标数据
     if let Some(models) = &req.models {
         let existing_models: Vec<(i64, String)> =
             sqlx::query_as::<_, (i64, String)>("SELECT id, name FROM channel_models WHERE channel_id = ?")
@@ -320,7 +319,7 @@ mod tests {
             .unwrap()
             .id;
 
-        // Update channel models: keep gpt-4o, remove gpt-4o-mini, add o1-preview
+        // 更新渠道模型：保留 gpt-4o，移除 gpt-4o-mini，新增 o1-preview
         let update_req = ChannelUpdateRequest {
             id:             ch.id,
             name:           None,
@@ -351,7 +350,7 @@ mod tests {
             .iter()
             .find(|m| m.name == "gpt-4o")
             .unwrap();
-        assert_eq!(new_gpt4o.id, gpt4o_id, "Existing model ID should be preserved");
+        assert_eq!(new_gpt4o.id, gpt4o_id, "已有模型 ID 应保持不变");
 
         assert!(
             updated_channel
@@ -366,17 +365,14 @@ mod tests {
                 .any(|m| m.name == "gpt-4o-mini")
         );
 
-        // Verify foreign key cascade delete on channel deletion
+        // 验证删除渠道时外键级联删除生效
         delete_channel(&state, ch.id).await.unwrap();
         let count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM channel_models WHERE channel_id = ?")
             .bind(ch.id)
             .fetch_one(&state.db)
             .await
             .unwrap();
-        assert_eq!(
-            count.0, 0,
-            "Channel models must be cascade deleted when channel is deleted"
-        );
+        assert_eq!(count.0, 0, "删除渠道时渠道模型必须被级联删除");
     }
 
     #[tokio::test]
@@ -396,7 +392,7 @@ mod tests {
                     ..Default::default()
                 },
                 ChannelModel {
-                    name: "gpt-4o".to_string(), // Duplicate in create
+                    name: "gpt-4o".to_string(), // 创建时故意重复
                     source: ChannelModelSource::Auto,
                     ..Default::default()
                 },
@@ -404,12 +400,12 @@ mod tests {
             ..Default::default()
         };
 
-        // Creating channel with duplicate models must not fail with UNIQUE constraint
+        // 创建包含重名模型的渠道不应触发 UNIQUE 约束错误
         create_channel(&state, &mut ch).await.unwrap();
         let initial = get_channel(&state, ch.id).unwrap();
         assert_eq!(initial.models.len(), 1);
 
-        // Updating channel with duplicate models in update payload must also not fail
+        // 更新载荷中包含重名模型时同样不应失败
         let update_req = ChannelUpdateRequest {
             id:             ch.id,
             name:           None,
@@ -424,7 +420,7 @@ mod tests {
                     ..Default::default()
                 },
                 ChannelModel {
-                    name: "gpt-4o-mini".to_string(), // Duplicate in update
+                    name: "gpt-4o-mini".to_string(), // 更新时故意重复
                     source: ChannelModelSource::Auto,
                     ..Default::default()
                 },
@@ -459,7 +455,7 @@ mod tests {
         create_channel(&state, &mut ch).await.unwrap();
         let model_id = ch.models[0].id;
 
-        // Simulate live in-memory metrics (un-flushed to DB)
+        // 模拟尚未落盘的内存实时指标数据
         {
             let mut entry = state.channels.get_mut(&ch.id).unwrap();
             entry.metrics.input_token = 8888;
@@ -471,10 +467,10 @@ mod tests {
             model_entry.metrics.input_cost = 0.88;
         }
 
-        // Trigger refresh_channel_cache (reads DB where metrics are 0)
+        // 触发 refresh_channel_cache（从指标全为 0 的数据库重新读取）
         refresh_channel_cache(&state).await.unwrap();
 
-        // Verify live metrics were preserved and not rolled back to 0
+        // 验证内存中未落盘的实时指标被完整保留，未被重置回 0
         let refreshed_ch = get_channel(&state, ch.id).unwrap();
         assert_eq!(refreshed_ch.metrics.input_token, 8888);
         assert_eq!(refreshed_ch.metrics.input_cost, 0.88);

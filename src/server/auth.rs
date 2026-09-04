@@ -15,11 +15,11 @@ pub struct Claims {
 pub fn generate_jwt(username: &str, secret: &str, expires_sec: i64) -> Result<(String, usize)> {
     let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs() as usize;
     let max_age = if expires_sec == -1 {
-        30 * 24 * 3600 // 30 days
+        30 * 24 * 3600 // 30 天
     } else if expires_sec > 0 {
         expires_sec as usize
     } else {
-        15 * 60 // 15 mins default
+        15 * 60 // 默认 15 分钟
     };
 
     let claims = Claims {

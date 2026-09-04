@@ -27,12 +27,12 @@ pub fn get_api_key_by_key(state: &AppState, key_str: &str) -> Result<APIKey> {
     let id = cache
         .by_key
         .get(key_str)
-        .ok_or_else(|| anyhow!("API key not found"))?;
+        .ok_or_else(|| anyhow!("API 密钥不存在"))?;
     cache
         .by_id
         .get(id)
         .cloned()
-        .ok_or_else(|| anyhow!("API key not found"))
+        .ok_or_else(|| anyhow!("API 密钥不存在"))
 }
 
 pub fn get_api_key_by_id(state: &AppState, id: i64) -> Result<APIKey> {
@@ -42,7 +42,7 @@ pub fn get_api_key_by_id(state: &AppState, id: i64) -> Result<APIKey> {
         .by_id
         .get(&id)
         .cloned()
-        .ok_or_else(|| anyhow!("API key not found with id: {}", id))
+        .ok_or_else(|| anyhow!("API 密钥不存在: {}", id))
 }
 
 pub async fn create_api_key(state: &AppState, key: &mut APIKey) -> Result<()> {
@@ -67,7 +67,7 @@ pub async fn create_api_key(state: &AppState, key: &mut APIKey) -> Result<()> {
 
     key.id = result.last_insert_rowid();
 
-    // Ensure stats_api_keys row exists
+    // 确保对应的 stats_api_keys 统计记录存在
     let _ = sqlx::query(
         "INSERT OR IGNORE INTO stats_api_keys (api_key_id, input_token, output_token, input_cost, output_cost, wait_time, request_success, request_failed) VALUES (?, 0, 0, 0, 0, 0, 0, 0)"
     )
@@ -149,7 +149,7 @@ mod tests {
         create_api_key(&state, &mut key).await.unwrap();
         let key_id = key.id;
 
-        // Simulate metrics in memory cache
+        // 在内存统计缓存中模拟写入用量
         state.stats_api_keys.insert(
             key_id,
             crate::model::StatsAPIKey {
@@ -161,13 +161,13 @@ mod tests {
             },
         );
 
-        // Delete API key
+        // 删除 API 密钥
         delete_api_key(&state, key_id).await.unwrap();
 
-        // Verify removed from in-memory stats cache
+        // 验证已从内存统计缓存中移除
         assert!(!state.stats_api_keys.contains_key(&key_id));
 
-        // Flush to DB and verify it does NOT resurrect in stats_api_keys table
+        // 落盘至数据库，验证不会在 stats_api_keys 表中死灰复燃
         flush_stats_to_db(&state).await.unwrap();
 
         let row_count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM stats_api_keys WHERE api_key_id = ?")

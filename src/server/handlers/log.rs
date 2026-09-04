@@ -54,7 +54,7 @@ pub async fn stream_overview(State(state): State<AppState>) -> Response {
         .into_response()
 }
 
-// ---------------- Persistent log queries ----------------
+// ---------------- 持久化日志查询 ----------------
 
 #[derive(Debug, Deserialize)]
 pub struct LogListParams {
@@ -104,7 +104,7 @@ pub async fn list_logs(State(state): State<AppState>, Query(params): Query<LogLi
 pub async fn get_log_detail(State(state): State<AppState>, Path(id): Path<u64>) -> Response {
     match op_log::get_request_log(&state, id as i64).await {
         Ok(Some(log)) => success(log),
-        Ok(None) => error(StatusCode::NOT_FOUND, "Log not found"),
+        Ok(None) => error(StatusCode::NOT_FOUND, "日志不存在"),
         Err(e) => error(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
     }
 }
@@ -112,28 +112,28 @@ pub async fn get_log_detail(State(state): State<AppState>, Path(id): Path<u64>) 
 pub async fn get_request_body(State(state): State<AppState>, Path(id): Path<u64>) -> Response {
     match op_log::get_request_body(&state, id as i64).await {
         Ok(Some(body)) => success(body),
-        _ => error(StatusCode::NOT_FOUND, "Request body not found"),
+        _ => error(StatusCode::NOT_FOUND, "请求报文不存在"),
     }
 }
 
 pub async fn get_response_body(State(state): State<AppState>, Path(id): Path<u64>) -> Response {
     match op_log::get_response_body(&state, id as i64).await {
         Ok(Some(body)) => success(body),
-        _ => error(StatusCode::NOT_FOUND, "Response body not found"),
+        _ => error(StatusCode::NOT_FOUND, "响应报文不存在"),
     }
 }
 
 pub async fn interrupt_round(State(state): State<AppState>, Path((id, _round)): Path<(u64, i64)>) -> Response {
     if state.in_flight.interrupt(id) {
-        success_msg("interrupted successfully")
+        success_msg("已中断请求")
     } else {
-        error(StatusCode::NOT_FOUND, "request not found or already finished")
+        error(StatusCode::NOT_FOUND, "请求不存在或已结束")
     }
 }
 
 pub async fn clear_log(State(state): State<AppState>) -> Response {
     match op_log::clear_all_logs(&state).await {
-        Ok(_) => success_msg("logs cleared"),
+        Ok(_) => success_msg("日志已清空"),
         Err(e) => error(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
     }
 }
@@ -157,7 +157,7 @@ mod tests {
     async fn test_log_body_consistent_by_request_id() {
         let (state, db_path) = setup_test_state().await;
 
-        // 1. Insert historical log with request_id = 999
+        // 1. 插入一条历史日志 (request_id = 999)
         sqlx::query(
             r#"
             INSERT INTO request_logs (
@@ -169,7 +169,7 @@ mod tests {
         .await
         .unwrap();
 
-        // 2. Active runtime request created via create_initial_log
+        // 2. 模拟运行中请求通过 create_initial_log 刚创建
         let runtime_req_id = op_log::create_initial_log(
             &state,
             "gpt-4o",
@@ -181,7 +181,7 @@ mod tests {
         .await
         .unwrap() as u64;
 
-        // 3. Querying request 999 returns its DB body
+        // 3. 查询历史记录 999 成功返回数据库中的请求体
         let resp_hist = get_request_body(State(state.clone()), Path(999)).await;
         assert_eq!(resp_hist.status(), StatusCode::OK);
         let body_hist = axum::body::to_bytes(resp_hist.into_body(), 1024)
@@ -189,7 +189,7 @@ mod tests {
             .unwrap();
         assert!(String::from_utf8_lossy(&body_hist).contains("body for request 999"));
 
-        // 4. Querying runtime request returns its active DB body
+        // 4. 查询运行中请求成功返回数据库中的请求体
         let resp_rt = get_request_body(State(state.clone()), Path(runtime_req_id)).await;
         assert_eq!(resp_rt.status(), StatusCode::OK);
         let body_rt = axum::body::to_bytes(resp_rt.into_body(), 1024)

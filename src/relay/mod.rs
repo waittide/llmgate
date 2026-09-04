@@ -37,10 +37,10 @@ use crate::{
     server::{middleware::AuthContext, resp::error},
     utils::estimate_tokens,
 };
-/// Cap for captured streaming response bodies to bound log storage.
+/// 流式响应体内存捕获上限（64KB），用于防止大体量日志撑爆存储。
 const RESPONSE_CAPTURE_LIMIT: usize = 64 * 1024;
 
-/// Serializes an HTTP header map as a JSON object: name -> comma-joined values.
+/// 将 HTTP HeaderMap 序列化为 JSON 字符串对象：header名 -> 逗号分隔的值列表。
 fn serialize_headers(headers: &HeaderMap) -> String {
     let mut map: std::collections::BTreeMap<String, Vec<String>> = Default::default();
     for (name, value) in headers.iter() {
@@ -55,8 +55,8 @@ fn serialize_headers(headers: &HeaderMap) -> String {
     serde_json::to_string(&serde_json::Value::Object(obj)).unwrap_or_default()
 }
 
-/// Streams the upstream body while accumulating real usage, then records metrics
-/// exactly once when the stream ends (or is dropped, e.g. client disconnect).
+/// 包装上游流式响应体，在传输过程中实时解析累加 Token 用量，
+/// 并在流结束或客户端提前断开连接时，且仅在此时完成指标统计与日志持久化。
 struct StreamFinalizer<S> {
     inner:            S,
     state:            AppState,
@@ -78,10 +78,10 @@ struct StreamFinalizer<S> {
     interrupted:      bool,
 }
 
-/// Drains complete SSE events from `buffer`, accumulating any `usage` found.
-const SSE_BUFFER_LIMIT: usize = 64 * 1024; // 64KB max temporary SSE accumulation buffer
+/// 从 buffer 中截取完整的 SSE 事件并解析其中可能包含的 usage 数据。
+const SSE_BUFFER_LIMIT: usize = 64 * 1024; // 64KB 临时 SSE 累加缓冲区上限
 
-/// Handles events split across arbitrary stream chunk boundaries.
+/// 处理可能被流分片边界截断的 SSE 事件结尾判定。
 pub(crate) fn sse_event_end(buf: &[u8]) -> Option<usize> {
     for i in 0..buf.len().saturating_sub(1) {
         if buf[i] == b'\n' && buf[i + 1] == b'\n' {
@@ -97,7 +97,7 @@ pub(crate) fn sse_event_end(buf: &[u8]) -> Option<usize> {
 fn extract_usage_from_sse_buffer(buffer: &mut Vec<u8>, usage: &mut Option<Usage>) {
     while let Some(end) = sse_event_end(buffer) {
         let event_bytes = &buffer[..end];
-        // Fast path: skip string allocation and line parsing if the event doesn't contain "usage"
+        // 快速路径：若当前事件不包含 "usage" 关键字，跳过反序列化与行解析以节省性能
         if event_bytes.windows(7).any(|w| w == b"\"usage\"") {
             let text = String::from_utf8_lossy(event_bytes);
             for line in text.lines() {
@@ -108,9 +108,8 @@ fn extract_usage_from_sse_buffer(buffer: &mut Vec<u8>, usage: &mut Option<Usage>
                         && let Ok(val) = serde_json::from_str::<serde_json::Value>(trimmed)
                         && let Some(u) = extract_usage_from_json(&val)
                     {
-                        // Merge across events (e.g. Anthropic message_start carries
-                        // input_tokens while message_delta carries output_tokens).
-                        // Keep any already-recorded non-zero counts.
+                        // 跨事件合并 Token 计数（例如 Anthropic 的 message_start 提供 input_tokens，
+                        // 而 message_delta 提供 output_tokens）。
                         let merged = match usage {
                             Some(existing) => Usage {
                                 prompt_tokens:     if existing.prompt_tokens > 0 {
@@ -138,18 +137,17 @@ fn extract_usage_from_sse_buffer(buffer: &mut Vec<u8>, usage: &mut Option<Usage>
         }
         buffer.drain(..end);
     }
-    // Guard against malformed streams without event boundaries
+    // 防止无事件边界的异常数据流导致缓冲区无限膨胀
     if buffer.len() > SSE_BUFFER_LIMIT {
         buffer.drain(..buffer.len() - (SSE_BUFFER_LIMIT / 2));
     }
 }
 
-/// Determine if an upstream error indicates a client-side syntax/format issue.
+/// 判断上游返回的 HTTP 状态码是否属于客户端语法或格式错误。
 ///
-/// Authentication/authorization (401/403), missing model/endpoint on upstream (404),
-/// rate-limits/quota exhaustion (429), and server errors (5xx) are upstream channel issues.
-/// They must trigger channel cooldown and failover to other healthy channels.
-/// Only 400 Bad Request and 422 Unprocessable Entity are considered non-retryable client errors.
+/// 鉴权失败 (401/403)、上游缺少模型 (404)、限流超额 (429) 或服务端故障 (5xx) 属于渠道问题，
+/// 必须触发该渠道进入冷却并自动故障转移至其他健康渠道。
+/// 仅 400 Bad Request 与 422 Unprocessable Entity 视为不可重试的客户端请求错误。
 fn is_client_error(status: StatusCode) -> bool {
     matches!(status, StatusCode::BAD_REQUEST | StatusCode::UNPROCESSABLE_ENTITY)
 }
@@ -254,7 +252,7 @@ impl<S> StreamFinalizer<S> {
         let state = self.state.clone();
         tokio::spawn(async move {
             if let Err(e) = log::update_completed_log(&state, &req_log).await {
-                tracing::error!("Failed to update completed log in db: {}", e);
+                tracing::error!("写入已完成请求日志失败: {}", e);
             }
         });
     }
@@ -321,7 +319,7 @@ where
 
 impl<S> Drop for StreamFinalizer<S> {
     fn drop(&mut self) {
-        // Body dropped before completing (client disconnect): record the attempt.
+        // 响应体在完成前被 Drop（例如客户端主动断开连接）：记录该次尝试并保存日志
         self.finalize(false);
     }
 }
@@ -641,7 +639,7 @@ fn handle_successful_stream(state: &AppState, upstream_resp: reqwest::Response, 
         .header(header::CONNECTION, "keep-alive")
         .body(body)
         .unwrap_or_else(|e| {
-            tracing::error!("Failed to build SSE response: {}", e);
+            tracing::error!("构建 SSE 响应失败: {}", e);
             Response::builder()
                 .status(StatusCode::INTERNAL_SERVER_ERROR)
                 .body(Body::from("Internal Server Error"))
@@ -750,7 +748,7 @@ async fn handle_successful_json(
     let state_clone = state.clone();
     tokio::spawn(async move {
         if let Err(e) = log::update_completed_log(&state_clone, &req_log).await {
-            tracing::error!("Failed to update completed log in db: {}", e);
+            tracing::error!("写入已完成请求日志失败: {}", e);
         }
     });
 
@@ -773,7 +771,7 @@ async fn handle_successful_json(
         .header(header::CONTENT_TYPE, "application/json")
         .body(Body::from(resp_bytes))
         .unwrap_or_else(|e| {
-            tracing::error!("Failed to build JSON response: {}", e);
+            tracing::error!("构建 JSON 响应失败: {}", e);
             Response::builder()
                 .status(StatusCode::INTERNAL_SERVER_ERROR)
                 .body(Body::from("Internal Server Error"))
@@ -870,7 +868,7 @@ fn build_failed_relay_response(state: &AppState, ctx: FailedRelayContext<'_>) ->
     let state_clone = state.clone();
     tokio::spawn(async move {
         if let Err(e) = log::update_completed_log(&state_clone, &req_log).await {
-            tracing::error!("Failed to update failed log in db: {}", e);
+            tracing::error!("写入已失败请求日志失败: {}", e);
         }
     });
     Response::builder()
@@ -884,7 +882,7 @@ fn build_failed_relay_response(state: &AppState, ctx: FailedRelayContext<'_>) ->
         .header(header::CONTENT_TYPE, "application/json")
         .body(Body::from(response_bytes))
         .unwrap_or_else(|e| {
-            tracing::error!("Failed to build error response: {}", e);
+            tracing::error!("构建错误响应失败: {}", e);
             Response::builder()
                 .status(StatusCode::BAD_GATEWAY)
                 .body(Body::from("Bad Gateway"))
@@ -1310,7 +1308,7 @@ mod tests {
             buffer.extend_from_slice(piece);
             extract_usage_from_sse_buffer(&mut buffer, &mut usage);
         }
-        let u = usage.expect("usage extracted");
+        let u = usage.expect("应提取到 usage");
         assert_eq!(u.prompt_tokens, 5);
         assert_eq!(u.completion_tokens, 7);
         assert_eq!(u.total_tokens, 12);
@@ -1322,7 +1320,7 @@ mod tests {
         let mut buffer = b"data: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":9}}\n\n".to_vec();
         let mut usage = None;
         extract_usage_from_sse_buffer(&mut buffer, &mut usage);
-        let u = usage.expect("usage extracted");
+        let u = usage.expect("应提取到 usage");
         assert_eq!(u.completion_tokens, 9);
         assert_eq!(u.prompt_tokens, 0);
         assert!(buffer.is_empty());
@@ -1372,8 +1370,8 @@ mod tests {
             },
         ];
 
-        let json_str = serde_json::to_string(&rounds).expect("serialize rounds");
-        let parsed: Vec<RoundLog> = serde_json::from_str(&json_str).expect("deserialize rounds");
+        let json_str = serde_json::to_string(&rounds).expect("序列化轮次日志失败");
+        let parsed: Vec<RoundLog> = serde_json::from_str(&json_str).expect("反序列化轮次日志失败");
 
         assert_eq!(parsed.len(), 2);
         assert_eq!(parsed[0].round, 1);
@@ -1400,7 +1398,7 @@ mod tests {
     fn test_is_client_error() {
         assert!(is_client_error(StatusCode::BAD_REQUEST));
         assert!(is_client_error(StatusCode::UNPROCESSABLE_ENTITY));
-        // Upstream auth failure / channel issues should NOT be classified as client errors
+        // 上游鉴权失败/渠道问题不应被归类为客户端错误
         assert!(!is_client_error(StatusCode::UNAUTHORIZED));
         assert!(!is_client_error(StatusCode::FORBIDDEN));
         assert!(!is_client_error(StatusCode::NOT_FOUND));
@@ -1440,13 +1438,13 @@ mod tests {
             interrupted:      false,
         };
 
-        // Spawn a background task to trigger cancellation after a short delay
+        // 启动后台任务，延迟片刻后触发取消
         tokio::spawn(async move {
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
             let _ = cancel_tx.send(true);
         });
 
-        // The stream should wake up and return None immediately without hanging
+        // 流应立即唤醒并返回 None，而不是挂起
         let next_item = tokio::time::timeout(std::time::Duration::from_secs(1), finalizer.next()).await;
         assert!(next_item.is_ok());
         assert!(next_item.unwrap().is_none());

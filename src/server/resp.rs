@@ -18,7 +18,7 @@ pub fn success<T: Serialize>(data: T) -> Response {
         StatusCode::OK,
         Json(ApiResponse {
             code:    200,
-            message: "success".to_string(),
+            message: "成功".to_string(),
             data:    Some(data),
         }),
     )

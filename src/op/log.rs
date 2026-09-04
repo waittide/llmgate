@@ -6,7 +6,7 @@ use crate::{model::RequestLog, op::AppState};
 pub const LOG_RETENTION_DAYS_KEY: &str = "log_retention_days";
 const DEFAULT_RETENTION_DAYS: i64 = 7;
 
-/// Returns the configured log retention days (fallback: 7).
+/// 获取配置的日志保留天数（默认 7 天）。
 pub fn get_log_retention_days(state: &AppState) -> i64 {
     state
         .settings
@@ -16,8 +16,8 @@ pub fn get_log_retention_days(state: &AppState) -> i64 {
         .unwrap_or(DEFAULT_RETENTION_DAYS)
 }
 
-/// Creates an initial `running` request log row immediately when a request arrives,
-/// returning the database autoincrement row id as the request_id.
+/// 在请求到达时立即向数据库插入一条 `running` 状态的初始请求日志，
+/// 并将数据库自增的主键 ID 作为本次请求全局唯一的 request_id 返回。
 pub async fn create_initial_log(
     state: &AppState,
     model: &str,
@@ -42,7 +42,7 @@ pub async fn create_initial_log(
     Ok(res.last_insert_rowid())
 }
 
-/// Updates the log entry upon request completion/failure/interruption with full details.
+/// 请求完成、失败或中断后，将完整的结果、指标、响应数据更新回数据库日志条目。
 pub async fn update_completed_log(state: &AppState, log: &RequestLog) -> Result<()> {
     sqlx::query(
         r#"
@@ -84,7 +84,7 @@ pub async fn update_completed_log(state: &AppState, log: &RequestLog) -> Result<
     Ok(())
 }
 
-/// Reads the request body directly from SQLite.
+/// 直接从 SQLite 读取请求体。
 pub async fn get_request_body(state: &AppState, id: i64) -> Result<Option<String>> {
     let row = sqlx::query_scalar::<_, String>("SELECT request_body FROM request_logs WHERE id = ?")
         .bind(id)
@@ -93,7 +93,7 @@ pub async fn get_request_body(state: &AppState, id: i64) -> Result<Option<String
     Ok(row)
 }
 
-/// Reads the response body directly from SQLite.
+/// 直接从 SQLite 读取响应体。
 pub async fn get_response_body(state: &AppState, id: i64) -> Result<Option<String>> {
     let row = sqlx::query_scalar::<_, String>("SELECT response_body FROM request_logs WHERE id = ?")
         .bind(id)
@@ -102,7 +102,7 @@ pub async fn get_response_body(state: &AppState, id: i64) -> Result<Option<Strin
     Ok(row)
 }
 
-/// Returns recent logs ordered newest first for initial live stream feed.
+/// 获取最近的请求日志条目（按 ID 倒序排列），供 SSE 实时概览流建立初始视图。
 pub async fn get_recent_logs(state: &AppState, limit: i64) -> Result<Vec<RequestLog>> {
     let rows = sqlx::query_as::<_, RequestLog>("SELECT * FROM request_logs ORDER BY id DESC LIMIT ?")
         .bind(limit)
@@ -111,8 +111,7 @@ pub async fn get_recent_logs(state: &AppState, limit: i64) -> Result<Vec<Request
     Ok(rows)
 }
 
-/// Deletes request logs older than the configured retention period.
-/// Returns the number of rows removed.
+/// 删除早于配置保留期限的过期请求日志，返回删除的行数。
 pub async fn purge_expired_logs(state: &AppState) -> Result<i64> {
     let days = get_log_retention_days(state);
     let cutoff_ms = chrono::Utc::now().timestamp_millis() - days * 86400 * 1000;
@@ -123,7 +122,7 @@ pub async fn purge_expired_logs(state: &AppState) -> Result<i64> {
     Ok(res.rows_affected() as i64)
 }
 
-/// Deletes all request logs from the database.
+/// 清空数据库中的所有请求日志。
 pub async fn clear_all_logs(state: &AppState) -> Result<i64> {
     let res = sqlx::query("DELETE FROM request_logs")
         .execute(&state.db)
@@ -131,7 +130,7 @@ pub async fn clear_all_logs(state: &AppState) -> Result<i64> {
     Ok(res.rows_affected() as i64)
 }
 
-/// Fetches a single request log by its id.
+/// 根据 ID 查询单条请求日志。
 pub async fn get_request_log(state: &AppState, id: i64) -> Result<Option<RequestLog>> {
     let row = sqlx::query_as::<_, RequestLog>("SELECT * FROM request_logs WHERE id = ? LIMIT 1")
         .bind(id)
@@ -148,8 +147,7 @@ pub struct LogListQuery<'a> {
     pub keyword:   &'a str,
 }
 
-/// Fetches a paginated, optionally-filtered list of request logs.
-/// Returns (total_count, page_items) ordered newest-first.
+/// 分页并根据过滤条件查询请求日志列表，返回 (总记录数, 分页结果列表)，按最新优先排序。
 pub async fn list_request_logs(state: &AppState, query: &LogListQuery<'_>) -> Result<(i64, Vec<RequestLog>)> {
     let page = query.page.max(1);
     let page_size = query.page_size.clamp(1, 200);

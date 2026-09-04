@@ -23,14 +23,14 @@ pub async fn list_llm(State(state): State<AppState>) -> Response {
 
 pub async fn create_llm(State(state): State<AppState>, Json(payload): Json<LLMInfo>) -> Response {
     match llm::batch_create_llm_infos(&state, vec![payload]).await {
-        Ok(_) => success_msg("model created"),
+        Ok(_) => success_msg("模型已创建"),
         Err(e) => error(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
     }
 }
 
 pub async fn update_llm(State(state): State<AppState>, Json(payload): Json<LLMInfo>) -> Response {
     match llm::update_llm_info(&state, &payload).await {
-        Ok(_) => success_msg("model updated"),
+        Ok(_) => success_msg("模型已更新"),
         Err(e) => error(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
     }
 }
@@ -42,21 +42,21 @@ pub struct DeleteLLMReq {
 
 pub async fn delete_llm(State(state): State<AppState>, Json(payload): Json<DeleteLLMReq>) -> Response {
     match llm::delete_llm_info(&state, &payload.name).await {
-        Ok(_) => success_msg("model deleted"),
+        Ok(_) => success_msg("模型已删除"),
         Err(e) => error(StatusCode::BAD_REQUEST, &e.to_string()),
     }
 }
 
 pub async fn update_llm_price(State(state): State<AppState>) -> Response {
     match crate::task::price::update_llm_prices(&state).await {
-        Ok(_) => success_msg("prices updated from models.dev"),
+        Ok(_) => success_msg("已从 models.dev 更新价格"),
         Err(e) => error(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
     }
 }
 
 pub async fn rebuild_llm_price(State(state): State<AppState>) -> Response {
     match crate::task::price::rebuild_all_prices(&state).await {
-        Ok(_) => success_msg("prices rebuilt"),
+        Ok(_) => success_msg("价格已重建"),
         Err(e) => error(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
     }
 }
@@ -66,7 +66,7 @@ pub async fn get_last_update_time(State(_state): State<AppState>) -> Response {
     success(last)
 }
 
-// ---------------- Public Client Route: GET /v1/models ----------------
+// ---------------- 客户端公开接口: GET /v1/models ----------------
 pub async fn get_model_list(
     State(state): State<AppState>,
     Extension(auth_ctx): Extension<Arc<AuthContext>>,

@@ -48,7 +48,7 @@ impl RouteManager {
 
     pub fn pick_candidate_item(&self, group: &Group, attempted_items: &HashSet<i64>) -> Option<GroupItem> {
         if group.mode == GroupMode::Manual {
-            // Prefer active_item if not yet attempted in this request
+            // 优先选择本次请求尚未尝试过的 active_item
             if let Some(item) = group
                 .items
                 .iter()
@@ -56,7 +56,7 @@ impl RouteManager {
             {
                 return Some(item.clone());
             }
-            // Failover to other unattempted items in the manual group if active item failed
+            // 若 active_item 已失败，顺位尝试该手动分组中其余尚未尝试的备用 item
             return group
                 .items
                 .iter()
@@ -68,7 +68,7 @@ impl RouteManager {
         let route = entry.value_mut();
         let now = chrono::Utc::now().timestamp_millis();
 
-        // Pick highest priority available item not yet attempted in this request
+        // 选择尚未尝试且不在冷却期的最高优先级可用渠道（items 已按 priority 升序预排序）
         for item in &group.items {
             if attempted_items.contains(&item.id) {
                 continue;
@@ -86,7 +86,7 @@ impl RouteManager {
             return Some(item.clone());
         }
 
-        // If all available items are in cooldown, probe the unattempted one with earliest expiring cooldown
+        // 若全部可用渠道均处于冷却中，从未尝试的渠道中选择最早冷却结束的一个进行探活
         if let Some(item) = group
             .items
             .iter()
@@ -152,7 +152,7 @@ mod tests {
             priority:         2,
         };
 
-        // 1. active_item_id is 0 (default unselected) -> falls back to first item
+        // 1. active_item_id 为 0（默认未指定）-> 回退选择第一个渠道项
         let group_unselected = Group {
             id:             1,
             name:           "test-manual".to_string(),
@@ -163,30 +163,30 @@ mod tests {
         };
         let picked = manager
             .pick_candidate_item(&group_unselected, &HashSet::new())
-            .expect("should pick item");
+            .expect("应能选中候选项");
         assert_eq!(picked.id, 10);
 
-        // 2. active_item_id points to nonexistent item -> falls back to first item
+        // 2. active_item_id 指向不存在的项 -> 回退选择第一个渠道项
         let group_stale_active = Group {
             active_item_id: 999,
             ..group_unselected.clone()
         };
         let picked_stale = manager
             .pick_candidate_item(&group_stale_active, &HashSet::new())
-            .expect("should pick item");
+            .expect("应能选中候选项");
         assert_eq!(picked_stale.id, 10);
 
-        // 3. active_item_id is explicitly item 2 -> picks item 2
+        // 3. active_item_id 明确指定项 2 -> 选择项 2
         let group_selected_item2 = Group {
             active_item_id: 20,
             ..group_unselected.clone()
         };
         let picked2 = manager
             .pick_candidate_item(&group_selected_item2, &HashSet::new())
-            .expect("should pick item");
+            .expect("应能选中候选项");
         assert_eq!(picked2.id, 20);
 
-        // 4. empty items -> returns None
+        // 4. 空渠道项列表 -> 返回 None
         let group_empty = Group {
             items: Vec::new(),
             ..group_unselected
@@ -226,16 +226,16 @@ mod tests {
         };
 
         let mut attempted = HashSet::new();
-        // First pick: item 101
+        // 首次选取: 项 101
         let first = manager.pick_candidate_item(&group, &attempted).unwrap();
         assert_eq!(first.id, 101);
 
-        // Mark 101 attempted
+        // 标记 101 已尝试
         attempted.insert(101);
         let second = manager.pick_candidate_item(&group, &attempted).unwrap();
         assert_eq!(second.id, 102);
 
-        // Mark 102 attempted -> None
+        // 标记 102 已尝试 -> 候选耗尽返回 None
         attempted.insert(102);
         assert!(manager.pick_candidate_item(&group, &attempted).is_none());
     }
