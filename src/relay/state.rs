@@ -53,7 +53,8 @@ impl From<&RequestLog> for RequestOverview {
             round: log.round,
             target_channel: log.target_channel.clone(),
             target_model: log.target_model.clone(),
-            sending: log.status == "running" || log.status == "committed",
+            sending: log.status == crate::model::request_status::RUNNING
+                || log.status == crate::model::request_status::COMMITTED,
             error: log.error.clone(),
             rounds: serde_json::from_str(&log.rounds_detail).unwrap_or_default(),
         }

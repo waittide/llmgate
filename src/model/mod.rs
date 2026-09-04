@@ -388,6 +388,16 @@ pub struct RequestLog {
     pub created_at:        i64,
 }
 
+/// 请求状态取值：写入数据库行并通过 SSE 广播给前端，与前端约定耦合，集中定义禁止散落字面量。
+pub mod request_status {
+    pub const RUNNING: &str = "running";
+    pub const COMMITTED: &str = "committed";
+    pub const SUCCESS: &str = "success";
+    pub const FAILED: &str = "failed";
+    pub const INTERRUPTED: &str = "interrupted";
+    pub const STREAM_ERROR: &str = "stream_error";
+}
+
 // ---------------- 模型价格与模型列表 (LLM Pricing & Models) ----------------
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]

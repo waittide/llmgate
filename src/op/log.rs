@@ -29,9 +29,10 @@ pub async fn create_initial_log(
     let res = sqlx::query(
         r#"
         INSERT INTO request_logs (status, model, request_url, request_headers, request_body, created_at)
-        VALUES ('running', ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?)
         "#,
     )
+    .bind(crate::model::request_status::RUNNING)
     .bind(model)
     .bind(request_url)
     .bind(request_headers)

@@ -23,7 +23,7 @@ use bytes::Bytes;
 use futures::{Stream, StreamExt};
 
 use crate::{
-    model::{Channel, ChannelModel, ChannelProvider, Group, LLMPrice, RequestLog, StatsMetrics},
+    model::{Channel, ChannelModel, ChannelProvider, Group, LLMPrice, RequestLog, StatsMetrics, request_status},
     op::{AppState, channel, group, llm, log, stats},
     relay::{
         anthropic_stream::{OpenaiStreamFormat, OpenaiToAnthropicStream},
@@ -200,11 +200,11 @@ impl<S> StreamFinalizer<S> {
             &delta,
         );
         let status_str = if self.interrupted {
-            "interrupted"
+            request_status::INTERRUPTED
         } else if completed {
-            "success"
+            request_status::SUCCESS
         } else {
-            "stream_error"
+            request_status::STREAM_ERROR
         };
 
         let response_body_str = String::from_utf8_lossy(&self.response_capture).to_string();
@@ -505,7 +505,7 @@ fn record_round_failure(
 
     state.in_flight.broadcast(RequestOverview {
         id:             req_id,
-        status:         "running".to_string(),
+        status:         request_status::RUNNING.to_string(),
         started_at:     fail.started_at.to_string(),
         duration:       fail.duration_ms,
         model:          fail.model.to_string(),
@@ -542,7 +542,7 @@ struct SuccessContext<'a> {
 fn handle_successful_stream(state: &AppState, upstream_resp: reqwest::Response, ctx: SuccessContext<'_>) -> Response {
     state.in_flight.broadcast(RequestOverview {
         id:             ctx.request_id,
-        status:         "committed".to_string(),
+        status:         request_status::COMMITTED.to_string(),
         started_at:     chrono::DateTime::from_timestamp_millis(ctx.started_at)
             .map(|dt| dt.to_rfc3339())
             .unwrap_or_default(),
@@ -843,7 +843,7 @@ fn build_failed_relay_response(state: &AppState, ctx: FailedRelayContext<'_>) ->
 
     let req_log = RequestLog {
         id:                ctx.request_id as i64,
-        status:            "failed".to_string(),
+        status:            request_status::FAILED.to_string(),
         model:             ctx.model.to_string(),
         target_channel:    ctx.last_target_channel,
         target_model:      ctx.last_target_model,
@@ -938,7 +938,7 @@ pub async fn forward_relay(
         .unwrap_or_default();
     state.in_flight.broadcast(RequestOverview {
         id:             request_id,
-        status:         "running".to_string(),
+        status:         request_status::RUNNING.to_string(),
         started_at:     started_at_rfc3339.clone(),
         duration:       0,
         model:          metadata.model.clone(),
@@ -1019,7 +1019,7 @@ pub async fn forward_relay(
 
         state.in_flight.broadcast(RequestOverview {
             id: request_id,
-            status: "running".to_string(),
+            status: request_status::RUNNING.to_string(),
             started_at: started_at_rfc3339.clone(),
             duration: start_time.elapsed().as_millis() as i64,
             model: metadata.model.clone(),
