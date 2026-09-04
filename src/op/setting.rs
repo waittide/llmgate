@@ -7,10 +7,13 @@ pub async fn refresh_setting_cache(state: &AppState) -> Result<()> {
         .fetch_all(&state.db)
         .await?;
 
-    state.settings.clear();
-    for s in settings {
-        state.settings.insert(s.key, s.value);
+    // 原子同步内存缓存（与 llm 缓存同模式），避免 clear+insert 留出的读取空窗
+    for s in &settings {
+        state.settings.insert(s.key.clone(), s.value.clone());
     }
+    state
+        .settings
+        .retain(|k, _| settings.iter().any(|s| &s.key == k));
     Ok(())
 }
 
