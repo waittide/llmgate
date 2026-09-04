@@ -174,10 +174,12 @@ pub async fn update_channel(state: &AppState, req: &ChannelUpdateRequest) -> Res
     let auto_sync = req.auto_sync.unwrap_or(current.auto_sync);
     let custom_header = req.custom_header.as_ref().unwrap_or(&current.custom_header);
     let custom_header_json = serde_json::to_string(custom_header)?;
-    let param_override = req
-        .param_override
-        .as_ref()
-        .or(current.param_override.as_ref());
+    // 语义：缺省(None)保持现值；Some(空串/空白)清除该覆盖；Some(非空)覆盖原值。
+    let param_override = match req.param_override.as_deref() {
+        None => current.param_override.clone(),
+        Some(s) if s.trim().is_empty() => None,
+        Some(s) => Some(s.to_string()),
+    };
 
     let mut tx = state.db.begin().await?;
     sqlx::query(
@@ -194,7 +196,7 @@ pub async fn update_channel(state: &AppState, req: &ChannelUpdateRequest) -> Res
     .bind(key)
     .bind(auto_sync as i64)
     .bind(&custom_header_json)
-    .bind(param_override)
+    .bind(&param_override)
     .bind(req.id)
     .execute(&mut *tx)
     .await?;

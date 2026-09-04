@@ -217,6 +217,7 @@ pub struct ChannelUpdateRequest {
     pub models:         Option<Vec<ChannelModel>>,
     pub auto_sync:      Option<bool>,
     pub custom_header:  Option<Vec<CustomHeader>>,
+    /// 缺省(None)保持现值；Some(空串/空白)清除该覆盖；Some(非空)覆盖原值。
     pub param_override: Option<String>,
 }
 
