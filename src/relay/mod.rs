@@ -540,53 +540,36 @@ fn record_round_failure(
 }
 
 struct SuccessContext<'a> {
-    request_id:          u64,
-    model:               &'a str,
-    format:              ApiFormat,
-    channel:             &'a Channel,
-    channel_model:       &'a ChannelModel,
-    api_key_id:          i64,
-    target_req_url:      &'a str,
-    channel_req_headers: &'a str,
-    rewritten_body_str:  &'a str,
-    body_str:            &'a str,
-    started_at:          i64,
-    round:               i64,
-    round_start_time:    Instant,
-    start_time:          Instant,
-    price_opt:           Option<LLMPrice>,
-    rounds:              Vec<crate::model::RoundLog>,
+    /// 本轮日志基座：id/model/target/url/headers/body/round/created_at 已由 forward_relay 填好
+    log_base:         RequestLog,
+    format:           ApiFormat,
+    channel:          &'a Channel,
+    channel_model:    &'a ChannelModel,
+    api_key_id:       i64,
+    body_str:         &'a str,
+    round_start_time: Instant,
+    start_time:       Instant,
+    price_opt:        Option<LLMPrice>,
+    rounds:           Vec<crate::model::RoundLog>,
 }
 
 fn handle_successful_stream(state: &AppState, upstream_resp: reqwest::Response, ctx: SuccessContext<'_>) -> Response {
     state.in_flight.broadcast(RequestOverview {
-        id: ctx.request_id,
+        id: ctx.log_base.id as u64,
         status: request_status::COMMITTED.to_string(),
-        started_at: millis_to_rfc3339(ctx.started_at),
+        started_at: millis_to_rfc3339(ctx.log_base.created_at),
         duration: ctx.start_time.elapsed().as_millis() as i64,
-        model: ctx.model.to_string(),
-        round: ctx.round,
-        target_channel: ctx.channel.name.clone(),
-        target_model: ctx.channel_model.name.clone(),
+        model: ctx.log_base.model.clone(),
+        round: ctx.log_base.round,
+        target_channel: ctx.log_base.target_channel.clone(),
+        target_model: ctx.log_base.target_model.clone(),
         sending: true,
         rounds: ctx.rounds.clone(),
         ..Default::default()
     });
 
-    let log_template = RequestLog {
-        id: ctx.request_id as i64,
-        model: ctx.model.to_string(),
-        target_channel: ctx.channel.name.clone(),
-        target_model: ctx.channel_model.name.clone(),
-        request_url: ctx.target_req_url.to_string(),
-        request_headers: ctx.channel_req_headers.to_string(),
-        request_body: ctx.rewritten_body_str.to_string(),
-        response_url: ctx.target_req_url.to_string(),
-        response_headers: serialize_headers(upstream_resp.headers()),
-        created_at: ctx.started_at,
-        round: ctx.round,
-        ..Default::default()
-    };
+    let mut log_template = ctx.log_base.clone();
+    log_template.response_headers = serialize_headers(upstream_resp.headers());
 
     let raw_stream = upstream_resp.bytes_stream();
     let mapped_stream = raw_stream.map(move |chunk_res| match chunk_res {
@@ -599,13 +582,13 @@ fn handle_successful_stream(state: &AppState, upstream_resp: reqwest::Response, 
     let output_stream = match ctx.channel.channel_type {
         ChannelProvider::Anthropic if ctx.format != ApiFormat::AnthropicMessage => ProviderToOpenaiStream::new(
             mapped_stream,
-            ctx.model.to_string(),
+            ctx.log_base.model.clone(),
             protocol::anthropic_sse_event_to_openai_chunk,
         )
         .boxed(),
         ChannelProvider::Gemini => ProviderToOpenaiStream::new(
             mapped_stream,
-            ctx.model.to_string(),
+            ctx.log_base.model.clone(),
             protocol::gemini_sse_event_to_openai_chunk,
         )
         .boxed(),
@@ -619,16 +602,16 @@ fn handle_successful_stream(state: &AppState, upstream_resp: reqwest::Response, 
         } else {
             OpenaiStreamFormat::ChatCompletions
         };
-        OpenaiToAnthropicStream::new(output_stream, ctx.model.to_string(), source_format).boxed()
+        OpenaiToAnthropicStream::new(output_stream, ctx.log_base.model.clone(), source_format).boxed()
     } else if ctx.format == ApiFormat::OpenaiResponse && ctx.channel.channel_type != ChannelProvider::OpenaiResponses {
-        ChatCompletionsToResponsesStream::new(output_stream, ctx.model.to_string()).boxed()
+        ChatCompletionsToResponsesStream::new(output_stream, ctx.log_base.model.clone()).boxed()
     } else {
         output_stream
     };
     let finalizer = StreamFinalizer {
         inner: output_stream,
         state: state.clone(),
-        req_id: ctx.request_id,
+        req_id: ctx.log_base.id as u64,
         api_key_id: ctx.api_key_id,
         channel_id: ctx.channel.id,
         channel_model_id: ctx.channel_model.id,
@@ -642,7 +625,7 @@ fn handle_successful_stream(state: &AppState, upstream_resp: reqwest::Response, 
         log_template,
         previous_rounds: ctx.rounds,
         response_capture: Vec::new(),
-        cancel_rx: state.in_flight.get_cancel_receiver(ctx.request_id),
+        cancel_rx: state.in_flight.get_cancel_receiver(ctx.log_base.id as u64),
         interrupted: false,
         stall_timer: None,
         error_override: None,
@@ -675,10 +658,13 @@ async fn handle_successful_json(
     let converted_to_chat = parsed
         .as_ref()
         .and_then(|val| match ctx.channel.channel_type {
-            ChannelProvider::Anthropic if ctx.format != ApiFormat::AnthropicMessage => {
-                Some(protocol::convert_anthropic_to_openai_chat_response(val, ctx.model))
-            }
-            ChannelProvider::Gemini => Some(protocol::convert_gemini_to_openai_chat_response(val, ctx.model)),
+            ChannelProvider::Anthropic if ctx.format != ApiFormat::AnthropicMessage => Some(
+                protocol::convert_anthropic_to_openai_chat_response(val, &ctx.log_base.model),
+            ),
+            ChannelProvider::Gemini => Some(protocol::convert_gemini_to_openai_chat_response(
+                val,
+                &ctx.log_base.model,
+            )),
             _ => None,
         });
     let converted = if ctx.format == ApiFormat::AnthropicMessage
@@ -686,17 +672,17 @@ async fn handle_successful_json(
     {
         parsed.as_ref().map(|val| {
             if ctx.channel.channel_type == ChannelProvider::OpenaiResponses {
-                protocol::convert_responses_to_anthropic_response(val, ctx.model)
+                protocol::convert_responses_to_anthropic_response(val, &ctx.log_base.model)
             } else {
                 let chat = converted_to_chat.as_ref().unwrap_or(val);
-                protocol::convert_openai_chat_to_anthropic_response(chat, ctx.model)
+                protocol::convert_openai_chat_to_anthropic_response(chat, &ctx.log_base.model)
             }
         })
     } else if ctx.format == ApiFormat::OpenaiResponse && ctx.channel.channel_type != ChannelProvider::OpenaiResponses {
         converted_to_chat
             .as_ref()
             .or(parsed.as_ref())
-            .map(|val| protocol::convert_openai_chat_to_responses_response(val, ctx.model))
+            .map(|val| protocol::convert_openai_chat_to_responses_response(val, &ctx.log_base.model))
     } else {
         converted_to_chat
     };
@@ -723,13 +709,13 @@ async fn handle_successful_json(
     let round_duration_ms = ctx.round_start_time.elapsed().as_millis() as i64;
 
     let round_log = crate::model::RoundLog {
-        round:            ctx.round,
-        channel_name:     ctx.channel.name.clone(),
-        model_name:       ctx.channel_model.name.clone(),
-        request_url:      ctx.target_req_url.to_string(),
-        request_headers:  ctx.channel_req_headers.to_string(),
-        request_body:     ctx.rewritten_body_str.to_string(),
-        response_url:     ctx.target_req_url.to_string(),
+        round:            ctx.log_base.round,
+        channel_name:     ctx.log_base.target_channel.clone(),
+        model_name:       ctx.log_base.target_model.clone(),
+        request_url:      ctx.log_base.request_url.clone(),
+        request_headers:  ctx.log_base.request_headers.clone(),
+        request_body:     ctx.log_base.request_body.clone(),
+        response_url:     ctx.log_base.response_url.clone(),
         response_headers: response_headers.clone(),
         response_body:    resp_str.clone(),
         status:           200,
@@ -737,31 +723,20 @@ async fn handle_successful_json(
         error:            None,
     };
     ctx.rounds.push(round_log.clone());
-    let req_log = RequestLog {
-        id: ctx.request_id as i64,
-        status: "success".to_string(),
-        model: ctx.model.to_string(),
-        target_channel: ctx.channel.name.clone(),
-        target_model: ctx.channel_model.name.clone(),
-        request_url: ctx.target_req_url.to_string(),
-        request_headers: ctx.channel_req_headers.to_string(),
-        request_body: ctx.rewritten_body_str.to_string(),
-        response_url: ctx.target_req_url.to_string(),
-        response_headers,
-        response_body: resp_str.clone(),
-        prompt_tokens: usage.prompt_tokens,
-        completion_tokens: usage.completion_tokens,
-        total_tokens: usage.total_tokens,
-        cost,
-        wait_time: elapsed_ms,
-        round: ctx.round,
-        error: None,
-        rounds_detail: serde_json::to_string(&ctx.rounds).unwrap_or_default(),
-        created_at: ctx.started_at,
-    };
+    let mut req_log = ctx.log_base.clone();
+    req_log.status = request_status::SUCCESS.to_string();
+    req_log.response_headers = response_headers;
+    req_log.response_body = resp_str;
+    req_log.prompt_tokens = usage.prompt_tokens;
+    req_log.completion_tokens = usage.completion_tokens;
+    req_log.total_tokens = usage.total_tokens;
+    req_log.cost = cost;
+    req_log.wait_time = elapsed_ms;
+    req_log.error = None;
+    req_log.rounds_detail = serde_json::to_string(&ctx.rounds).unwrap_or_default();
 
     state.in_flight.broadcast(RequestOverview::from(&req_log));
-    state.in_flight.unregister(ctx.request_id);
+    state.in_flight.unregister(ctx.log_base.id as u64);
 
     let state_clone = state.clone();
     tokio::spawn(async move {
@@ -797,26 +772,22 @@ async fn handle_successful_json(
         })
 }
 
-struct FailedRelayContext<'a> {
-    request_id:            u64,
-    model:                 &'a str,
+struct FailedRelayContext {
+    /// 客户端侧日志基座（记录原始请求 url/headers/body，与成功路径的上游侧信息不同）
+    log_base:              RequestLog,
     last_target_channel:   String,
     last_target_model:     String,
-    request_url:           String,
-    request_headers:       String,
-    request_body:          String,
     last_response_url:     String,
     last_response_headers: String,
     last_status:           StatusCode,
     last_error_body:       String,
     rounds:                Vec<crate::model::RoundLog>,
-    started_at:            i64,
     wait_time_ms:          i64,
     round:                 i64,
     api_key_id:            i64,
 }
 
-fn build_failed_relay_response(state: &AppState, ctx: FailedRelayContext<'_>) -> Response {
+fn build_failed_relay_response(state: &AppState, ctx: FailedRelayContext) -> Response {
     let failed_delta = StatsMetrics {
         input_token:     0,
         output_token:    0,
@@ -844,7 +815,7 @@ fn build_failed_relay_response(state: &AppState, ctx: FailedRelayContext<'_>) ->
             )
         }
     } else {
-        let fallback_msg = "Upstream request failed after all attempts".to_string();
+        let fallback_msg = "上游请求在所有尝试后仍失败".to_string();
         let json_err = serde_json::json!({
             "error": {
                 "message": fallback_msg,
@@ -858,30 +829,19 @@ fn build_failed_relay_response(state: &AppState, ctx: FailedRelayContext<'_>) ->
         )
     };
 
-    let req_log = RequestLog {
-        id:                ctx.request_id as i64,
-        status:            request_status::FAILED.to_string(),
-        model:             ctx.model.to_string(),
-        target_channel:    ctx.last_target_channel,
-        target_model:      ctx.last_target_model,
-        request_url:       ctx.request_url,
-        request_headers:   ctx.request_headers,
-        request_body:      ctx.request_body,
-        response_url:      ctx.last_response_url,
-        response_headers:  ctx.last_response_headers,
-        response_body:     ctx.last_error_body,
-        prompt_tokens:     0,
-        completion_tokens: 0,
-        total_tokens:      0,
-        cost:              0.0,
-        wait_time:         ctx.wait_time_ms,
-        round:             ctx.round,
-        error:             Some(error_message),
-        rounds_detail:     serde_json::to_string(&ctx.rounds).unwrap_or_default(),
-        created_at:        ctx.started_at,
-    };
+    let mut req_log = ctx.log_base.clone();
+    req_log.status = request_status::FAILED.to_string();
+    req_log.target_channel = ctx.last_target_channel;
+    req_log.target_model = ctx.last_target_model;
+    req_log.response_url = ctx.last_response_url;
+    req_log.response_headers = ctx.last_response_headers;
+    req_log.response_body = ctx.last_error_body;
+    req_log.wait_time = ctx.wait_time_ms;
+    req_log.round = ctx.round;
+    req_log.error = Some(error_message);
+    req_log.rounds_detail = serde_json::to_string(&ctx.rounds).unwrap_or_default();
     state.in_flight.broadcast(RequestOverview::from(&req_log));
-    state.in_flight.unregister(ctx.request_id);
+    state.in_flight.unregister(ctx.log_base.id as u64);
 
     let state_clone = state.clone();
     tokio::spawn(async move {
@@ -940,16 +900,23 @@ pub async fn forward_relay(
     {
         Ok(id) => id as u64,
         Err(e) => {
-            tracing::warn!(
-                "Failed to create initial request log, continuing without DB log ID: {}",
-                e
-            );
+            tracing::warn!("创建初始请求日志失败，继续使用临时 ID: {}", e);
             chrono::Utc::now()
                 .timestamp_nanos_opt()
                 .unwrap_or(started_at) as u64
         }
     };
     let cancel_rx = state.in_flight.register(request_id);
+    // 客户端侧日志基座：失败路径记录原始请求；成功路径按轮次克隆并覆盖为上游侧信息
+    let log_base = RequestLog {
+        id: request_id as i64,
+        model: metadata.model.clone(),
+        request_url: request_url.clone(),
+        request_headers: request_headers.clone(),
+        request_body: request_body.clone(),
+        created_at: started_at,
+        ..Default::default()
+    };
     let started_at_rfc3339 = millis_to_rfc3339(started_at);
     state.in_flight.broadcast(RequestOverview {
         id: request_id,
@@ -974,7 +941,7 @@ pub async fn forward_relay(
 
     while round < max_attempts {
         if *cancel_rx.borrow() {
-            last_error_body = "request interrupted".to_string();
+            last_error_body = "请求已被中断".to_string();
             last_status = StatusCode::from_u16(499).unwrap_or(StatusCode::BAD_REQUEST);
             break;
         }
@@ -1024,6 +991,16 @@ pub async fn forward_relay(
             .map(|h| serialize_headers(&h))
             .unwrap_or_else(|_| request_headers.clone());
         let rewritten_body_str = String::from_utf8_lossy(&final_body).to_string();
+        let round_log_base = RequestLog {
+            round,
+            target_channel: ch.name.clone(),
+            target_model: channel_model.name.clone(),
+            request_url: target_req_url.clone(),
+            request_headers: channel_req_headers.clone(),
+            request_body: rewritten_body_str.clone(),
+            response_url: target_req_url.clone(),
+            ..log_base.clone()
+        };
 
         state.in_flight.broadcast(RequestOverview {
             id: request_id,
@@ -1061,7 +1038,7 @@ pub async fn forward_relay(
         ) {
             Ok(rb) => rb,
             Err(e) => {
-                let err_msg = format!("Failed to build request for channel {}: {}", ch.name, e);
+                let err_msg = format!("构建渠道 {} 请求失败: {}", ch.name, e);
                 last_target_channel = ch.name.clone();
                 last_target_model = channel_model.name.clone();
                 last_error_body = err_msg.clone();
@@ -1107,7 +1084,7 @@ pub async fn forward_relay(
             match tokio::time::timeout(std::time::Duration::from_secs(first_event_timeout_secs), send_future).await {
                 Ok(res) => res.map_err(|e| e.to_string()),
                 Err(_) => Err(format!(
-                    "upstream stream response timeout after {}s waiting for initial headers",
+                    "上游流式响应在 {}s 内未返回初始响应头",
                     first_event_timeout_secs
                 )),
             }
@@ -1124,54 +1101,22 @@ pub async fn forward_relay(
                         .report_success(current_group.id, item.id);
                     let price_opt = llm::get_llm_price(&state, &channel_model.name);
 
+                    let ctx = SuccessContext {
+                        log_base: round_log_base,
+                        format,
+                        channel: &ch,
+                        channel_model: &channel_model,
+                        api_key_id: auth_ctx.api_key.id,
+                        body_str: &body_str,
+                        round_start_time,
+                        start_time,
+                        price_opt,
+                        rounds,
+                    };
                     if metadata.stream {
-                        return handle_successful_stream(
-                            &state,
-                            upstream_resp,
-                            SuccessContext {
-                                request_id,
-                                model: &metadata.model,
-                                format,
-                                channel: &ch,
-                                channel_model: &channel_model,
-                                api_key_id: auth_ctx.api_key.id,
-                                target_req_url: &target_req_url,
-                                channel_req_headers: &channel_req_headers,
-                                rewritten_body_str: &rewritten_body_str,
-                                body_str: &body_str,
-                                started_at,
-                                round,
-                                round_start_time,
-                                start_time,
-                                price_opt,
-                                rounds,
-                            },
-                        );
-                    } else {
-                        return handle_successful_json(
-                            &state,
-                            upstream_resp,
-                            SuccessContext {
-                                request_id,
-                                model: &metadata.model,
-                                format,
-                                channel: &ch,
-                                channel_model: &channel_model,
-                                api_key_id: auth_ctx.api_key.id,
-                                target_req_url: &target_req_url,
-                                channel_req_headers: &channel_req_headers,
-                                rewritten_body_str: &rewritten_body_str,
-                                body_str: &body_str,
-                                started_at,
-                                round,
-                                round_start_time,
-                                start_time,
-                                price_opt,
-                                rounds,
-                            },
-                        )
-                        .await;
+                        return handle_successful_stream(&state, upstream_resp, ctx);
                     }
+                    return handle_successful_json(&state, upstream_resp, ctx).await;
                 } else {
                     let resp_headers = serialize_headers(upstream_resp.headers());
                     let err_body =
@@ -1259,7 +1204,7 @@ pub async fn forward_relay(
             tokio::select! {
                 _ = rx.changed() => {
                     if *rx.borrow() {
-                        last_error_body = "request interrupted".to_string();
+                        last_error_body = "请求已被中断".to_string();
                         last_status = StatusCode::from_u16(499).unwrap_or(StatusCode::BAD_REQUEST);
                         break;
                     }
@@ -1274,19 +1219,14 @@ pub async fn forward_relay(
     build_failed_relay_response(
         &state,
         FailedRelayContext {
-            request_id,
-            model: &metadata.model,
+            log_base,
             last_target_channel,
             last_target_model,
-            request_url,
-            request_headers,
-            request_body,
             last_response_url,
             last_response_headers,
             last_status,
             last_error_body,
             rounds,
-            started_at,
             wait_time_ms: start_time.elapsed().as_millis() as i64,
             round,
             api_key_id: auth_ctx.api_key.id,
