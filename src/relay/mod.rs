@@ -517,7 +517,7 @@ fn record_round_failure(
             .report_failure(group_id, item_id, cooldown_seconds);
     } else {
         tracing::warn!(
-            "Upstream returned client error {} from channel {}: {}, not triggering cooldown",
+            "渠道 {} 返回客户端错误 {}，不触发冷却: {}",
             fail.status,
             fail.channel_name,
             fail.err_body
