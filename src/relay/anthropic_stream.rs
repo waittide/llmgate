@@ -357,7 +357,7 @@ mod tests {
                 b"data: {\"choices\":[{\"delta\":{\"content\":\"Hi\"},\"finish_reason\":null}]}\n\n",
             )),
             Ok(Bytes::from_static(
-                b"data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\",\"usage\":{\"prompt_tokens\":42,\"completion_tokens\":7,\"total_tokens\":49}}]}\n\ndata: [DONE]\n\n",
+                b"data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":42,\"completion_tokens\":7,\"total_tokens\":49}}\n\ndata: [DONE]\n\n",
             )),
         ];
         let output = OpenaiToAnthropicStream::new(

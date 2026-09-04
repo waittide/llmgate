@@ -106,8 +106,10 @@ impl RouteManager {
     pub fn report_success(&self, group_id: i64, item_id: i64) {
         let mut entry = self.get_or_create_route_entry(group_id);
         let route = entry.value_mut();
-        route.cooldowns.remove(&item_id);
-        self.notify_change(route);
+        // 仅当确实清除了冷却时才广播，避免无变化的重复事件
+        if route.cooldowns.remove(&item_id).is_some() {
+            self.notify_change(route);
+        }
     }
 
     pub fn report_failure(&self, group_id: i64, item_id: i64, cooldown_seconds: i64) {
