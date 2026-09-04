@@ -6,6 +6,7 @@ pub mod stream;
 pub mod upstream;
 
 use std::{
+    future::Future,
     pin::Pin,
     sync::Arc,
     task::{Context, Poll},
@@ -275,7 +276,25 @@ where
             this.finalize(false);
             return Poll::Ready(None);
         }
-        match Pin::new(&mut this.inner).poll_next(cx) {
+        let inner_poll = Pin::new(&mut this.inner).poll_next(cx);
+        if inner_poll.is_pending() {
+            let mut cancel_triggered = false;
+            if let Some(rx) = &mut this.cancel_rx {
+                let mut changed_fut = std::pin::pin!(rx.changed());
+                if let Poll::Ready(Ok(())) = changed_fut.as_mut().poll(cx) {
+                    cancel_triggered = true;
+                }
+            }
+            if cancel_triggered
+                && let Some(rx) = &this.cancel_rx
+                && *rx.borrow()
+            {
+                this.interrupted = true;
+                this.finalize(false);
+                return Poll::Ready(None);
+            }
+        }
+        match inner_poll {
             Poll::Ready(Some(Ok(bytes))) => {
                 this.output_bytes += bytes.len();
                 this.buffer.extend_from_slice(&bytes);
@@ -1364,5 +1383,51 @@ mod tests {
         assert!(!is_client_error(StatusCode::TOO_MANY_REQUESTS));
         assert!(!is_client_error(StatusCode::INTERNAL_SERVER_ERROR));
         assert!(!is_client_error(StatusCode::BAD_GATEWAY));
+    }
+
+    #[tokio::test]
+    async fn test_stream_finalizer_immediate_cancel_on_pending() {
+        let rnd = nanoid::nanoid!(12);
+        let db_path = std::env::temp_dir().join(format!("octopus_cancel_test_{}.db", rnd));
+        let pool = crate::db::init_db(&db_path).await.unwrap();
+        let state = AppState::init(pool).await.unwrap();
+
+        let (cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
+        let pending_stream = futures::stream::pending::<Result<Bytes, std::io::Error>>();
+
+        let mut finalizer = StreamFinalizer {
+            inner:            pending_stream,
+            state:            state.clone(),
+            req_id:           1,
+            api_key_id:       1,
+            channel_id:       1,
+            channel_model_id: 1,
+            price:            None,
+            prompt_tokens:    10,
+            buffer:           Vec::new(),
+            output_bytes:     0,
+            usage:            None,
+            start_time:       Instant::now(),
+            done:             false,
+            log_template:     RequestLog::default(),
+            previous_rounds:  Vec::new(),
+            response_capture: Vec::new(),
+            cancel_rx:        Some(cancel_rx),
+            interrupted:      false,
+        };
+
+        // Spawn a background task to trigger cancellation after a short delay
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            let _ = cancel_tx.send(true);
+        });
+
+        // The stream should wake up and return None immediately without hanging
+        let next_item = tokio::time::timeout(std::time::Duration::from_secs(1), finalizer.next()).await;
+        assert!(next_item.is_ok());
+        assert!(next_item.unwrap().is_none());
+        assert!(finalizer.interrupted);
+
+        let _ = std::fs::remove_file(db_path);
     }
 }
