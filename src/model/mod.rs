@@ -245,25 +245,31 @@ impl GroupMode {
         }
     }
 }
-
+/// 分组内每个渠道项（成员）的重试与超时配置。
+/// serde 名保留 `member_` 前缀，兼容数据库已存的 relay_config JSON 与前端字段。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct GroupRelayConfig {
-    pub member_max_attempts:                        i64,
-    pub member_retry_interval_seconds:              i64,
-    pub member_non_stream_response_timeout_seconds: i64,
-    pub member_stream_first_event_timeout_seconds:  i64,
-    pub member_cooldown_seconds:                    i64,
+    #[serde(rename = "member_max_attempts")]
+    pub max_attempts:                       i64,
+    #[serde(rename = "member_retry_interval_seconds")]
+    pub retry_interval_seconds:             i64,
+    #[serde(rename = "member_non_stream_response_timeout_seconds")]
+    pub non_stream_timeout_seconds:         i64,
+    #[serde(rename = "member_stream_first_event_timeout_seconds")]
+    pub stream_first_event_timeout_seconds: i64,
+    #[serde(rename = "member_cooldown_seconds")]
+    pub cooldown_seconds:                   i64,
 }
 
 impl Default for GroupRelayConfig {
     fn default() -> Self {
         Self {
-            member_max_attempts:                        2,
-            member_retry_interval_seconds:              1,
-            member_non_stream_response_timeout_seconds: 60,
-            member_stream_first_event_timeout_seconds:  30,
-            member_cooldown_seconds:                    300,
+            max_attempts:                       2,
+            retry_interval_seconds:             1,
+            non_stream_timeout_seconds:         60,
+            stream_first_event_timeout_seconds: 30,
+            cooldown_seconds:                   300,
         }
     }
 }

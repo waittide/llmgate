@@ -975,7 +975,7 @@ pub async fn forward_relay(
         rounds:         Vec::new(),
     });
 
-    let max_attempts = group_obj.relay_config.member_max_attempts.max(1);
+    let max_attempts = group_obj.relay_config.max_attempts.max(1);
 
     let mut round = 0;
     let mut last_target_channel = String::new();
@@ -1062,7 +1062,7 @@ pub async fn forward_relay(
             Some(
                 current_group
                     .relay_config
-                    .member_non_stream_response_timeout_seconds
+                    .non_stream_timeout_seconds
                     .max(10) as u64,
             )
         };
@@ -1106,9 +1106,9 @@ pub async fn forward_relay(
                         should_cooldown: true,
                     },
                 );
-                if round < max_attempts && current_group.relay_config.member_retry_interval_seconds > 0 {
+                if round < max_attempts && current_group.relay_config.retry_interval_seconds > 0 {
                     tokio::time::sleep(tokio::time::Duration::from_secs(
-                        current_group.relay_config.member_retry_interval_seconds as u64,
+                        current_group.relay_config.retry_interval_seconds as u64,
                     ))
                     .await;
                 }
@@ -1119,7 +1119,7 @@ pub async fn forward_relay(
         let send_res = if metadata.stream {
             let first_event_timeout_secs = current_group
                 .relay_config
-                .member_stream_first_event_timeout_seconds
+                .stream_first_event_timeout_seconds
                 .max(5) as u64;
             match tokio::time::timeout(std::time::Duration::from_secs(first_event_timeout_secs), send_future).await {
                 Ok(res) => res.map_err(|e| e.to_string()),
@@ -1207,7 +1207,7 @@ pub async fn forward_relay(
                         &state,
                         current_group.id,
                         item.id,
-                        current_group.relay_config.member_cooldown_seconds,
+                        current_group.relay_config.cooldown_seconds,
                         request_id,
                         &mut rounds,
                         RoundFailure {
@@ -1249,7 +1249,7 @@ pub async fn forward_relay(
                     &state,
                     current_group.id,
                     item.id,
-                    current_group.relay_config.member_cooldown_seconds,
+                    current_group.relay_config.cooldown_seconds,
                     request_id,
                     &mut rounds,
                     RoundFailure {
@@ -1271,7 +1271,7 @@ pub async fn forward_relay(
             }
         }
 
-        if round < max_attempts && current_group.relay_config.member_retry_interval_seconds > 0 {
+        if round < max_attempts && current_group.relay_config.retry_interval_seconds > 0 {
             let mut rx = cancel_rx.clone();
             tokio::select! {
                 _ = rx.changed() => {
@@ -1282,7 +1282,7 @@ pub async fn forward_relay(
                     }
                 }
                 _ = tokio::time::sleep(tokio::time::Duration::from_secs(
-                    current_group.relay_config.member_retry_interval_seconds as u64,
+                    current_group.relay_config.retry_interval_seconds as u64,
                 )) => {}
             }
         }
