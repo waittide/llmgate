@@ -211,6 +211,7 @@ pub async fn delete_group(state: &AppState, id: i64) -> Result<()> {
         .execute(&state.db)
         .await?;
 
+    state.route_manager.remove_group(id);
     refresh_group_cache(state).await?;
     Ok(())
 }

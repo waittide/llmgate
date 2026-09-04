@@ -112,6 +112,11 @@ impl RouteManager {
         }
     }
 
+    /// 分组删除后同步移除其路由状态，避免 get_snapshot 持续广播已删除分组的幽灵条目。
+    pub fn remove_group(&self, group_id: i64) {
+        self.routes.remove(&group_id);
+    }
+
     pub fn report_failure(&self, group_id: i64, item_id: i64, cooldown_seconds: i64) {
         let mut entry = self.get_or_create_route_entry(group_id);
         let route = entry.value_mut();
