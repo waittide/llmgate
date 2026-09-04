@@ -504,8 +504,7 @@ fn record_round_failure(
 }
 
 struct SuccessContext<'a> {
-    req_id:              u64,
-    request_id:          i64,
+    request_id:          u64,
     model:               &'a str,
     format:              ApiFormat,
     channel:             &'a Channel,
@@ -524,10 +523,10 @@ struct SuccessContext<'a> {
 }
 
 fn handle_successful_stream(state: &AppState, upstream_resp: reqwest::Response, ctx: SuccessContext<'_>) -> Response {
-    state.request_state_manager.mark_committed(ctx.req_id);
+    state.request_state_manager.mark_committed(ctx.request_id);
 
     let log_template = RequestLog {
-        request_id: ctx.request_id,
+        request_id: ctx.request_id as i64,
         model: ctx.model.to_string(),
         target_channel: ctx.channel.name.clone(),
         target_model: ctx.channel_model.name.clone(),
@@ -581,7 +580,7 @@ fn handle_successful_stream(state: &AppState, upstream_resp: reqwest::Response, 
     let finalizer = StreamFinalizer {
         inner: output_stream,
         state: state.clone(),
-        req_id: ctx.req_id,
+        req_id: ctx.request_id,
         api_key_id: ctx.api_key_id,
         channel_id: ctx.channel.id,
         channel_model_id: ctx.channel_model.id,
@@ -595,7 +594,9 @@ fn handle_successful_stream(state: &AppState, upstream_resp: reqwest::Response, 
         log_template,
         previous_rounds: ctx.rounds,
         response_capture: Vec::new(),
-        cancel_rx: state.request_state_manager.get_cancel_receiver(ctx.req_id),
+        cancel_rx: state
+            .request_state_manager
+            .get_cancel_receiver(ctx.request_id),
         interrupted: false,
     };
     let body = Body::from_stream(finalizer);
@@ -689,12 +690,12 @@ async fn handle_successful_json(
     ctx.rounds.push(round_log.clone());
     state
         .request_state_manager
-        .record_round_attempt(ctx.req_id, round_log);
+        .record_round_attempt(ctx.request_id, round_log);
 
     log::record_request_log(
         state.clone(),
         RequestLog {
-            request_id: ctx.request_id,
+            request_id: ctx.request_id as i64,
             status: "success".to_string(),
             model: ctx.model.to_string(),
             target_channel: ctx.channel.name.clone(),
@@ -733,7 +734,7 @@ async fn handle_successful_json(
     stats::record_metrics(state, ctx.api_key_id, ctx.channel.id, ctx.channel_model.id, &delta);
     state
         .request_state_manager
-        .finish(ctx.req_id, "success", usage, cost, resp_str, None, ctx.rounds);
+        .finish(ctx.request_id, "success", usage, cost, resp_str, None, ctx.rounds);
 
     Response::builder()
         .status(StatusCode::OK)
@@ -749,8 +750,7 @@ async fn handle_successful_json(
 }
 
 struct FailedRelayContext<'a> {
-    req_id:                u64,
-    request_id:            i64,
+    request_id:            u64,
     model:                 &'a str,
     last_target_channel:   String,
     last_target_model:     String,
@@ -789,7 +789,7 @@ fn build_failed_relay_response(state: &AppState, ctx: FailedRelayContext<'_>) ->
     log::record_request_log(
         state.clone(),
         RequestLog {
-            request_id: ctx.request_id,
+            request_id: ctx.request_id as i64,
             status: "failed".to_string(),
             model: ctx.model.to_string(),
             target_channel: ctx.last_target_channel,
@@ -814,7 +814,7 @@ fn build_failed_relay_response(state: &AppState, ctx: FailedRelayContext<'_>) ->
     );
 
     state.request_state_manager.finish(
-        ctx.req_id,
+        ctx.request_id,
         "failed",
         Usage::default(),
         0.0,
@@ -880,14 +880,13 @@ pub async fn forward_relay(
     };
 
     let body_str = String::from_utf8_lossy(&body_bytes).to_string();
-    let req_id = state
+    let request_id = state
         .request_state_manager
         .new_request(metadata.model.clone(), body_str.clone());
 
     let request_url = uri.path().to_string();
     let request_headers = serialize_headers(&headers);
     let request_body = body_str.clone();
-    let request_id = req_id as i64;
     let started_at = chrono::Utc::now().timestamp_millis();
     let start_time = Instant::now();
     let max_attempts = group_obj.relay_config.member_max_attempts.max(1);
@@ -902,7 +901,7 @@ pub async fn forward_relay(
     let mut rounds: Vec<crate::model::RoundLog> = Vec::new();
 
     while round < max_attempts {
-        let cancel_rx = state.request_state_manager.get_cancel_receiver(req_id);
+        let cancel_rx = state.request_state_manager.get_cancel_receiver(request_id);
         if let Some(rx) = &cancel_rx
             && *rx.borrow()
         {
@@ -959,7 +958,7 @@ pub async fn forward_relay(
 
         state
             .request_state_manager
-            .update_round(req_id, round, ch.name.clone(), channel_model.name.clone(), true);
+            .update_round(request_id, round, ch.name.clone(), channel_model.name.clone(), true);
 
         let timeout_secs = if metadata.stream {
             None
@@ -986,7 +985,7 @@ pub async fn forward_relay(
                     current_group.id,
                     item.id,
                     60,
-                    req_id,
+                    request_id,
                     &mut rounds,
                     RoundFailure {
                         round,
@@ -1042,7 +1041,6 @@ pub async fn forward_relay(
                             &state,
                             upstream_resp,
                             SuccessContext {
-                                req_id,
                                 request_id,
                                 model: &metadata.model,
                                 format,
@@ -1066,7 +1064,6 @@ pub async fn forward_relay(
                             &state,
                             upstream_resp,
                             SuccessContext {
-                                req_id,
                                 request_id,
                                 model: &metadata.model,
                                 format,
@@ -1104,7 +1101,7 @@ pub async fn forward_relay(
                         current_group.id,
                         item.id,
                         current_group.relay_config.member_cooldown_seconds,
-                        req_id,
+                        request_id,
                         &mut rounds,
                         RoundFailure {
                             round,
@@ -1144,7 +1141,7 @@ pub async fn forward_relay(
                     current_group.id,
                     item.id,
                     current_group.relay_config.member_cooldown_seconds,
-                    req_id,
+                    request_id,
                     &mut rounds,
                     RoundFailure {
                         round,
@@ -1189,7 +1186,6 @@ pub async fn forward_relay(
     build_failed_relay_response(
         &state,
         FailedRelayContext {
-            req_id,
             request_id,
             model: &metadata.model,
             last_target_channel,
