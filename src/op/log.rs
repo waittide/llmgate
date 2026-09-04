@@ -112,12 +112,25 @@ pub async fn get_recent_logs(state: &AppState, limit: i64) -> Result<Vec<Request
     Ok(rows)
 }
 
-/// 删除早于配置保留期限的过期请求日志，返回删除的行数。
+/// 删除早于配置保留期限的过期数据，返回清理的请求日志行数。
+/// 覆盖 request_logs（按 created_at 毫秒）与统计明细 stats_dailies / stats_hourlies
+/// （date 为 %Y%m%d 字符串，字典序即时间序）；stats_totals 与 stats_api_keys 为累计聚合，不清理。
 pub async fn purge_expired_logs(state: &AppState) -> Result<i64> {
     let days = get_log_retention_days(state);
     let cutoff_ms = chrono::Utc::now().timestamp_millis() - days * 86400 * 1000;
+    let cutoff_date = (chrono::Utc::now() - chrono::Duration::days(days))
+        .format("%Y%m%d")
+        .to_string();
     let res = sqlx::query("DELETE FROM request_logs WHERE created_at < ?")
         .bind(cutoff_ms)
+        .execute(&state.db)
+        .await?;
+    sqlx::query("DELETE FROM stats_dailies WHERE date < ?")
+        .bind(&cutoff_date)
+        .execute(&state.db)
+        .await?;
+    sqlx::query("DELETE FROM stats_hourlies WHERE date < ?")
+        .bind(&cutoff_date)
         .execute(&state.db)
         .await?;
     Ok(res.rows_affected() as i64)

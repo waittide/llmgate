@@ -186,4 +186,33 @@ mod tests {
 
         let _ = std::fs::remove_file(db_path);
     }
+
+    #[tokio::test]
+    async fn test_purge_expires_stats_detail_tables() {
+        let (state, _path) = setup_test_state("log_purge").await;
+
+        // 过期（2020）与存活（2999）的每日/每小时统计行
+        sqlx::query("INSERT INTO stats_dailies (date, input_token) VALUES ('20200101', 1), ('29991231', 2)")
+            .execute(&state.db)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO stats_hourlies (hour, date, input_token) VALUES (1, '20200101', 1), (1, '29991231', 2)",
+        )
+        .execute(&state.db)
+        .await
+        .unwrap();
+
+        op_log::purge_expired_logs(&state).await.unwrap();
+
+        let dailies: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM stats_dailies")
+            .fetch_one(&state.db)
+            .await
+            .unwrap();
+        let hourlies: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM stats_hourlies")
+            .fetch_one(&state.db)
+            .await
+            .unwrap();
+        assert_eq!((dailies, hourlies), (1, 1));
+    }
 }
