@@ -3,7 +3,6 @@ use std::convert::Infallible;
 use axum::{
     Json,
     extract::{Path, State},
-    http::StatusCode,
     response::{
         IntoResponse, Response,
         sse::{Event, KeepAlive, Sse},
@@ -14,7 +13,7 @@ use futures::{StreamExt, stream};
 use crate::{
     model::{Group, GroupActiveItemUpdateRequest, GroupUpdateRequest},
     op::{AppState, group},
-    server::resp::{error, success, success_msg},
+    server::resp::{internal_error, msg_or_500, ok_or_500, success},
 };
 pub async fn list_groups(State(state): State<AppState>) -> Response {
     success(group::list_groups(&state))
@@ -23,15 +22,12 @@ pub async fn list_groups(State(state): State<AppState>) -> Response {
 pub async fn create_group(State(state): State<AppState>, Json(mut payload): Json<Group>) -> Response {
     match group::create_group(&state, &mut payload).await {
         Ok(_) => success(payload),
-        Err(e) => error(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
+        Err(e) => internal_error(e),
     }
 }
 
 pub async fn update_group(State(state): State<AppState>, Json(payload): Json<GroupUpdateRequest>) -> Response {
-    match group::update_group(&state, &payload).await {
-        Ok(grp) => success(grp),
-        Err(e) => error(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
-    }
+    ok_or_500(group::update_group(&state, &payload).await)
 }
 
 pub async fn update_group_active_item(
@@ -39,17 +35,11 @@ pub async fn update_group_active_item(
     Path(id): Path<i64>,
     Json(payload): Json<GroupActiveItemUpdateRequest>,
 ) -> Response {
-    match group::set_group_active_item(&state, id, &payload).await {
-        Ok(grp) => success(grp),
-        Err(e) => error(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
-    }
+    ok_or_500(group::set_group_active_item(&state, id, &payload).await)
 }
 
 pub async fn delete_group(State(state): State<AppState>, Path(id): Path<i64>) -> Response {
-    match group::delete_group(&state, id).await {
-        Ok(_) => success_msg("分组已删除"),
-        Err(e) => error(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
-    }
+    msg_or_500(group::delete_group(&state, id).await, "分组已删除")
 }
 
 pub async fn stream_group_runtime(State(state): State<AppState>) -> Response {

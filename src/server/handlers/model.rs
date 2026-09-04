@@ -13,7 +13,7 @@ use crate::{
     op::{AppState, group, llm},
     server::{
         middleware::AuthContext,
-        resp::{error, success, success_msg},
+        resp::{error, msg_or_500, success, success_msg},
     },
 };
 
@@ -22,17 +22,11 @@ pub async fn list_llm(State(state): State<AppState>) -> Response {
 }
 
 pub async fn create_llm(State(state): State<AppState>, Json(payload): Json<LLMInfo>) -> Response {
-    match llm::batch_create_llm_infos(&state, vec![payload]).await {
-        Ok(_) => success_msg("模型已创建"),
-        Err(e) => error(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
-    }
+    msg_or_500(llm::batch_create_llm_infos(&state, vec![payload]).await, "模型已创建")
 }
 
 pub async fn update_llm(State(state): State<AppState>, Json(payload): Json<LLMInfo>) -> Response {
-    match llm::update_llm_info(&state, &payload).await {
-        Ok(_) => success_msg("模型已更新"),
-        Err(e) => error(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
-    }
+    msg_or_500(llm::update_llm_info(&state, &payload).await, "模型已更新")
 }
 
 #[derive(Deserialize)]
@@ -48,17 +42,14 @@ pub async fn delete_llm(State(state): State<AppState>, Json(payload): Json<Delet
 }
 
 pub async fn update_llm_price(State(state): State<AppState>) -> Response {
-    match crate::task::price::update_llm_prices(&state).await {
-        Ok(_) => success_msg("已从 models.dev 更新价格"),
-        Err(e) => error(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
-    }
+    msg_or_500(
+        crate::task::price::update_llm_prices(&state).await,
+        "已从 models.dev 更新价格",
+    )
 }
 
 pub async fn rebuild_llm_price(State(state): State<AppState>) -> Response {
-    match crate::task::price::rebuild_all_prices(&state).await {
-        Ok(_) => success_msg("价格已重建"),
-        Err(e) => error(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
-    }
+    msg_or_500(crate::task::price::rebuild_all_prices(&state).await, "价格已重建")
 }
 
 pub async fn get_last_update_time(State(_state): State<AppState>) -> Response {

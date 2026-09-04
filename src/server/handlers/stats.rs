@@ -1,10 +1,10 @@
-use axum::{extract::State, http::StatusCode, response::Response};
+use axum::{extract::State, response::Response};
 use serde::Serialize;
 
 use crate::{
     model::StatsDaily,
     op::{AppState, stats},
-    server::resp::{error, success},
+    server::resp::{ok_or_500, success},
 };
 
 #[derive(Serialize)]
@@ -18,22 +18,19 @@ pub async fn get_stats_today(State(state): State<AppState>) -> Response {
 }
 
 pub async fn get_stats_daily(State(state): State<AppState>) -> Response {
-    match stats::get_stats_daily(&state).await {
-        Ok(items) => {
-            let mut max_request_count = 0;
-            for item in &items {
-                let count = item.metrics.request_success + item.metrics.request_failed;
-                if count > max_request_count {
-                    max_request_count = count;
-                }
+    ok_or_500(stats::get_stats_daily(&state).await.map(|items| {
+        let mut max_request_count = 0;
+        for item in &items {
+            let count = item.metrics.request_success + item.metrics.request_failed;
+            if count > max_request_count {
+                max_request_count = count;
             }
-            success(StatsDailyResponse {
-                max_request_count,
-                items,
-            })
         }
-        Err(e) => error(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
-    }
+        StatsDailyResponse {
+            max_request_count,
+            items,
+        }
+    }))
 }
 
 pub async fn get_stats_hourly(State(state): State<AppState>) -> Response {

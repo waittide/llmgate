@@ -1,3 +1,4 @@
+use anyhow::Result;
 use axum::{
     Json,
     http::StatusCode,
@@ -47,4 +48,25 @@ pub fn error(status: StatusCode, message: &str) -> Response {
         }),
     )
         .into_response()
+}
+
+/// 统一 handler 出口：Ok → success(data)，Err → 500 + 错误文本。
+pub fn ok_or_500<T: Serialize>(result: Result<T>) -> Response {
+    match result {
+        Ok(data) => success(data),
+        Err(e) => internal_error(e),
+    }
+}
+
+/// 统一 handler 出口：Ok → success_msg(msg)（忽略载荷），Err → 500 + 错误文本。
+pub fn msg_or_500<T>(result: Result<T>, msg: &str) -> Response {
+    match result {
+        Ok(_) => success_msg(msg),
+        Err(e) => internal_error(e),
+    }
+}
+
+/// 500 + 错误文本（供 Ok 分支需要额外处理的 handler 复用）。
+pub fn internal_error(e: impl std::fmt::Display) -> Response {
+    error(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string())
 }

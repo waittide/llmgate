@@ -1,7 +1,6 @@
 use axum::{
     Json,
     extract::{Path, State},
-    http::StatusCode,
     response::Response,
 };
 use serde::Deserialize;
@@ -9,7 +8,7 @@ use serde::Deserialize;
 use crate::{
     model::{Channel, ChannelUpdateRequest},
     op::{AppState, channel},
-    server::resp::{error, success, success_msg},
+    server::resp::{internal_error, msg_or_500, ok_or_500, success},
     task::sync::fetch_upstream_models,
 };
 
@@ -25,7 +24,7 @@ pub async fn create_channel(State(state): State<AppState>, Json(mut payload): Js
             let _ = crate::task::price::ensure_model_prices(&state, &model_names).await;
             success(payload)
         }
-        Err(e) => error(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
+        Err(e) => internal_error(e),
     }
 }
 
@@ -36,7 +35,7 @@ pub async fn update_channel(State(state): State<AppState>, Json(payload): Json<C
             let _ = crate::task::price::ensure_model_prices(&state, &model_names).await;
             success(ch)
         }
-        Err(e) => error(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
+        Err(e) => internal_error(e),
     }
 }
 
@@ -47,31 +46,25 @@ pub struct EnableChannelReq {
 }
 
 pub async fn enable_channel(State(state): State<AppState>, Json(payload): Json<EnableChannelReq>) -> Response {
-    match channel::set_channel_enabled(&state, payload.id, payload.enabled).await {
-        Ok(_) => success_msg("渠道启用状态已更新"),
-        Err(e) => error(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
-    }
+    msg_or_500(
+        channel::set_channel_enabled(&state, payload.id, payload.enabled).await,
+        "渠道启用状态已更新",
+    )
 }
 
 pub async fn delete_channel(State(state): State<AppState>, Path(id): Path<i64>) -> Response {
-    match channel::delete_channel(&state, id).await {
-        Ok(_) => success_msg("渠道已删除"),
-        Err(e) => error(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
-    }
+    msg_or_500(channel::delete_channel(&state, id).await, "渠道已删除")
 }
 
 pub async fn fetch_model(State(_state): State<AppState>, Json(payload): Json<Channel>) -> Response {
-    match fetch_upstream_models(&payload).await {
-        Ok(models) => success(models),
-        Err(e) => error(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
-    }
+    ok_or_500(fetch_upstream_models(&payload).await)
 }
 
 pub async fn sync_channel(State(state): State<AppState>) -> Response {
-    match crate::task::sync::sync_all_channel_models(&state).await {
-        Ok(_) => success_msg("渠道模型同步成功"),
-        Err(e) => error(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
-    }
+    msg_or_500(
+        crate::task::sync::sync_all_channel_models(&state).await,
+        "渠道模型同步成功",
+    )
 }
 
 pub async fn get_last_sync_time(State(_state): State<AppState>) -> Response {

@@ -5,7 +5,7 @@ use crate::{
     op::{AppState, user},
     server::{
         auth::generate_jwt,
-        resp::{error, success_msg},
+        resp::{error, internal_error, success_msg},
     },
 };
 
@@ -21,7 +21,7 @@ pub async fn login(State(state): State<AppState>, Json(payload): Json<UserLogin>
                     });
                     crate::server::resp::success(data)
                 }
-                Err(e) => error(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
+                Err(e) => internal_error(e),
             }
         }
         _ => error(StatusCode::UNAUTHORIZED, "鉴权失败"),

@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 use crate::{
     op::{AppState, log as op_log},
     relay::state::RequestOverview,
-    server::resp::{error, success, success_msg},
+    server::resp::{error, internal_error, msg_or_500, success, success_msg},
 };
 
 pub async fn stream_overview(State(state): State<AppState>) -> Response {
@@ -97,7 +97,7 @@ pub async fn list_logs(State(state): State<AppState>, Query(params): Query<LogLi
             total,
             items: items.iter().map(RequestOverview::from).collect(),
         }),
-        Err(e) => error(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
+        Err(e) => internal_error(e),
     }
 }
 
@@ -105,7 +105,7 @@ pub async fn get_log_detail(State(state): State<AppState>, Path(id): Path<u64>) 
     match op_log::get_request_log(&state, id as i64).await {
         Ok(Some(log)) => success(log),
         Ok(None) => error(StatusCode::NOT_FOUND, "日志不存在"),
-        Err(e) => error(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
+        Err(e) => internal_error(e),
     }
 }
 
@@ -132,10 +132,7 @@ pub async fn interrupt_round(State(state): State<AppState>, Path((id, _round)): 
 }
 
 pub async fn clear_log(State(state): State<AppState>) -> Response {
-    match op_log::clear_all_logs(&state).await {
-        Ok(_) => success_msg("日志已清空"),
-        Err(e) => error(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
-    }
+    msg_or_500(op_log::clear_all_logs(&state).await, "日志已清空")
 }
 
 #[cfg(test)]

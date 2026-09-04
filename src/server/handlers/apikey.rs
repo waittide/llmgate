@@ -3,7 +3,6 @@ use std::sync::Arc;
 use axum::{
     Json,
     extract::{Extension, Path, State},
-    http::StatusCode,
     response::Response,
 };
 use serde_json::json;
@@ -13,7 +12,7 @@ use crate::{
     op::{AppState, apikey, stats::get_stats_api_key},
     server::{
         middleware::AuthContext,
-        resp::{error, success, success_msg},
+        resp::{internal_error, msg_or_500, ok_or_500, success, success_msg},
     },
 };
 
@@ -24,22 +23,16 @@ pub async fn list_api_keys(State(state): State<AppState>) -> Response {
 pub async fn create_api_key(State(state): State<AppState>, Json(mut payload): Json<APIKey>) -> Response {
     match apikey::create_api_key(&state, &mut payload).await {
         Ok(_) => success(payload),
-        Err(e) => error(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
+        Err(e) => internal_error(e),
     }
 }
 
 pub async fn update_api_key(State(state): State<AppState>, Json(payload): Json<APIKey>) -> Response {
-    match apikey::update_api_key(&state, &payload).await {
-        Ok(k) => success(k),
-        Err(e) => error(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
-    }
+    ok_or_500(apikey::update_api_key(&state, &payload).await)
 }
 
 pub async fn delete_api_key(State(state): State<AppState>, Path(id): Path<i64>) -> Response {
-    match apikey::delete_api_key(&state, id).await {
-        Ok(_) => success_msg("API 密钥已删除"),
-        Err(e) => error(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
-    }
+    msg_or_500(apikey::delete_api_key(&state, id).await, "API 密钥已删除")
 }
 
 pub async fn get_api_key_stats_by_id(

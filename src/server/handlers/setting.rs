@@ -9,7 +9,7 @@ use bytes::Bytes;
 use crate::{
     model::{BackupData, Setting},
     op::{AppState, backup, setting},
-    server::resp::{error, success},
+    server::resp::{error, internal_error, success},
 };
 
 pub async fn get_setting_list(State(state): State<AppState>) -> Response {
@@ -19,7 +19,7 @@ pub async fn get_setting_list(State(state): State<AppState>) -> Response {
 pub async fn set_setting(State(state): State<AppState>, Json(payload): Json<Setting>) -> Response {
     match setting::set_setting_string(&state, &payload.key, &payload.value).await {
         Ok(_) => success(payload),
-        Err(e) => error(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
+        Err(e) => internal_error(e),
     }
 }
 
@@ -33,7 +33,7 @@ pub async fn export_db(State(state): State<AppState>) -> Response {
 
             let json_bytes = match serde_json::to_vec(&data) {
                 Ok(b) => b,
-                Err(e) => return error(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
+                Err(e) => return internal_error(e),
             };
 
             Response::builder()
@@ -43,7 +43,7 @@ pub async fn export_db(State(state): State<AppState>) -> Response {
                 .body(axum::body::Body::from(json_bytes))
                 .unwrap()
         }
-        Err(e) => error(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
+        Err(e) => internal_error(e),
     }
 }
 
@@ -94,6 +94,6 @@ pub async fn import_db(State(state): State<AppState>, req: Request) -> Response 
 
     match backup::import_backup(&state, backup_data).await {
         Ok(result) => success(result),
-        Err(e) => error(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
+        Err(e) => internal_error(e),
     }
 }
