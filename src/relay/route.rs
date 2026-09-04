@@ -52,6 +52,7 @@ impl RouteManager {
                 .items
                 .iter()
                 .find(|item| item.id == group.active_item_id)
+                .or_else(|| group.items.first())
                 .cloned();
         }
 
@@ -113,5 +114,71 @@ impl RouteManager {
 
     fn notify_change(&self, route: &RouteState) {
         let _ = self.tx.send(route.clone());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_manual_mode_fallback_to_first_item() {
+        let manager = RouteManager::new();
+
+        let item1 = GroupItem {
+            id:               10,
+            group_id:         1,
+            channel_model_id: 101,
+            channel_model:    None,
+            priority:         1,
+        };
+        let item2 = GroupItem {
+            id:               20,
+            group_id:         1,
+            channel_model_id: 102,
+            channel_model:    None,
+            priority:         2,
+        };
+
+        // 1. active_item_id is 0 (default unselected) -> falls back to first item
+        let group_unselected = Group {
+            id:             1,
+            name:           "test-manual".to_string(),
+            mode:           GroupMode::Manual,
+            active_item_id: 0,
+            relay_config:   Default::default(),
+            items:          vec![item1.clone(), item2.clone()],
+        };
+        let picked = manager
+            .pick_group_item(&group_unselected)
+            .expect("should pick item");
+        assert_eq!(picked.id, 10);
+
+        // 2. active_item_id points to nonexistent item -> falls back to first item
+        let group_stale_active = Group {
+            active_item_id: 999,
+            ..group_unselected.clone()
+        };
+        let picked_stale = manager
+            .pick_group_item(&group_stale_active)
+            .expect("should pick item");
+        assert_eq!(picked_stale.id, 10);
+
+        // 3. active_item_id is explicitly item 2 -> picks item 2
+        let group_selected_item2 = Group {
+            active_item_id: 20,
+            ..group_unselected.clone()
+        };
+        let picked2 = manager
+            .pick_group_item(&group_selected_item2)
+            .expect("should pick item");
+        assert_eq!(picked2.id, 20);
+
+        // 4. empty items -> returns None
+        let group_empty = Group {
+            items: Vec::new(),
+            ..group_unselected
+        };
+        assert!(manager.pick_group_item(&group_empty).is_none());
     }
 }
