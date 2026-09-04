@@ -90,18 +90,32 @@ pub async fn refresh_channel_cache(state: &AppState) -> Result<()> {
         local_models.insert(id, channel_model);
     }
 
-    // Atomically sync in-memory cache without leaving empty windows
-    for (k, v) in &local_channels {
-        state.channels.insert(*k, v.clone());
+    // Atomically sync in-memory cache without leaving empty windows,
+    // preserving in-memory metrics so refreshes do not roll back un-flushed stats.
+    let local_channel_ids: std::collections::HashSet<i64> = local_channels.keys().copied().collect();
+    for (k, mut v) in local_channels {
+        if let Some(existing) = state.channels.get(&k) {
+            v.metrics = existing.metrics.clone();
+            for m in &mut v.models {
+                if let Some(existing_model) = state.channel_models.get(&m.id) {
+                    m.metrics = existing_model.metrics.clone();
+                }
+            }
+        }
+        state.channels.insert(k, v);
     }
-    state.channels.retain(|k, _| local_channels.contains_key(k));
+    state.channels.retain(|k, _| local_channel_ids.contains(k));
 
-    for (k, v) in &local_models {
-        state.channel_models.insert(*k, v.clone());
+    let local_model_ids: std::collections::HashSet<i64> = local_models.keys().copied().collect();
+    for (k, mut v) in local_models {
+        if let Some(existing) = state.channel_models.get(&k) {
+            v.metrics = existing.metrics.clone();
+        }
+        state.channel_models.insert(k, v);
     }
     state
         .channel_models
-        .retain(|k, _| local_models.contains_key(k));
+        .retain(|k, _| local_model_ids.contains(k));
     Ok(())
 }
 
@@ -439,5 +453,50 @@ mod tests {
         let updated = update_channel(&state, &update_req).await.unwrap();
         assert_eq!(updated.models.len(), 1);
         assert_eq!(updated.models[0].name, "gpt-4o-mini");
+    }
+
+    #[tokio::test]
+    async fn test_refresh_channel_cache_preserves_live_metrics() {
+        let (state, _path) = setup_test_state().await;
+
+        let mut ch = Channel {
+            name: "test-live-metrics-channel".to_string(),
+            channel_type: ChannelProvider::OpenaiCompletion,
+            enabled: true,
+            base_url: "https://api.openai.com".to_string(),
+            key: "sk-test".to_string(),
+            models: vec![ChannelModel {
+                name: "gpt-4o".to_string(),
+                source: ChannelModelSource::Manual,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        create_channel(&state, &mut ch).await.unwrap();
+        let model_id = ch.models[0].id;
+
+        // Simulate live in-memory metrics (un-flushed to DB)
+        {
+            let mut entry = state.channels.get_mut(&ch.id).unwrap();
+            entry.metrics.input_token = 8888;
+            entry.metrics.input_cost = 0.88;
+        }
+        {
+            let mut model_entry = state.channel_models.get_mut(&model_id).unwrap();
+            model_entry.metrics.input_token = 8888;
+            model_entry.metrics.input_cost = 0.88;
+        }
+
+        // Trigger refresh_channel_cache (reads DB where metrics are 0)
+        refresh_channel_cache(&state).await.unwrap();
+
+        // Verify live metrics were preserved and not rolled back to 0
+        let refreshed_ch = get_channel(&state, ch.id).unwrap();
+        assert_eq!(refreshed_ch.metrics.input_token, 8888);
+        assert_eq!(refreshed_ch.metrics.input_cost, 0.88);
+
+        let refreshed_model = state.channel_models.get(&model_id).unwrap();
+        assert_eq!(refreshed_model.metrics.input_token, 8888);
+        assert_eq!(refreshed_model.metrics.input_cost, 0.88);
     }
 }
