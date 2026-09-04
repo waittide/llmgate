@@ -5,11 +5,13 @@ use crate::{
     op::AppState,
 };
 
+/// 刷新用户缓存；副作用：将 JWT 密钥派生为 username_password（改密码/用户名即全员登出）。
 pub async fn refresh_user_cache(state: &AppState) -> Result<()> {
     let user: Option<User> = sqlx::query_as("SELECT id, username, password FROM users LIMIT 1")
         .fetch_optional(&state.db)
         .await?;
 
+    // JWT 密钥派生：密钥稳定于当前账号密码，跨重启不变；修改密码即全部 token 失效。
     if let Some(user) = user {
         let mut secret = state.jwt_secret.write();
         *secret = format!("{}_{}", user.username, user.password);

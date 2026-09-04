@@ -39,8 +39,11 @@ pub struct ApiKeyCache {
 #[derive(Clone)]
 pub struct AppState {
     pub db:             DbPool,
+    // 单键缓存（按 id / 键直接读写）：DashMap 足够。
     pub channels:       Arc<DashMap<i64, Channel>>,
     pub channel_models: Arc<DashMap<i64, ChannelModel>>,
+    // 双索引缓存（需同时按 id 与 name/key 反查，且两表必须一致）：
+    // 用 RwLock 包整块做原子快照，而不是两个 DashMap 各自为政。
     pub groups:         Arc<RwLock<GroupCache>>,
     pub api_keys:       Arc<RwLock<ApiKeyCache>>,
     pub llm_prices:     Arc<DashMap<String, LLMPrice>>,
@@ -49,6 +52,9 @@ pub struct AppState {
     pub stats_api_keys: Arc<DashMap<i64, StatsAPIKey>>,
     pub route_manager:  Arc<RouteManager>,
     pub in_flight:      Arc<InFlightRegistry>,
+    /// JWT 签名密钥：初始为内置默认值，用户缓存刷新后派生为 `username_password`
+    /// （见 op::user::refresh_user_cache）。因此修改密码会使所有已签发 token 失效
+    /// （全员登出）；账号密码不变则密钥跨重启保持稳定。
     pub jwt_secret:     Arc<RwLock<String>>,
 }
 
