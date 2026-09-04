@@ -889,18 +889,48 @@ pub fn convert_openai_to_anthropic(val: &Value) -> Value {
     Value::Object(anthropic_obj)
 }
 
+fn anthropic_to_openai_finish_reason(reason: Option<&str>) -> &str {
+    match reason {
+        Some("tool_use") => "tool_calls",
+        Some("max_tokens") => "length",
+        Some("end_turn") | Some("stop_sequence") => "stop",
+        Some(other) => other,
+        None => "stop",
+    }
+}
+
 /// Converts a non-streaming Anthropic message response into an OpenAI Chat Completion response.
 pub fn convert_anthropic_to_openai_chat_response(val: &Value, model_name: &str) -> Value {
-    let text = val
-        .get("content")
-        .and_then(|c| c.as_array())
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|item| item.get("text").and_then(|t| t.as_str()))
-                .collect::<Vec<_>>()
-                .join("")
-        })
-        .unwrap_or_default();
+    let mut text_parts = Vec::new();
+    let mut tool_calls = Vec::new();
+
+    if let Some(arr) = val.get("content").and_then(|c| c.as_array()) {
+        for item in arr {
+            match item.get("type").and_then(|t| t.as_str()) {
+                Some("text") => {
+                    if let Some(t) = item.get("text").and_then(|t| t.as_str()) {
+                        text_parts.push(t);
+                    }
+                }
+                Some("tool_use") => {
+                    let id = item.get("id").and_then(|v| v.as_str()).unwrap_or("");
+                    let name = item.get("name").and_then(|v| v.as_str()).unwrap_or("");
+                    let input = item.get("input").unwrap_or(&Value::Null);
+                    let arguments = serde_json::to_string(input).unwrap_or_else(|_| "{}".to_string());
+                    tool_calls.push(serde_json::json!({
+                        "id": id,
+                        "type": "function",
+                        "function": {
+                            "name": name,
+                            "arguments": arguments
+                        }
+                    }));
+                }
+                _ => {}
+            }
+        }
+    }
+    let text = text_parts.join("");
 
     let prompt_tokens = val
         .pointer("/usage/input_tokens")
@@ -911,6 +941,21 @@ pub fn convert_anthropic_to_openai_chat_response(val: &Value, model_name: &str) 
         .and_then(|v| v.as_i64())
         .unwrap_or(0);
 
+    let stop_reason = val.get("stop_reason").and_then(|r| r.as_str());
+    let finish_reason = if !tool_calls.is_empty() && stop_reason == Some("tool_use") {
+        "tool_calls"
+    } else {
+        anthropic_to_openai_finish_reason(stop_reason)
+    };
+
+    let mut message = serde_json::json!({
+        "role": "assistant",
+        "content": if text.is_empty() && !tool_calls.is_empty() { Value::Null } else { Value::String(text) }
+    });
+    if !tool_calls.is_empty() {
+        message["tool_calls"] = Value::Array(tool_calls);
+    }
+
     serde_json::json!({
         "id": format!("chatcmpl-{}", nanoid::nanoid!(24)),
         "object": "chat.completion",
@@ -918,11 +963,8 @@ pub fn convert_anthropic_to_openai_chat_response(val: &Value, model_name: &str) 
         "model": model_name,
         "choices": [{
             "index": 0,
-            "message": {
-                "role": "assistant",
-                "content": text
-            },
-            "finish_reason": val.get("stop_reason").and_then(|r| r.as_str()).unwrap_or("stop")
+            "message": message,
+            "finish_reason": finish_reason
         }],
         "usage": {
             "prompt_tokens": prompt_tokens,
@@ -958,7 +1000,42 @@ pub fn anthropic_sse_event_to_openai_chunk(
     let val: serde_json::Value = serde_json::from_str(data_str).ok()?;
 
     match event_type {
+        "content_block_start" => {
+            let index = val.get("index").and_then(Value::as_u64).unwrap_or(0);
+            if let Some(cb) = val.get("content_block")
+                && cb.get("type").and_then(Value::as_str) == Some("tool_use")
+            {
+                let id = cb.get("id").and_then(Value::as_str).unwrap_or("");
+                let name = cb.get("name").and_then(Value::as_str).unwrap_or("");
+                let chunk = serde_json::json!({
+                    "id": chatcmpl_id,
+                    "object": "chat.completion.chunk",
+                    "created": created,
+                    "model": model_name,
+                    "choices": [{
+                        "index": 0,
+                        "delta": {
+                            "tool_calls": [{
+                                "index": index,
+                                "id": id,
+                                "type": "function",
+                                "function": {
+                                    "name": name,
+                                    "arguments": ""
+                                }
+                            }]
+                        },
+                        "finish_reason": null
+                    }]
+                });
+                return Some(format!(
+                    "data: {}\n\n",
+                    serde_json::to_string(&chunk).unwrap_or_default()
+                ));
+            }
+        }
         "content_block_delta" => {
+            let index = val.get("index").and_then(Value::as_u64).unwrap_or(0);
             if let Some(text) = val.pointer("/delta/text").and_then(|t| t.as_str()) {
                 let chunk = serde_json::json!({
                     "id": chatcmpl_id,
@@ -975,13 +1052,34 @@ pub fn anthropic_sse_event_to_openai_chunk(
                     "data: {}\n\n",
                     serde_json::to_string(&chunk).unwrap_or_default()
                 ));
+            } else if let Some(partial) = val.pointer("/delta/partial_json").and_then(|t| t.as_str()) {
+                let chunk = serde_json::json!({
+                    "id": chatcmpl_id,
+                    "object": "chat.completion.chunk",
+                    "created": created,
+                    "model": model_name,
+                    "choices": [{
+                        "index": 0,
+                        "delta": {
+                            "tool_calls": [{
+                                "index": index,
+                                "function": {
+                                    "arguments": partial
+                                }
+                            }]
+                        },
+                        "finish_reason": null
+                    }]
+                });
+                return Some(format!(
+                    "data: {}\n\n",
+                    serde_json::to_string(&chunk).unwrap_or_default()
+                ));
             }
         }
         "message_delta" => {
-            let finish_reason = val
-                .pointer("/delta/stop_reason")
-                .and_then(|s| s.as_str())
-                .unwrap_or("stop");
+            let stop_reason = val.pointer("/delta/stop_reason").and_then(|s| s.as_str());
+            let finish_reason = anthropic_to_openai_finish_reason(stop_reason);
             let mut chunk = serde_json::json!({
                 "id": chatcmpl_id,
                 "object": "chat.completion.chunk",
@@ -1300,14 +1398,18 @@ pub fn convert_gemini_to_openai_chat_response(val: &Value, model_name: &str) -> 
         "role": "assistant",
         "content": text
     });
-    if !tool_calls.is_empty() {
+    let has_tools = !tool_calls.is_empty();
+    if has_tools {
         message["tool_calls"] = Value::Array(tool_calls);
     }
 
-    let finish_reason = candidate
+    let mut finish_reason = candidate
         .and_then(|c| c.get("finishReason"))
         .and_then(Value::as_str)
         .map(gemini_finish_reason);
+    if has_tools && finish_reason == Some("stop") {
+        finish_reason = Some("tool_calls");
+    }
     let prompt_tokens = val
         .pointer("/usageMetadata/promptTokenCount")
         .and_then(Value::as_i64)
@@ -1355,20 +1457,52 @@ pub fn gemini_sse_event_to_openai_chunk(
         .pointer("/content/parts")
         .and_then(Value::as_array);
     let text = parts
-        .map(|parts| {
-            parts
-                .iter()
+        .map(|p| {
+            p.iter()
                 .filter_map(|part| part.get("text").and_then(Value::as_str))
                 .collect::<String>()
         })
         .unwrap_or_default();
-    let finish_reason = candidate
+    let tool_calls: Vec<Value> = parts
+        .into_iter()
+        .flatten()
+        .filter_map(|part| {
+            let call = part.get("functionCall")?;
+            let name = call.get("name").and_then(Value::as_str)?;
+            let arguments = call
+                .get("args")
+                .cloned()
+                .unwrap_or_else(|| serde_json::json!({}));
+            Some(serde_json::json!({
+                "index": 0,
+                "id": format!("call_{}", nanoid::nanoid!(20)),
+                "type": "function",
+                "function": {
+                    "name": name,
+                    "arguments": serde_json::to_string(&arguments).unwrap_or_else(|_| "{}".to_string())
+                }
+            }))
+        })
+        .collect();
+
+    let mut finish_reason = candidate
         .get("finishReason")
         .and_then(Value::as_str)
         .map(gemini_finish_reason);
+    if !tool_calls.is_empty() && finish_reason == Some("stop") {
+        finish_reason = Some("tool_calls");
+    }
 
-    if text.is_empty() && finish_reason.is_none() {
+    if text.is_empty() && tool_calls.is_empty() && finish_reason.is_none() && val.get("usageMetadata").is_none() {
         return None;
+    }
+
+    let mut delta = serde_json::Map::new();
+    if !text.is_empty() {
+        delta.insert("content".to_string(), Value::String(text));
+    }
+    if !tool_calls.is_empty() {
+        delta.insert("tool_calls".to_string(), Value::Array(tool_calls));
     }
 
     let mut chunk = serde_json::json!({
@@ -1378,7 +1512,7 @@ pub fn gemini_sse_event_to_openai_chunk(
         "model": model_name,
         "choices": [{
             "index": 0,
-            "delta": if text.is_empty() { serde_json::json!({}) } else { serde_json::json!({ "content": text }) },
+            "delta": Value::Object(delta),
             "finish_reason": finish_reason
         }]
     });
@@ -1861,6 +1995,67 @@ mod tests {
         let stop_chunk =
             anthropic_sse_event_to_openai_chunk(stop_event, "claude-3-5-sonnet", 1700000000, "chatcmpl-test");
         assert_eq!(stop_chunk, Some("data: [DONE]\n\n".to_string()));
+    }
+
+    #[test]
+    fn test_anthropic_sse_event_to_openai_chunk_tool_calls() {
+        let start_event = "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"tool_use\",\"id\":\"call_test123\",\"name\":\"get_weather\",\"input\":{}}}\n\n";
+        let chunk1 =
+            anthropic_sse_event_to_openai_chunk(start_event, "claude-3-5-sonnet", 1700000000, "chatcmpl-test").unwrap();
+        assert!(chunk1.contains("call_test123"));
+        assert!(chunk1.contains("get_weather"));
+
+        let delta_event = "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"city\\\":\\\"Paris\\\"}\"}}\n\n";
+        let chunk2 =
+            anthropic_sse_event_to_openai_chunk(delta_event, "claude-3-5-sonnet", 1700000000, "chatcmpl-test").unwrap();
+        assert!(chunk2.contains("Paris"));
+
+        let message_delta =
+            "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"tool_use\"}}\n\n";
+        let chunk3 =
+            anthropic_sse_event_to_openai_chunk(message_delta, "claude-3-5-sonnet", 1700000000, "chatcmpl-test")
+                .unwrap();
+        assert!(chunk3.contains("tool_calls"));
+    }
+
+    #[test]
+    fn test_convert_anthropic_to_openai_chat_response_tool_calls() {
+        let anthropic_resp = serde_json::json!({
+            "id": "msg_123",
+            "type": "message",
+            "role": "assistant",
+            "content": [
+                { "type": "text", "text": "Checking weather" },
+                { "type": "tool_use", "id": "call_abc", "name": "get_weather", "input": { "city": "Paris" } }
+            ],
+            "model": "claude-3-5-sonnet",
+            "stop_reason": "tool_use",
+            "usage": { "input_tokens": 10, "output_tokens": 20 }
+        });
+
+        let openai = convert_anthropic_to_openai_chat_response(&anthropic_resp, "claude-3-5-sonnet");
+        assert_eq!(openai.pointer("/choices/0/finish_reason").unwrap(), "tool_calls");
+        assert_eq!(
+            openai
+                .pointer("/choices/0/message/tool_calls/0/id")
+                .unwrap(),
+            "call_abc"
+        );
+        assert_eq!(
+            openai
+                .pointer("/choices/0/message/tool_calls/0/function/name")
+                .unwrap(),
+            "get_weather"
+        );
+    }
+
+    #[test]
+    fn test_gemini_sse_event_to_openai_chunk_tool_calls() {
+        let gemini_event = "data: {\"candidates\":[{\"content\":{\"parts\":[{\"functionCall\":{\"name\":\"calc\",\"args\":{\"x\":1}}}],\"role\":\"model\"},\"finishReason\":\"STOP\"}]}\n\n";
+        let chunk =
+            gemini_sse_event_to_openai_chunk(gemini_event, "gemini-1.5-flash", 1700000000, "chatcmpl-gemini").unwrap();
+        assert!(chunk.contains("calc"));
+        assert!(chunk.contains("tool_calls"));
     }
 
     #[test]
