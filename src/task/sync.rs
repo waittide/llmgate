@@ -18,7 +18,7 @@ pub fn get_last_sync_time() -> i64 {
 
 pub async fn fetch_upstream_models(channel: &Channel) -> Result<Vec<String>> {
     let client = get_client();
-    let resp = build_upstream_request(client, channel, "/models", None, Some(15))?
+    let resp = build_upstream_request(client, channel, "/models", None, Some(15), None)?
         .send()
         .await?;
 

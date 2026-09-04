@@ -1004,7 +1004,7 @@ pub async fn forward_relay(
         let (target_endpoint, final_body) =
             prepare_upstream_payload(format, metadata.stream, &body_bytes, &ch, &channel_model);
         let target_req_url = format!("{}{}", normalize_base_url(&ch.base_url), target_endpoint);
-        let channel_req_headers = upstream::build_upstream_headers(&ch)
+        let channel_req_headers = upstream::build_upstream_headers(&ch, Some(&headers))
             .map(|h| serialize_headers(&h))
             .unwrap_or_else(|_| request_headers.clone());
         let rewritten_body_str = String::from_utf8_lossy(&final_body).to_string();
@@ -1037,7 +1037,14 @@ pub async fn forward_relay(
         };
 
         let client = get_client();
-        let req_builder = match build_upstream_request(client, &ch, &target_endpoint, Some(final_body), timeout_secs) {
+        let req_builder = match build_upstream_request(
+            client,
+            &ch,
+            &target_endpoint,
+            Some(final_body),
+            timeout_secs,
+            Some(&headers),
+        ) {
             Ok(rb) => rb,
             Err(e) => {
                 let err_msg = format!("Failed to build request for channel {}: {}", ch.name, e);
