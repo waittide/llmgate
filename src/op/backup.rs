@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 
 use anyhow::Result;
+use tracing::warn;
 
 use crate::{
     model::{BackupData, DBImportResult},
@@ -49,6 +50,8 @@ pub async fn export_backup(state: &AppState) -> Result<BackupData> {
     })
 }
 
+/// 将备份数据合并导入当前库：按 id upsert（同 id 覆盖、无 id 追加），并非清空后还原。
+/// 单行失败不影响其余行，失败明细记 warn 日志，结果按表返回成功行数。
 pub async fn import_backup(state: &AppState, backup: BackupData) -> Result<DBImportResult> {
     let mut tx = state.db.begin().await?;
     let mut rows_affected = HashMap::new();
@@ -63,7 +66,9 @@ pub async fn import_backup(state: &AppState, backup: BackupData) -> Result<DBImp
         .bind(&s.value)
         .execute(&mut *tx)
         .await;
-        if res.is_ok() {
+        if let Err(e) = &res {
+            warn!("导入设置失败（key={}）: {}", s.key, e);
+        } else {
             setting_count += 1;
         }
     }
@@ -112,7 +117,9 @@ pub async fn import_backup(state: &AppState, backup: BackupData) -> Result<DBImp
             .await
         };
 
-        if res.is_ok() {
+        if let Err(e) = &res {
+            warn!("导入 API 密钥失败（name={}）: {}", key.name, e);
+        } else {
             key_count += 1;
         }
     }
@@ -185,7 +192,9 @@ pub async fn import_backup(state: &AppState, backup: BackupData) -> Result<DBImp
             (r, id)
         };
 
-        if res.is_ok() {
+        if let Err(e) = &res {
+            warn!("导入渠道失败（name={}）: {}", ch.name, e);
+        } else {
             channel_count += 1;
         }
 
@@ -249,7 +258,9 @@ pub async fn import_backup(state: &AppState, backup: BackupData) -> Result<DBImp
             .execute(&mut *tx)
             .await
         };
-        if res.is_ok() {
+        if let Err(e) = &res {
+            warn!("导入渠道模型失败（name={}）: {}", cm.name, e);
+        } else {
             cm_count += 1;
         }
     }
@@ -291,7 +302,9 @@ pub async fn import_backup(state: &AppState, backup: BackupData) -> Result<DBImp
             (r, id)
         };
 
-        if res.is_ok() {
+        if let Err(e) = &res {
+            warn!("导入分组失败（name={}）: {}", grp.name, e);
+        } else {
             group_count += 1;
         }
 
@@ -341,7 +354,9 @@ pub async fn import_backup(state: &AppState, backup: BackupData) -> Result<DBImp
             .execute(&mut *tx)
             .await
         };
-        if res.is_ok() {
+        if let Err(e) = &res {
+            warn!("导入分组成员失败（model_id={}）: {}", item.channel_model_id, e);
+        } else {
             gi_count += 1;
         }
     }
@@ -369,7 +384,9 @@ pub async fn import_backup(state: &AppState, backup: BackupData) -> Result<DBImp
         .bind(info.price.cache_write)
         .execute(&mut *tx)
         .await;
-        if res.is_ok() {
+        if let Err(e) = &res {
+            warn!("导入模型价格失败（name={}）: {}", name_lower, e);
+        } else {
             llm_count += 1;
         }
     }
