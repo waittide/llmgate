@@ -779,11 +779,35 @@ fn build_failed_relay_response(state: &AppState, ctx: FailedRelayContext<'_>) ->
         request_failed:  1,
     };
     stats::record_metrics(state, ctx.api_key_id, 0, 0, &failed_delta);
-
-    let error_summary = if !ctx.last_error_body.is_empty() {
-        ctx.last_error_body.clone()
+    let (response_bytes, error_message) = if !ctx.last_error_body.is_empty() {
+        if serde_json::from_str::<serde_json::Value>(&ctx.last_error_body).is_ok() {
+            (Bytes::from(ctx.last_error_body.clone()), ctx.last_error_body.clone())
+        } else {
+            let json_err = serde_json::json!({
+                "error": {
+                    "message": ctx.last_error_body,
+                    "type": "upstream_error",
+                    "code": ctx.last_status.as_u16()
+                }
+            });
+            (
+                Bytes::from(serde_json::to_vec(&json_err).unwrap_or_default()),
+                ctx.last_error_body.clone(),
+            )
+        }
     } else {
-        "All failover targets exhausted".to_string()
+        let fallback_msg = "Upstream request failed after all attempts".to_string();
+        let json_err = serde_json::json!({
+            "error": {
+                "message": fallback_msg,
+                "type": "failover_exhausted",
+                "code": 502
+            }
+        });
+        (
+            Bytes::from(serde_json::to_vec(&json_err).unwrap_or_default()),
+            fallback_msg,
+        )
     };
 
     log::record_request_log(
@@ -806,7 +830,7 @@ fn build_failed_relay_response(state: &AppState, ctx: FailedRelayContext<'_>) ->
             cost: 0.0,
             wait_time: ctx.wait_time_ms,
             round: ctx.round,
-            error: Some(error_summary.clone()),
+            error: Some(error_message.clone()),
             rounds_detail: serde_json::to_string(&ctx.rounds).unwrap_or_default(),
             created_at: ctx.started_at,
             ..Default::default()
@@ -818,35 +842,10 @@ fn build_failed_relay_response(state: &AppState, ctx: FailedRelayContext<'_>) ->
         "failed",
         Usage::default(),
         0.0,
-        ctx.last_error_body.clone(),
-        Some(error_summary),
+        ctx.last_error_body,
+        Some(error_message),
         ctx.rounds,
     );
-
-    let response_body_bytes = if !ctx.last_error_body.is_empty() {
-        if serde_json::from_str::<serde_json::Value>(&ctx.last_error_body).is_ok() {
-            Bytes::from(ctx.last_error_body)
-        } else {
-            let json_err = serde_json::json!({
-                "error": {
-                    "message": ctx.last_error_body,
-                    "type": "upstream_error",
-                    "code": ctx.last_status.as_u16()
-                }
-            });
-            Bytes::from(serde_json::to_vec(&json_err).unwrap_or_default())
-        }
-    } else {
-        let json_err = serde_json::json!({
-            "error": {
-                "message": "Upstream request failed after all attempts",
-                "type": "failover_exhausted",
-                "code": 502
-            }
-        });
-        Bytes::from(serde_json::to_vec(&json_err).unwrap_or_default())
-    };
-
     Response::builder()
         .status(
             if ctx.last_status.is_client_error() || ctx.last_status.is_server_error() {
@@ -856,7 +855,7 @@ fn build_failed_relay_response(state: &AppState, ctx: FailedRelayContext<'_>) ->
             },
         )
         .header(header::CONTENT_TYPE, "application/json")
-        .body(Body::from(response_body_bytes))
+        .body(Body::from(response_bytes))
         .unwrap_or_else(|e| {
             tracing::error!("Failed to build error response: {}", e);
             Response::builder()
