@@ -133,7 +133,7 @@ pub fn get_channel(state: &AppState, id: i64) -> Result<Channel> {
     state
         .channels
         .get(&id)
-        .map(|c| c.clone())
+        .map(|c| c.value().clone())
         .ok_or_else(|| anyhow!("Channel not found"))
 }
 
