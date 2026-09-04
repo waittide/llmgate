@@ -14,7 +14,7 @@ pub struct Usage {
     pub total_tokens:      i64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct RequestOverview {
     pub id:             u64,
     pub status:         String,
@@ -33,30 +33,34 @@ pub struct RequestOverview {
     pub rounds:         Vec<crate::model::RoundLog>,
 }
 
+/// 毫秒时间戳转 RFC3339 字符串（非法值返回空串）。
+pub fn millis_to_rfc3339(ms: i64) -> String {
+    chrono::DateTime::from_timestamp_millis(ms)
+        .map(|dt| dt.to_rfc3339())
+        .unwrap_or_default()
+}
+
 impl From<&RequestLog> for RequestOverview {
     fn from(log: &RequestLog) -> Self {
-        let started_at = chrono::DateTime::from_timestamp_millis(log.created_at)
-            .map(|dt| dt.to_rfc3339())
-            .unwrap_or_default();
         RequestOverview {
-            id: log.id as u64,
-            status: log.status.clone(),
-            started_at,
-            duration: log.wait_time,
-            model: log.model.clone(),
-            usage: Usage {
+            id:             log.id as u64,
+            status:         log.status.clone(),
+            started_at:     millis_to_rfc3339(log.created_at),
+            duration:       log.wait_time,
+            model:          log.model.clone(),
+            usage:          Usage {
                 prompt_tokens:     log.prompt_tokens,
                 completion_tokens: log.completion_tokens,
                 total_tokens:      log.total_tokens,
             },
-            cost: log.cost,
-            round: log.round,
+            cost:           log.cost,
+            round:          log.round,
             target_channel: log.target_channel.clone(),
-            target_model: log.target_model.clone(),
-            sending: log.status == crate::model::request_status::RUNNING
+            target_model:   log.target_model.clone(),
+            sending:        log.status == crate::model::request_status::RUNNING
                 || log.status == crate::model::request_status::COMMITTED,
-            error: log.error.clone(),
-            rounds: serde_json::from_str(&log.rounds_detail).unwrap_or_default(),
+            error:          log.error.clone(),
+            rounds:         serde_json::from_str(&log.rounds_detail).unwrap_or_default(),
         }
     }
 }

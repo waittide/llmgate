@@ -30,7 +30,7 @@ use crate::{
         protocol::{
             ApiFormat, calculate_cost, extract_usage_from_json, parse_request_metadata, rewrite_request_body_in_json,
         },
-        state::{RequestOverview, Usage},
+        state::{RequestOverview, Usage, millis_to_rfc3339},
         stream::{ChatCompletionsToResponsesStream, ProviderToOpenaiStream},
         upstream::{build_upstream_request, get_client, normalize_base_url},
     },
@@ -525,19 +525,17 @@ fn record_round_failure(
     }
 
     state.in_flight.broadcast(RequestOverview {
-        id:             req_id,
-        status:         request_status::RUNNING.to_string(),
-        started_at:     fail.started_at.to_string(),
-        duration:       fail.duration_ms,
-        model:          fail.model.to_string(),
-        usage:          Usage::default(),
-        cost:           0.0,
-        round:          fail.round,
+        id: req_id,
+        status: request_status::RUNNING.to_string(),
+        started_at: fail.started_at.to_string(),
+        duration: fail.duration_ms,
+        model: fail.model.to_string(),
+        round: fail.round,
         target_channel: fail.channel_name.to_string(),
-        target_model:   fail.model_name.to_string(),
-        sending:        false,
-        error:          Some(fail.err_body.to_string()),
-        rounds:         rounds.clone(),
+        target_model: fail.model_name.to_string(),
+        error: Some(fail.err_body.to_string()),
+        rounds: rounds.clone(),
+        ..Default::default()
     });
 }
 
@@ -562,21 +560,17 @@ struct SuccessContext<'a> {
 
 fn handle_successful_stream(state: &AppState, upstream_resp: reqwest::Response, ctx: SuccessContext<'_>) -> Response {
     state.in_flight.broadcast(RequestOverview {
-        id:             ctx.request_id,
-        status:         request_status::COMMITTED.to_string(),
-        started_at:     chrono::DateTime::from_timestamp_millis(ctx.started_at)
-            .map(|dt| dt.to_rfc3339())
-            .unwrap_or_default(),
-        duration:       ctx.start_time.elapsed().as_millis() as i64,
-        model:          ctx.model.to_string(),
-        usage:          Usage::default(),
-        cost:           0.0,
-        round:          ctx.round,
+        id: ctx.request_id,
+        status: request_status::COMMITTED.to_string(),
+        started_at: millis_to_rfc3339(ctx.started_at),
+        duration: ctx.start_time.elapsed().as_millis() as i64,
+        model: ctx.model.to_string(),
+        round: ctx.round,
         target_channel: ctx.channel.name.clone(),
-        target_model:   ctx.channel_model.name.clone(),
-        sending:        true,
-        error:          None,
-        rounds:         ctx.rounds.clone(),
+        target_model: ctx.channel_model.name.clone(),
+        sending: true,
+        rounds: ctx.rounds.clone(),
+        ..Default::default()
     });
 
     let log_template = RequestLog {
@@ -956,23 +950,14 @@ pub async fn forward_relay(
         }
     };
     let cancel_rx = state.in_flight.register(request_id);
-    let started_at_rfc3339 = chrono::DateTime::from_timestamp_millis(started_at)
-        .map(|dt| dt.to_rfc3339())
-        .unwrap_or_default();
+    let started_at_rfc3339 = millis_to_rfc3339(started_at);
     state.in_flight.broadcast(RequestOverview {
-        id:             request_id,
-        status:         request_status::RUNNING.to_string(),
-        started_at:     started_at_rfc3339.clone(),
-        duration:       0,
-        model:          metadata.model.clone(),
-        usage:          Usage::default(),
-        cost:           0.0,
-        round:          1,
-        target_channel: String::new(),
-        target_model:   String::new(),
-        sending:        false,
-        error:          None,
-        rounds:         Vec::new(),
+        id: request_id,
+        status: request_status::RUNNING.to_string(),
+        started_at: started_at_rfc3339.clone(),
+        model: metadata.model.clone(),
+        round: 1,
+        ..Default::default()
     });
 
     let max_attempts = group_obj.relay_config.max_attempts.max(1);
@@ -1046,14 +1031,12 @@ pub async fn forward_relay(
             started_at: started_at_rfc3339.clone(),
             duration: start_time.elapsed().as_millis() as i64,
             model: metadata.model.clone(),
-            usage: Usage::default(),
-            cost: 0.0,
             round,
             target_channel: ch.name.clone(),
             target_model: channel_model.name.clone(),
             sending: true,
-            error: None,
             rounds: rounds.clone(),
+            ..Default::default()
         });
 
         let timeout_secs = if metadata.stream {
