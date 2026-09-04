@@ -1108,7 +1108,7 @@ pub async fn forward_relay(
                             channel_name: &ch.name,
                             model_name: &channel_model.name,
                             target_req_url: &target_req_url,
-                            channel_req_headers: &request_headers,
+                            channel_req_headers: &channel_req_headers,
                             rewritten_body_str: &rewritten_body_str,
                             response_headers: &resp_headers,
                             status: status.as_u16(),
