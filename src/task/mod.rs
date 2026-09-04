@@ -3,7 +3,7 @@ pub mod sync;
 
 use std::time::Duration;
 
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 use crate::op::{AppState, stats::flush_stats_to_db};
 
@@ -32,8 +32,12 @@ pub fn start_background_tasks(state: AppState) {
         tokio::time::sleep(Duration::from_secs(5)).await;
 
         // 启动时先执行一次同步
-        let _ = sync::sync_all_channel_models(&state_sync).await;
-        let _ = price::update_llm_prices(&state_sync).await;
+        if let Err(e) = sync::sync_all_channel_models(&state_sync).await {
+            warn!("启动同步渠道模型失败: {}", e);
+        }
+        if let Err(e) = price::update_llm_prices(&state_sync).await {
+            warn!("启动更新模型价格失败: {}", e);
+        }
 
         loop {
             let sync_hours = state_sync
@@ -52,15 +56,21 @@ pub fn start_background_tasks(state: AppState) {
 
             tokio::time::sleep(Duration::from_secs(wait_hours * 3600)).await;
 
-            let _ = sync::sync_all_channel_models(&state_sync).await;
-            let _ = price::update_llm_prices(&state_sync).await;
+            if let Err(e) = sync::sync_all_channel_models(&state_sync).await {
+                warn!("定时同步渠道模型失败: {}", e);
+            }
+            if let Err(e) = price::update_llm_prices(&state_sync).await {
+                warn!("定时更新模型价格失败: {}", e);
+            }
         }
     });
 
     // 3. 定期清理过期请求日志（启动时先执行一次，之后每小时一次）
     let state_purge = state.clone();
     tokio::spawn(async move {
-        let _ = crate::op::log::purge_expired_logs(&state_purge).await;
+        if let Err(e) = crate::op::log::purge_expired_logs(&state_purge).await {
+            warn!("启动清理过期日志失败: {}", e);
+        }
 
         let mut interval = tokio::time::interval(Duration::from_secs(3600));
         interval.tick().await; // 消耗立即触发的首次 tick

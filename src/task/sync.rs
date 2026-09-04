@@ -95,7 +95,9 @@ pub async fn sync_all_channel_models(state: &AppState) -> Result<()> {
                     custom_header:  None,
                     param_override: None,
                 };
-                let _ = channel::update_channel(state, &update_req).await;
+                if let Err(e) = channel::update_channel(state, &update_req).await {
+                    warn!("渠道 {} 同步结果写回失败: {}", ch.name, e);
+                }
             }
             Err(e) => {
                 warn!("渠道 {} 自动同步失败: {}", ch.name, e);
@@ -103,8 +105,10 @@ pub async fn sync_all_channel_models(state: &AppState) -> Result<()> {
         }
     }
 
-    if !all_added_models.is_empty() {
-        let _ = crate::task::price::ensure_model_prices(state, &all_added_models).await;
+    if !all_added_models.is_empty()
+        && let Err(e) = crate::task::price::ensure_model_prices(state, &all_added_models).await
+    {
+        warn!("新增模型价格补齐失败: {}", e);
     }
 
     LAST_SYNC_TIME.store(chrono::Utc::now().timestamp(), Ordering::SeqCst);
