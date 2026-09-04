@@ -128,22 +128,13 @@ pub async fn cleanup_ghosts(state: &AppState) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
 
     use super::*;
-    use crate::db::init_db;
-
-    async fn setup_test_state() -> (AppState, PathBuf) {
-        let rnd = nanoid::nanoid!(12);
-        let db_path = std::env::temp_dir().join(format!("octopus_llm_test_{}.db", rnd));
-        let pool = init_db(&db_path).await.unwrap();
-        let state = AppState::init(pool).await.unwrap();
-        (state, db_path)
-    }
+    use crate::test_support::setup_test_state;
 
     #[tokio::test]
     async fn test_cleanup_ghosts_removes_ghosts_from_db_and_cache() {
-        let (state, db_path) = setup_test_state().await;
+        let (state, db_path) = setup_test_state("llm").await;
 
         // 插入一个有效模型价格与一个无引用的幽灵模型价格
         let infos = vec![

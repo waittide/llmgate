@@ -382,25 +382,15 @@ pub async fn import_backup(state: &AppState, backup: BackupData) -> Result<DBImp
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
-
     use super::*;
     use crate::{
-        db::init_db,
         model::{Channel, ChannelModel, ChannelModelSource, ChannelProvider, Group, GroupMode},
+        test_support::setup_test_state,
     };
-
-    async fn setup_test_state() -> (AppState, PathBuf) {
-        let rnd = nanoid::nanoid!(12);
-        let db_path = std::env::temp_dir().join(format!("octopus_backup_test_{}.db", rnd));
-        let pool = init_db(&db_path).await.unwrap();
-        let state = AppState::init(pool).await.unwrap();
-        (state, db_path)
-    }
 
     #[tokio::test]
     async fn test_import_backup_channels_and_groups_with_zero_id() {
-        let (state, db_path) = setup_test_state().await;
+        let (state, db_path) = setup_test_state("backup").await;
 
         let backup = BackupData {
             channels: vec![Channel {

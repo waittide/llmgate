@@ -137,22 +137,12 @@ pub async fn clear_log(State(state): State<AppState>) -> Response {
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
-
     use super::*;
-    use crate::db::init_db;
-
-    async fn setup_test_state() -> (AppState, PathBuf) {
-        let rnd = nanoid::nanoid!(12);
-        let db_path = std::env::temp_dir().join(format!("octopus_log_test_{}.db", rnd));
-        let pool = init_db(&db_path).await.unwrap();
-        let state = AppState::init(pool).await.unwrap();
-        (state, db_path)
-    }
+    use crate::test_support::setup_test_state;
 
     #[tokio::test]
     async fn test_log_body_consistent_by_request_id() {
-        let (state, db_path) = setup_test_state().await;
+        let (state, db_path) = setup_test_state("log").await;
 
         // 1. 插入一条历史日志 (request_id = 999)
         sqlx::query(

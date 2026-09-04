@@ -5,6 +5,9 @@ mod op;
 mod relay;
 mod server;
 mod task;
+
+#[cfg(test)]
+mod test_support;
 mod utils;
 
 use std::net::SocketAddr;

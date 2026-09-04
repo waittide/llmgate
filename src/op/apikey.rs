@@ -125,22 +125,13 @@ pub async fn delete_api_key(state: &AppState, id: i64) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
 
     use super::*;
-    use crate::{db::init_db, op::stats::flush_stats_to_db};
-
-    async fn setup_test_state() -> (AppState, PathBuf) {
-        let rnd = nanoid::nanoid!(12);
-        let db_path = std::env::temp_dir().join(format!("octopus_apikey_test_{}.db", rnd));
-        let pool = init_db(&db_path).await.unwrap();
-        let state = AppState::init(pool).await.unwrap();
-        (state, db_path)
-    }
+    use crate::{op::stats::flush_stats_to_db, test_support::setup_test_state};
 
     #[tokio::test]
     async fn test_delete_api_key_cleans_memory_stats_cache() {
-        let (state, db_path) = setup_test_state().await;
+        let (state, db_path) = setup_test_state("apikey").await;
 
         let mut key = APIKey {
             name: "test-delete-key".to_string(),

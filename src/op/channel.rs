@@ -276,20 +276,11 @@ pub async fn delete_channel(state: &AppState, id: i64) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
-
     use super::*;
-    use crate::db::init_db;
-    async fn setup_test_state() -> (AppState, PathBuf) {
-        let rnd = nanoid::nanoid!(12);
-        let db_path = std::env::temp_dir().join(format!("octopus_test_{}.db", rnd));
-        let pool = init_db(&db_path).await.unwrap();
-        let state = AppState::init(pool).await.unwrap();
-        (state, db_path)
-    }
+    use crate::test_support::setup_test_state;
     #[tokio::test]
     async fn test_channel_models_incremental_update() {
-        let (state, _path) = setup_test_state().await;
+        let (state, _path) = setup_test_state("channel").await;
 
         let mut ch = Channel {
             name: "test-channel".to_string(),
@@ -379,7 +370,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_channel_models_duplicate_names_handled_gracefully() {
-        let (state, _path) = setup_test_state().await;
+        let (state, _path) = setup_test_state("channel").await;
 
         let mut ch = Channel {
             name: "test-dedup-channel".to_string(),
@@ -439,7 +430,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_refresh_channel_cache_preserves_live_metrics() {
-        let (state, _path) = setup_test_state().await;
+        let (state, _path) = setup_test_state("channel").await;
 
         let mut ch = Channel {
             name: "test-live-metrics-channel".to_string(),
