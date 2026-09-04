@@ -78,15 +78,16 @@ async fn flush_log_batch(db: &crate::db::DbPool, batch: &mut Vec<RequestLog>) {
         if let Err(e) = sqlx::query(
             r#"
             INSERT INTO request_logs (
-                request_id, status, model, target_channel, target_model,
+                id, status, model, target_channel, target_model,
                 request_url, request_headers, request_body,
                 response_url, response_headers, response_body,
                 prompt_tokens, completion_tokens, total_tokens,
                 cost, wait_time, round, error, rounds_detail, created_at
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(id) DO NOTHING
             "#,
         )
-        .bind(entry.request_id)
+        .bind(entry.id)
         .bind(&entry.status)
         .bind(&entry.model)
         .bind(&entry.target_channel)
@@ -148,13 +149,12 @@ pub async fn clear_all_logs(state: &AppState) -> Result<i64> {
         .await?;
     Ok(res.rows_affected() as i64)
 }
-/// Fetches a single request log by its request_id.
-pub async fn get_request_log(state: &AppState, request_id: i64) -> Result<Option<RequestLog>> {
-    let row =
-        sqlx::query_as::<_, RequestLog>("SELECT * FROM request_logs WHERE request_id = ? ORDER BY id DESC LIMIT 1")
-            .bind(request_id)
-            .fetch_optional(&state.db)
-            .await?;
+/// Fetches a single request log by its id.
+pub async fn get_request_log(state: &AppState, id: i64) -> Result<Option<RequestLog>> {
+    let row = sqlx::query_as::<_, RequestLog>("SELECT * FROM request_logs WHERE id = ? LIMIT 1")
+        .bind(id)
+        .fetch_optional(&state.db)
+        .await?;
     Ok(row)
 }
 pub struct LogListQuery<'a> {
@@ -174,7 +174,7 @@ pub async fn list_request_logs(state: &AppState, query: &LogListQuery<'_>) -> Re
 
     let mut where_qb = QueryBuilder::<sqlx::Sqlite>::new("SELECT COUNT(*) FROM request_logs WHERE 1=1");
     let mut list_qb = QueryBuilder::<sqlx::Sqlite>::new(
-        "SELECT id, request_id, status, model, target_channel, target_model, '' as request_url, '' as request_headers, '' as request_body, '' as response_url, '' as response_headers, '' as response_body, prompt_tokens, completion_tokens, total_tokens, cost, wait_time, round, error, rounds_detail, created_at FROM request_logs WHERE 1=1",
+        "SELECT id, status, model, target_channel, target_model, '' as request_url, '' as request_headers, '' as request_body, '' as response_url, '' as response_headers, '' as response_body, prompt_tokens, completion_tokens, total_tokens, cost, wait_time, round, error, rounds_detail, created_at FROM request_logs WHERE 1=1",
     );
     if !query.model.trim().is_empty() {
         let model = query.model.trim();

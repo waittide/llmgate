@@ -353,7 +353,6 @@ pub struct RoundLog {
 #[serde(default)]
 pub struct RequestLog {
     pub id:                i64,
-    pub request_id:        i64,
     pub status:            String,
     pub model:             String,
     pub target_channel:    String,

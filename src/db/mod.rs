@@ -258,7 +258,6 @@ pub async fn migrate(pool: &DbPool) -> Result<()> {
         r#"
         CREATE TABLE IF NOT EXISTS request_logs (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            request_id INTEGER NOT NULL,
             status TEXT NOT NULL DEFAULT '',
             model TEXT NOT NULL DEFAULT '',
             target_channel TEXT NOT NULL DEFAULT '',
@@ -280,7 +279,6 @@ pub async fn migrate(pool: &DbPool) -> Result<()> {
             created_at INTEGER NOT NULL DEFAULT 0
         );
         CREATE INDEX IF NOT EXISTS idx_request_logs_created_at ON request_logs (created_at DESC);
-        CREATE INDEX IF NOT EXISTS idx_request_logs_request_id ON request_logs (request_id);
         CREATE INDEX IF NOT EXISTS idx_request_logs_model_created ON request_logs (model, created_at DESC);
         CREATE INDEX IF NOT EXISTS idx_request_logs_status_created ON request_logs (status, created_at DESC);
         "#,
@@ -290,6 +288,14 @@ pub async fn migrate(pool: &DbPool) -> Result<()> {
 
     // Ensure rounds_detail column exists for existing databases
     let _ = sqlx::query("ALTER TABLE request_logs ADD COLUMN rounds_detail TEXT NOT NULL DEFAULT '[]'")
+        .execute(pool)
+        .await;
+
+    // Drop request_id column and index if still present in existing databases
+    let _ = sqlx::query("DROP INDEX IF EXISTS idx_request_logs_request_id")
+        .execute(pool)
+        .await;
+    let _ = sqlx::query("ALTER TABLE request_logs DROP COLUMN request_id")
         .execute(pool)
         .await;
 

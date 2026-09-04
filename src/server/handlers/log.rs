@@ -104,7 +104,7 @@ fn to_overview(log: &RequestLog) -> LogOverviewDto {
             .unwrap_or_default()
     };
     LogOverviewDto {
-        id: log.request_id as u64,
+        id: log.id as u64,
         status: log.status.clone(),
         started_at,
         duration: log.wait_time,
@@ -141,36 +141,36 @@ pub async fn list_logs(State(state): State<AppState>, Query(params): Query<LogLi
     }
 }
 
-pub async fn get_log_detail(State(state): State<AppState>, Path(request_id): Path<u64>) -> Response {
-    match op_log::get_request_log(&state, request_id as i64).await {
+pub async fn get_log_detail(State(state): State<AppState>, Path(id): Path<u64>) -> Response {
+    match op_log::get_request_log(&state, id as i64).await {
         Ok(Some(log)) => success(log),
         Ok(None) => error(StatusCode::NOT_FOUND, "Log not found"),
         Err(e) => error(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
     }
 }
 
-pub async fn get_request_body(State(state): State<AppState>, Path(request_id): Path<u64>) -> Response {
-    if let Some(body) = state.request_state_manager.get_request_body(request_id) {
+pub async fn get_request_body(State(state): State<AppState>, Path(id): Path<u64>) -> Response {
+    if let Some(body) = state.request_state_manager.get_request_body(id) {
         return success(body);
     }
-    match op_log::get_request_log(&state, request_id as i64).await {
+    match op_log::get_request_log(&state, id as i64).await {
         Ok(Some(log)) => success(log.request_body),
         _ => error(StatusCode::NOT_FOUND, "Request body not found"),
     }
 }
 
-pub async fn get_response_body(State(state): State<AppState>, Path(request_id): Path<u64>) -> Response {
-    if let Some(body) = state.request_state_manager.get_response_body(request_id) {
+pub async fn get_response_body(State(state): State<AppState>, Path(id): Path<u64>) -> Response {
+    if let Some(body) = state.request_state_manager.get_response_body(id) {
         return success(body);
     }
-    match op_log::get_request_log(&state, request_id as i64).await {
+    match op_log::get_request_log(&state, id as i64).await {
         Ok(Some(log)) => success(log.response_body),
         _ => error(StatusCode::NOT_FOUND, "Response body not found"),
     }
 }
 
-pub async fn interrupt_round(State(state): State<AppState>, Path((request_id, _round)): Path<(u64, i64)>) -> Response {
-    if state.request_state_manager.interrupt(request_id) {
+pub async fn interrupt_round(State(state): State<AppState>, Path((id, _round)): Path<(u64, i64)>) -> Response {
+    if state.request_state_manager.interrupt(id) {
         success_msg("interrupted successfully")
     } else {
         error(StatusCode::NOT_FOUND, "request not found or already finished")
@@ -208,7 +208,7 @@ mod tests {
         sqlx::query(
             r#"
             INSERT INTO request_logs (
-                request_id, status, model, request_body, response_body, created_at
+                id, status, model, request_body, response_body, created_at
             ) VALUES (999, 'success', 'gpt-4o', 'body for request 999', 'response for request 999', 1700000000)
             "#,
         )

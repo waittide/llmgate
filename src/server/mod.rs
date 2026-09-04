@@ -76,7 +76,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/log/overview/stream", get(log::stream_overview))
         .route("/log/{id}/request-body", get(log::get_request_body))
         .route("/log/{id}/response-body", get(log::get_response_body))
-        .route("/log/{request_id}/{round}/stop", post(log::interrupt_round))
+        .route("/log/{id}/{round}/stop", post(log::interrupt_round))
         .route("/log/clear", delete(log::clear_log))
         .layer(from_fn_with_state(state.clone(), admin_auth_middleware));
 

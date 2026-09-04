@@ -526,7 +526,7 @@ fn handle_successful_stream(state: &AppState, upstream_resp: reqwest::Response, 
     state.request_state_manager.mark_committed(ctx.request_id);
 
     let log_template = RequestLog {
-        request_id: ctx.request_id as i64,
+        id: ctx.request_id as i64,
         model: ctx.model.to_string(),
         target_channel: ctx.channel.name.clone(),
         target_model: ctx.channel_model.name.clone(),
@@ -695,7 +695,7 @@ async fn handle_successful_json(
     log::record_request_log(
         state.clone(),
         RequestLog {
-            request_id: ctx.request_id as i64,
+            id: ctx.request_id as i64,
             status: "success".to_string(),
             model: ctx.model.to_string(),
             target_channel: ctx.channel.name.clone(),
@@ -715,7 +715,6 @@ async fn handle_successful_json(
             error: None,
             rounds_detail: serde_json::to_string(&ctx.rounds).unwrap_or_default(),
             created_at: ctx.started_at,
-            ..Default::default()
         },
     );
 
@@ -813,27 +812,26 @@ fn build_failed_relay_response(state: &AppState, ctx: FailedRelayContext<'_>) ->
     log::record_request_log(
         state.clone(),
         RequestLog {
-            request_id: ctx.request_id as i64,
-            status: "failed".to_string(),
-            model: ctx.model.to_string(),
-            target_channel: ctx.last_target_channel,
-            target_model: ctx.last_target_model,
-            request_url: ctx.request_url,
-            request_headers: ctx.request_headers,
-            request_body: ctx.request_body,
-            response_url: ctx.last_response_url,
-            response_headers: ctx.last_response_headers,
-            response_body: ctx.last_error_body.clone(),
-            prompt_tokens: 0,
+            id:                ctx.request_id as i64,
+            status:            "failed".to_string(),
+            model:             ctx.model.to_string(),
+            target_channel:    ctx.last_target_channel,
+            target_model:      ctx.last_target_model,
+            request_url:       ctx.request_url,
+            request_headers:   ctx.request_headers,
+            request_body:      ctx.request_body,
+            response_url:      ctx.last_response_url,
+            response_headers:  ctx.last_response_headers,
+            response_body:     ctx.last_error_body.clone(),
+            prompt_tokens:     0,
             completion_tokens: 0,
-            total_tokens: 0,
-            cost: 0.0,
-            wait_time: ctx.wait_time_ms,
-            round: ctx.round,
-            error: Some(error_message.clone()),
-            rounds_detail: serde_json::to_string(&ctx.rounds).unwrap_or_default(),
-            created_at: ctx.started_at,
-            ..Default::default()
+            total_tokens:      0,
+            cost:              0.0,
+            wait_time:         ctx.wait_time_ms,
+            round:             ctx.round,
+            error:             Some(error_message.clone()),
+            rounds_detail:     serde_json::to_string(&ctx.rounds).unwrap_or_default(),
+            created_at:        ctx.started_at,
         },
     );
 
