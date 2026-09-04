@@ -692,9 +692,8 @@ fn openai_assistant_to_anthropic(msg: &Value) -> Value {
     serde_json::json!({ "role": "assistant", "content": Value::Array(blocks) })
 }
 
-/// Converts an OpenAI `tool` role message into an Anthropic `user` message with
-/// a single `tool_result` content block.
-fn openai_tool_to_anthropic(msg: &Value) -> Value {
+/// Converts an OpenAI `tool` role message into an Anthropic `tool_result` content block.
+fn openai_tool_to_anthropic_block(msg: &Value) -> Value {
     let tool_use_id = msg
         .get("tool_call_id")
         .and_then(|v| v.as_str())
@@ -704,12 +703,9 @@ fn openai_tool_to_anthropic(msg: &Value) -> Value {
         .cloned()
         .unwrap_or_else(|| Value::String(String::new()));
     serde_json::json!({
-        "role": "user",
-        "content": [{
-            "type": "tool_result",
-            "tool_use_id": tool_use_id,
-            "content": result_content
-        }]
+        "type": "tool_result",
+        "tool_use_id": tool_use_id,
+        "content": result_content
     })
 }
 
@@ -816,14 +812,70 @@ pub fn convert_openai_to_anthropic(val: &Value) -> Value {
                     }
                 }
                 "assistant" => anthropic_messages.push(openai_assistant_to_anthropic(msg)),
-                "tool" => anthropic_messages.push(openai_tool_to_anthropic(msg)),
+                "tool" => {
+                    let block = openai_tool_to_anthropic_block(msg);
+                    if let Some(last_msg) = anthropic_messages.last_mut()
+                        && last_msg.get("role").and_then(Value::as_str) == Some("user")
+                    {
+                        match last_msg.get_mut("content") {
+                            Some(Value::Array(arr)) => arr.push(block),
+                            Some(existing_content) => {
+                                let prev = existing_content.take();
+                                let prev_block = match prev {
+                                    Value::String(s) => serde_json::json!({ "type": "text", "text": s }),
+                                    other => other,
+                                };
+                                *existing_content = Value::Array(vec![prev_block, block]);
+                            }
+                            None => {
+                                if let Some(obj) = last_msg.as_object_mut() {
+                                    obj.insert("content".to_string(), Value::Array(vec![block]));
+                                }
+                            }
+                        }
+                    } else {
+                        anthropic_messages.push(serde_json::json!({
+                            "role": "user",
+                            "content": [block]
+                        }));
+                    }
+                }
                 _ => {
                     let content =
                         openai_content_to_anthropic(msg.get("content").unwrap_or(&Value::String(String::new())));
-                    anthropic_messages.push(serde_json::json!({
-                        "role": role,
-                        "content": content
-                    }));
+                    if role == "user"
+                        && let Some(last_msg) = anthropic_messages.last_mut()
+                        && last_msg.get("role").and_then(Value::as_str) == Some("user")
+                    {
+                        let new_blocks = match content {
+                            Value::Array(arr) => arr,
+                            Value::String(s) => vec![serde_json::json!({ "type": "text", "text": s })],
+                            other => vec![other],
+                        };
+                        match last_msg.get_mut("content") {
+                            Some(Value::Array(arr)) => arr.extend(new_blocks),
+                            Some(existing_content) => {
+                                let prev = existing_content.take();
+                                let mut blocks = match prev {
+                                    Value::Array(arr) => arr,
+                                    Value::String(s) => vec![serde_json::json!({ "type": "text", "text": s })],
+                                    other => vec![other],
+                                };
+                                blocks.extend(new_blocks);
+                                *existing_content = Value::Array(blocks);
+                            }
+                            None => {
+                                if let Some(obj) = last_msg.as_object_mut() {
+                                    obj.insert("content".to_string(), Value::Array(new_blocks));
+                                }
+                            }
+                        }
+                    } else {
+                        anthropic_messages.push(serde_json::json!({
+                            "role": role,
+                            "content": content
+                        }));
+                    }
                 }
             }
         }
@@ -1517,6 +1569,48 @@ mod tests {
         let result = tool_msg.get("content").unwrap().as_array().unwrap();
         assert_eq!(result[0].get("type").unwrap(), "tool_result");
         assert_eq!(result[0].get("tool_use_id").unwrap(), "call_abc");
+    }
+
+    #[test]
+    fn test_convert_anthropic_consecutive_tool_and_user_calls() {
+        let openai_req = serde_json::json!({
+            "model": "claude-3-5-sonnet",
+            "messages": [
+                { "role": "user", "content": "What's the weather in Paris and London?" },
+                {
+                    "role": "assistant",
+                    "tool_calls": [
+                        {
+                            "id": "call_1",
+                            "type": "function",
+                            "function": { "name": "get_weather", "arguments": "{\"city\":\"Paris\"}" }
+                        },
+                        {
+                            "id": "call_2",
+                            "type": "function",
+                            "function": { "name": "get_weather", "arguments": "{\"city\":\"London\"}" }
+                        }
+                    ]
+                },
+                { "role": "tool", "tool_call_id": "call_1", "content": "23°C sunny" },
+                { "role": "tool", "tool_call_id": "call_2", "content": "15°C rainy" }
+            ]
+        });
+
+        let anthropic = convert_openai_to_anthropic(&openai_req);
+        let messages = anthropic.get("messages").unwrap().as_array().unwrap();
+        // Must be exactly 3 messages: user -> assistant -> user (merged tool results)
+        assert_eq!(messages.len(), 3);
+        assert_eq!(messages[0].get("role").unwrap(), "user");
+        assert_eq!(messages[1].get("role").unwrap(), "assistant");
+        assert_eq!(messages[2].get("role").unwrap(), "user");
+
+        let tool_msg_content = messages[2].get("content").unwrap().as_array().unwrap();
+        assert_eq!(tool_msg_content.len(), 2);
+        assert_eq!(tool_msg_content[0].get("type").unwrap(), "tool_result");
+        assert_eq!(tool_msg_content[0].get("tool_use_id").unwrap(), "call_1");
+        assert_eq!(tool_msg_content[1].get("type").unwrap(), "tool_result");
+        assert_eq!(tool_msg_content[1].get("tool_use_id").unwrap(), "call_2");
     }
 
     #[test]
