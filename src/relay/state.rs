@@ -57,16 +57,15 @@ pub struct RequestStateManager {
 }
 
 impl RequestStateManager {
-    pub fn new() -> Self {
+    pub fn new(initial_id: u64) -> Self {
         let (tx, _) = broadcast::channel(256);
         Self {
-            counter: AtomicU64::new(1),
+            counter: AtomicU64::new(initial_id.max(1)),
             requests: DashMap::new(),
             recent_ids: Arc::new(RwLock::new(VecDeque::new())),
             tx,
         }
     }
-
     pub fn subscribe(&self) -> broadcast::Receiver<RequestOverview> {
         self.tx.subscribe()
     }
@@ -79,9 +78,8 @@ impl RequestStateManager {
     }
 
     pub fn new_request(&self, model: String, body: String) -> u64 {
-        let seq = self.counter.fetch_add(1, Ordering::SeqCst);
+        let id = self.counter.fetch_add(1, Ordering::SeqCst);
         let now = chrono::Utc::now();
-        let id = (now.timestamp_millis() as u64) * 1000 + (seq % 1000);
         let overview = RequestOverview {
             id,
             status: "running".to_string(),
@@ -259,7 +257,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_request_state_manager_interrupt() {
-        let manager = RequestStateManager::new();
+        let manager = RequestStateManager::new(1);
         let req_id = manager.new_request("test-model".to_string(), "{}".to_string());
         let rx = manager
             .get_cancel_receiver(req_id)

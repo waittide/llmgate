@@ -104,7 +104,7 @@ fn to_overview(log: &RequestLog) -> LogOverviewDto {
             .unwrap_or_default()
     };
     LogOverviewDto {
-        id: log.id as u64,
+        id: log.request_id as u64,
         status: log.status.clone(),
         started_at,
         duration: log.wait_time,
@@ -141,35 +141,29 @@ pub async fn list_logs(State(state): State<AppState>, Query(params): Query<LogLi
     }
 }
 
-pub async fn get_log_detail(State(state): State<AppState>, Path(id): Path<u64>) -> Response {
-    match op_log::get_request_log(&state, id as i64).await {
+pub async fn get_log_detail(State(state): State<AppState>, Path(request_id): Path<u64>) -> Response {
+    match op_log::get_request_log(&state, request_id as i64).await {
         Ok(Some(log)) => success(log),
         Ok(None) => error(StatusCode::NOT_FOUND, "Log not found"),
         Err(e) => error(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
     }
 }
 
-pub async fn get_request_body(State(state): State<AppState>, Path(id): Path<u64>) -> Response {
-    // Only check in-memory active requests if the ID is a runtime request_id
-    if id >= 1_000_000_000_000
-        && let Some(body) = state.request_state_manager.get_request_body(id)
-    {
+pub async fn get_request_body(State(state): State<AppState>, Path(request_id): Path<u64>) -> Response {
+    if let Some(body) = state.request_state_manager.get_request_body(request_id) {
         return success(body);
     }
-    match op_log::get_request_log(&state, id as i64).await {
+    match op_log::get_request_log(&state, request_id as i64).await {
         Ok(Some(log)) => success(log.request_body),
         _ => error(StatusCode::NOT_FOUND, "Request body not found"),
     }
 }
 
-pub async fn get_response_body(State(state): State<AppState>, Path(id): Path<u64>) -> Response {
-    // Only check in-memory active requests if the ID is a runtime request_id
-    if id >= 1_000_000_000_000
-        && let Some(body) = state.request_state_manager.get_response_body(id)
-    {
+pub async fn get_response_body(State(state): State<AppState>, Path(request_id): Path<u64>) -> Response {
+    if let Some(body) = state.request_state_manager.get_response_body(request_id) {
         return success(body);
     }
-    match op_log::get_request_log(&state, id as i64).await {
+    match op_log::get_request_log(&state, request_id as i64).await {
         Ok(Some(log)) => success(log.response_body),
         _ => error(StatusCode::NOT_FOUND, "Response body not found"),
     }
@@ -207,44 +201,41 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_log_body_no_namespace_collision() {
+    async fn test_log_body_consistent_by_request_id() {
         let (state, db_path) = setup_test_state().await;
 
-        // 1. Insert a historical log with SQLite row id = 1
-        let res = sqlx::query(
+        // 1. Insert historical log with request_id = 999
+        sqlx::query(
             r#"
             INSERT INTO request_logs (
                 request_id, status, model, request_body, response_body, created_at
-            ) VALUES (999, 'success', 'gpt-4o', 'historical request body', 'historical response body', 1700000000)
+            ) VALUES (999, 'success', 'gpt-4o', 'body for request 999', 'response for request 999', 1700000000)
             "#,
         )
         .execute(&state.db)
         .await
         .unwrap();
-        let historical_row_id = res.last_insert_rowid() as u64;
 
-        // 2. Start a new runtime request in memory (generates timestamp-based ID >= 1_000_000_000_000)
+        // 2. Active runtime request in memory
         let runtime_req_id = state
             .request_state_manager
-            .new_request("gpt-4o".to_string(), "runtime request body".to_string());
-        assert!(runtime_req_id >= 1_000_000_000_000);
+            .new_request("gpt-4o".to_string(), "body for active request".to_string());
 
-        // 3. Querying historical log row id must return historical body, never shadowed by in-memory
-        let resp = get_request_body(State(state.clone()), Path(historical_row_id)).await;
-        assert_eq!(resp.status(), StatusCode::OK);
-        let body_bytes = axum::body::to_bytes(resp.into_body(), 1024).await.unwrap();
-        let body_str = String::from_utf8_lossy(&body_bytes);
-        assert!(body_str.contains("historical request body"));
-        assert!(!body_str.contains("runtime request body"));
-
-        // 4. Querying runtime request id returns runtime body
-        let resp_rt = get_request_body(State(state.clone()), Path(runtime_req_id)).await;
-        assert_eq!(resp_rt.status(), StatusCode::OK);
-        let rt_bytes = axum::body::to_bytes(resp_rt.into_body(), 1024)
+        // 3. Querying request 999 returns its DB body
+        let resp_hist = get_request_body(State(state.clone()), Path(999)).await;
+        assert_eq!(resp_hist.status(), StatusCode::OK);
+        let body_hist = axum::body::to_bytes(resp_hist.into_body(), 1024)
             .await
             .unwrap();
-        let rt_str = String::from_utf8_lossy(&rt_bytes);
-        assert!(rt_str.contains("runtime request body"));
+        assert!(String::from_utf8_lossy(&body_hist).contains("body for request 999"));
+
+        // 4. Querying runtime request returns its active in-memory body
+        let resp_rt = get_request_body(State(state.clone()), Path(runtime_req_id)).await;
+        assert_eq!(resp_rt.status(), StatusCode::OK);
+        let body_rt = axum::body::to_bytes(resp_rt.into_body(), 1024)
+            .await
+            .unwrap();
+        assert!(String::from_utf8_lossy(&body_rt).contains("body for active request"));
 
         let _ = std::fs::remove_file(db_path);
     }

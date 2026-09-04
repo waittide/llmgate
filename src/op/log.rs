@@ -149,33 +149,21 @@ pub async fn clear_all_logs(state: &AppState) -> Result<i64> {
     Ok(res.rows_affected() as i64)
 }
 /// Fetches a single request log by its database id (or fallback to latest request_id).
-pub async fn get_request_log(state: &AppState, id: i64) -> Result<Option<RequestLog>> {
-    if id >= 1_000_000_000_000 {
-        let row =
-            sqlx::query_as::<_, RequestLog>("SELECT * FROM request_logs WHERE request_id = ? ORDER BY id DESC LIMIT 1")
-                .bind(id)
-                .fetch_optional(&state.db)
-                .await?;
-        if row.is_some() {
-            return Ok(row);
-        }
-    }
-
-    let row = sqlx::query_as::<_, RequestLog>("SELECT * FROM request_logs WHERE id = ? LIMIT 1")
-        .bind(id)
-        .fetch_optional(&state.db)
-        .await?;
-
+pub async fn get_request_log(state: &AppState, request_id: i64) -> Result<Option<RequestLog>> {
+    let row =
+        sqlx::query_as::<_, RequestLog>("SELECT * FROM request_logs WHERE request_id = ? ORDER BY id DESC LIMIT 1")
+            .bind(request_id)
+            .fetch_optional(&state.db)
+            .await?;
     if row.is_some() {
         return Ok(row);
     }
 
-    let row_fallback =
-        sqlx::query_as::<_, RequestLog>("SELECT * FROM request_logs WHERE request_id = ? ORDER BY id DESC LIMIT 1")
-            .bind(id)
-            .fetch_optional(&state.db)
-            .await?;
-    Ok(row_fallback)
+    let row_by_row_id = sqlx::query_as::<_, RequestLog>("SELECT * FROM request_logs WHERE id = ? LIMIT 1")
+        .bind(request_id)
+        .fetch_optional(&state.db)
+        .await?;
+    Ok(row_by_row_id)
 }
 pub struct LogListQuery<'a> {
     pub page:      i64,

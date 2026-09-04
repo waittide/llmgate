@@ -84,6 +84,12 @@ impl AppState {
             join_handle,
         })));
 
+        let max_req_id: (i64,) = sqlx::query_as("SELECT COALESCE(MAX(request_id), 0) FROM request_logs")
+            .fetch_one(&db)
+            .await
+            .unwrap_or((0,));
+        let initial_req_id = (max_req_id.0 as u64) + 1;
+
         let state = Self {
             db: db.clone(),
             channels: Arc::new(DashMap::new()),
@@ -105,7 +111,7 @@ impl AppState {
             })),
             stats_api_keys: Arc::new(DashMap::new()),
             route_manager: Arc::new(RouteManager::new()),
-            request_state_manager: Arc::new(RequestStateManager::new()),
+            request_state_manager: Arc::new(RequestStateManager::new(initial_req_id)),
             jwt_secret: Arc::new(RwLock::new("octopus-jwt-secret-default".to_string())),
             log_sender: tx,
             log_shutdown,
