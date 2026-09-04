@@ -7,11 +7,11 @@ pub mod upstream;
 
 use std::{
     collections::HashSet,
-    future::Future,
+    io::ErrorKind,
     pin::Pin,
     sync::Arc,
     task::{Context, Poll},
-    time::Instant,
+    time::{Duration, Instant},
 };
 
 use axum::{
@@ -39,6 +39,9 @@ use crate::{
 };
 /// 流式响应体内存捕获上限（64KB），用于防止大体量日志撑爆存储。
 const RESPONSE_CAPTURE_LIMIT: usize = 64 * 1024;
+
+/// 流式传输停滞超时：超过该时长没有任何新字节则判定上游挂死，主动断开并记为失败。
+const STREAM_STALL_TIMEOUT: Duration = Duration::from_secs(300);
 
 /// 将 HTTP HeaderMap 序列化为 JSON 字符串对象：header名 -> 逗号分隔的值列表。
 fn serialize_headers(headers: &HeaderMap) -> String {
@@ -76,6 +79,8 @@ struct StreamFinalizer<S> {
     response_capture: Vec<u8>,
     cancel_rx:        Option<tokio::sync::watch::Receiver<bool>>,
     interrupted:      bool,
+    stall_timer:      Option<Pin<Box<tokio::time::Sleep>>>,
+    error_override:   Option<String>,
 }
 
 /// 从 buffer 中截取完整的 SSE 事件并解析其中可能包含的 usage 数据。
@@ -210,6 +215,8 @@ impl<S> StreamFinalizer<S> {
         let response_body_str = String::from_utf8_lossy(&self.response_capture).to_string();
         let error_opt = if completed {
             None
+        } else if let Some(e) = &self.error_override {
+            Some(e.clone())
         } else if self.interrupted {
             Some("stream interrupted by user".to_string())
         } else if !response_body_str.is_empty() {
@@ -302,6 +309,7 @@ where
                     let take = (RESPONSE_CAPTURE_LIMIT - this.response_capture.len()).min(bytes.len());
                     this.response_capture.extend_from_slice(&bytes[..take]);
                 }
+                this.stall_timer = None;
                 Poll::Ready(Some(Ok(bytes)))
             }
             Poll::Ready(Some(Err(e))) => {
@@ -312,7 +320,20 @@ where
                 this.finalize(true);
                 Poll::Ready(None)
             }
-            Poll::Pending => Poll::Pending,
+            Poll::Pending => {
+                // 停滞检测：上游长时间无新字节时自唤醒并强制终结，避免连接永久挂起
+                let timer = this
+                    .stall_timer
+                    .get_or_insert_with(|| Box::pin(tokio::time::sleep(STREAM_STALL_TIMEOUT)));
+                if timer.as_mut().poll(cx).is_ready() {
+                    let msg = format!("上游流停滞超过 {}s，连接已中止", STREAM_STALL_TIMEOUT.as_secs());
+                    this.error_override = Some(msg.clone());
+                    this.finalize(false);
+                    let err = std::io::Error::new(ErrorKind::TimedOut, msg);
+                    return Poll::Ready(Some(Err(err)));
+                }
+                Poll::Pending
+            }
         }
     }
 }
@@ -629,6 +650,8 @@ fn handle_successful_stream(state: &AppState, upstream_resp: reqwest::Response, 
         response_capture: Vec::new(),
         cancel_rx: state.in_flight.get_cancel_receiver(ctx.request_id),
         interrupted: false,
+        stall_timer: None,
+        error_override: None,
     };
     let body = Body::from_stream(finalizer);
 
@@ -1439,6 +1462,8 @@ mod tests {
             response_capture: Vec::new(),
             cancel_rx:        Some(cancel_rx),
             interrupted:      false,
+            stall_timer:      None,
+            error_override:   None,
         };
 
         // 启动后台任务，延迟片刻后触发取消
