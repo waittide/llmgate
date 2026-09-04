@@ -79,8 +79,9 @@ impl RequestStateManager {
     }
 
     pub fn new_request(&self, model: String, body: String) -> u64 {
-        let id = self.counter.fetch_add(1, Ordering::SeqCst);
+        let seq = self.counter.fetch_add(1, Ordering::SeqCst);
         let now = chrono::Utc::now();
+        let id = (now.timestamp_millis() as u64) * 1000 + (seq % 1000);
         let overview = RequestOverview {
             id,
             status: "running".to_string(),

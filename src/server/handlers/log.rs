@@ -150,7 +150,10 @@ pub async fn get_log_detail(State(state): State<AppState>, Path(id): Path<u64>) 
 }
 
 pub async fn get_request_body(State(state): State<AppState>, Path(id): Path<u64>) -> Response {
-    if let Some(body) = state.request_state_manager.get_request_body(id) {
+    // Only check in-memory active requests if the ID is a runtime request_id
+    if id >= 1_000_000_000_000
+        && let Some(body) = state.request_state_manager.get_request_body(id)
+    {
         return success(body);
     }
     match op_log::get_request_log(&state, id as i64).await {
@@ -160,7 +163,10 @@ pub async fn get_request_body(State(state): State<AppState>, Path(id): Path<u64>
 }
 
 pub async fn get_response_body(State(state): State<AppState>, Path(id): Path<u64>) -> Response {
-    if let Some(body) = state.request_state_manager.get_response_body(id) {
+    // Only check in-memory active requests if the ID is a runtime request_id
+    if id >= 1_000_000_000_000
+        && let Some(body) = state.request_state_manager.get_response_body(id)
+    {
         return success(body);
     }
     match op_log::get_request_log(&state, id as i64).await {
@@ -182,5 +188,64 @@ pub async fn clear_log(State(state): State<AppState>) -> Response {
     match op_log::clear_all_logs(&state).await {
         Ok(_) => success_msg("logs cleared"),
         Err(e) => error(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use super::*;
+    use crate::db::init_db;
+
+    async fn setup_test_state() -> (AppState, PathBuf) {
+        let rnd = nanoid::nanoid!(12);
+        let db_path = std::env::temp_dir().join(format!("octopus_log_test_{}.db", rnd));
+        let pool = init_db(&db_path).await.unwrap();
+        let state = AppState::init(pool).await.unwrap();
+        (state, db_path)
+    }
+
+    #[tokio::test]
+    async fn test_log_body_no_namespace_collision() {
+        let (state, db_path) = setup_test_state().await;
+
+        // 1. Insert a historical log with SQLite row id = 1
+        let res = sqlx::query(
+            r#"
+            INSERT INTO request_logs (
+                request_id, status, model, request_body, response_body, created_at
+            ) VALUES (999, 'success', 'gpt-4o', 'historical request body', 'historical response body', 1700000000)
+            "#,
+        )
+        .execute(&state.db)
+        .await
+        .unwrap();
+        let historical_row_id = res.last_insert_rowid() as u64;
+
+        // 2. Start a new runtime request in memory (generates timestamp-based ID >= 1_000_000_000_000)
+        let runtime_req_id = state
+            .request_state_manager
+            .new_request("gpt-4o".to_string(), "runtime request body".to_string());
+        assert!(runtime_req_id >= 1_000_000_000_000);
+
+        // 3. Querying historical log row id must return historical body, never shadowed by in-memory
+        let resp = get_request_body(State(state.clone()), Path(historical_row_id)).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body_bytes = axum::body::to_bytes(resp.into_body(), 1024).await.unwrap();
+        let body_str = String::from_utf8_lossy(&body_bytes);
+        assert!(body_str.contains("historical request body"));
+        assert!(!body_str.contains("runtime request body"));
+
+        // 4. Querying runtime request id returns runtime body
+        let resp_rt = get_request_body(State(state.clone()), Path(runtime_req_id)).await;
+        assert_eq!(resp_rt.status(), StatusCode::OK);
+        let rt_bytes = axum::body::to_bytes(resp_rt.into_body(), 1024)
+            .await
+            .unwrap();
+        let rt_str = String::from_utf8_lossy(&rt_bytes);
+        assert!(rt_str.contains("runtime request body"));
+
+        let _ = std::fs::remove_file(db_path);
     }
 }
