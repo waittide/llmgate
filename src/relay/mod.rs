@@ -622,6 +622,13 @@ fn handle_successful_stream(state: &AppState, upstream_resp: reqwest::Response, 
             protocol::gemini_sse_event_to_openai_chunk,
         )
         .boxed(),
+        // Responses 上游 → chat 客户端：SSE 事件转换
+        ChannelProvider::OpenaiResponses if ctx.format != ApiFormat::OpenaiResponse => ProviderToOpenaiStream::new(
+            mapped_stream,
+            ctx.log_base.model.clone(),
+            protocol::responses_sse_event_to_openai_chunk,
+        )
+        .boxed(),
         _ => mapped_stream.boxed(),
     };
     let output_stream = if ctx.format == ApiFormat::AnthropicMessage
@@ -695,6 +702,9 @@ async fn handle_successful_json(
                 val,
                 &ctx.log_base.model,
             )),
+            ChannelProvider::OpenaiResponses if ctx.format != ApiFormat::OpenaiResponse => Some(
+                protocol::convert_responses_result_to_chat_response(val, &ctx.log_base.model),
+            ),
             _ => None,
         });
     let converted = if ctx.format == ApiFormat::AnthropicMessage

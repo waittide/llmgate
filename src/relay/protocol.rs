@@ -317,12 +317,282 @@ pub fn convert_chat_completions_to_responses(val: &Value) -> Value {
         Some(o) => o.clone(),
         None => return val.clone(),
     };
+    let mut input: Vec<Value> = Vec::new();
+    let mut instructions: Option<String> = None;
 
-    if let Some(messages) = obj.remove("messages") {
-        obj.insert("input".to_string(), messages);
+    if let Some(messages) = obj.remove("messages").and_then(|v| v.as_array().cloned()) {
+        for msg in messages {
+            let role = msg.get("role").and_then(Value::as_str).unwrap_or("user");
+            match role {
+                // system 消息并入 instructions（Responses 的系统提示形态）
+                "system" => {
+                    let text = msg.get("content").and_then(Value::as_str).unwrap_or("");
+                    if !text.is_empty() {
+                        instructions = Some(match instructions {
+                            Some(existing) => format!("{existing}\n\n{text}"),
+                            None => text.to_string(),
+                        });
+                    }
+                }
+                // 工具结果 → function_call_output item
+                "tool" => {
+                    let call_id = msg
+                        .get("tool_call_id")
+                        .and_then(Value::as_str)
+                        .unwrap_or("");
+                    let content = msg
+                        .get("content")
+                        .cloned()
+                        .unwrap_or(Value::String(String::new()));
+                    let output = match content {
+                        Value::String(s) => Value::String(s),
+                        other => Value::String(serde_json::to_string(&other).unwrap_or_default()),
+                    };
+                    input.push(serde_json::json!({
+                        "type": "function_call_output",
+                        "call_id": call_id,
+                        "output": output
+                    }));
+                }
+                _ => {
+                    // assistant 的 tool_calls 剥离为独立 function_call item
+                    if role == "assistant"
+                        && let Some(calls) = msg.get("tool_calls").and_then(Value::as_array)
+                    {
+                        for call in calls {
+                            input.push(serde_json::json!({
+                                "type": "function_call",
+                                "call_id": call.get("id").and_then(Value::as_str).unwrap_or(""),
+                                "name": call.pointer("/function/name").and_then(Value::as_str).unwrap_or(""),
+                                "arguments": call.pointer("/function/arguments").cloned()
+                                    .unwrap_or(Value::String("{}".to_string()))
+                            }));
+                        }
+                    }
+
+                    // content 归一：user 方向统一 input_text part；assistant 保留字符串
+                    let is_user = role != "assistant";
+                    let message_item = match msg.get("content") {
+                        Some(Value::String(text)) if !text.is_empty() => {
+                            let content = if is_user {
+                                serde_json::json!([{ "type": "input_text", "text": text }])
+                            } else {
+                                serde_json::json!(text)
+                            };
+                            Some(serde_json::json!({ "type": "message", "role": role, "content": content }))
+                        }
+                        Some(Value::Array(parts)) => {
+                            let converted: Vec<Value> = parts
+                                .iter()
+                                .filter_map(|part| match part.get("type").and_then(Value::as_str) {
+                                    Some("text") | Some("input_text") | Some("output_text") => {
+                                        let text_type = if is_user { "input_text" } else { "output_text" };
+                                        Some(serde_json::json!({
+                                            "type": text_type,
+                                            "text": part.get("text").cloned().unwrap_or(Value::String(String::new()))
+                                        }))
+                                    }
+                                    Some("image_url") | Some("input_image") => {
+                                        let url = part
+                                            .pointer("/image_url/url")
+                                            .or_else(|| part.get("image_url"))
+                                            .cloned()
+                                            .unwrap_or(Value::Null);
+                                        Some(serde_json::json!({ "type": "input_image", "image_url": url }))
+                                    }
+                                    _ => None,
+                                })
+                                .collect();
+                            (!converted.is_empty())
+                                .then(|| serde_json::json!({ "type": "message", "role": role, "content": converted }))
+                        }
+                        _ => None,
+                    };
+                    if let Some(item) = message_item {
+                        input.push(item);
+                    }
+                }
+            }
+        }
     }
 
+    if let Some(instructions) = instructions {
+        obj.insert("instructions".to_string(), Value::String(instructions));
+    }
+    obj.insert("input".to_string(), Value::Array(input));
     Value::Object(obj)
+}
+
+/// 将 OpenAI Responses 非流式响应转换为 Chat Completion 响应结构。
+pub fn convert_responses_result_to_chat_response(val: &Value, model_name: &str) -> Value {
+    let mut content = String::new();
+    let mut tool_calls: Vec<Value> = Vec::new();
+    if let Some(output) = val.get("output").and_then(Value::as_array) {
+        for item in output {
+            match item.get("type").and_then(Value::as_str) {
+                Some("message") => {
+                    if let Some(parts) = item.get("content").and_then(Value::as_array) {
+                        for part in parts {
+                            if part.get("type").and_then(Value::as_str) == Some("output_text")
+                                && let Some(text) = part.get("text").and_then(Value::as_str)
+                            {
+                                content.push_str(text);
+                            }
+                        }
+                    }
+                }
+                Some("function_call") => {
+                    tool_calls.push(serde_json::json!({
+                        "id": item.get("call_id").and_then(Value::as_str).unwrap_or(""),
+                        "type": "function",
+                        "function": {
+                            "name": item.get("name").and_then(Value::as_str).unwrap_or(""),
+                            "arguments": item.get("arguments").cloned()
+                                .unwrap_or(Value::String("{}".to_string()))
+                        }
+                    }));
+                }
+                _ => {}
+            }
+        }
+    }
+
+    let message = if tool_calls.is_empty() {
+        serde_json::json!({ "role": "assistant", "content": content })
+    } else {
+        serde_json::json!({
+            "role": "assistant",
+            "content": if content.is_empty() { Value::Null } else { Value::String(content) },
+            "tool_calls": tool_calls
+        })
+    };
+    let finish_reason = if tool_calls.is_empty() { "stop" } else { "tool_calls" };
+    let id = val
+        .get("id")
+        .and_then(Value::as_str)
+        .unwrap_or("chatcmpl-generated");
+    serde_json::json!({
+        "id": id,
+        "object": "chat.completion",
+        "created": chrono::Utc::now().timestamp(),
+        "model": model_name,
+        "choices": [{ "index": 0, "message": message, "finish_reason": finish_reason }],
+        "usage": extract_usage_from_json(val).unwrap_or_default()
+    })
+}
+
+/// 将 OpenAI Responses SSE 事件字符串转换为 OpenAI Chat Completion SSE chunk 行。
+pub fn responses_sse_event_to_openai_chunk(
+    event_str: &str,
+    model_name: &str,
+    created: i64,
+    chatcmpl_id: &str,
+) -> Option<String> {
+    let mut event_type = "";
+    let mut data_str = "";
+    for line in event_str.lines() {
+        let trimmed = line.trim();
+        if let Some(et) = trimmed.strip_prefix("event:") {
+            event_type = et.trim();
+        } else if let Some(d) = trimmed.strip_prefix("data:") {
+            data_str = d.trim();
+        }
+    }
+    if data_str.is_empty() {
+        return None;
+    }
+    let val: Value = serde_json::from_str(data_str).ok()?;
+
+    let chunk_with = |delta: Value, finish: Value| -> String {
+        let chunk = serde_json::json!({
+            "id": chatcmpl_id,
+            "object": "chat.completion.chunk",
+            "created": created,
+            "model": model_name,
+            "choices": [{ "index": 0, "delta": delta, "finish_reason": finish }]
+        });
+        format!("data: {}\n\n", serde_json::to_string(&chunk).unwrap_or_default())
+    };
+
+    match event_type {
+        "response.output_text.delta" => {
+            let text = val.get("delta").and_then(Value::as_str).unwrap_or("");
+            (!text.is_empty()).then(|| chunk_with(serde_json::json!({ "content": text }), Value::Null))
+        }
+        // function_call 项的元信息一次性下发（Responses 的 arguments 非分片起始）
+        "response.output_item.added" => {
+            if val.pointer("/item/type").and_then(Value::as_str) == Some("function_call") {
+                let index = val.get("output_index").and_then(Value::as_u64).unwrap_or(0);
+                let call_id = val
+                    .pointer("/item/call_id")
+                    .and_then(Value::as_str)
+                    .unwrap_or("");
+                let name = val
+                    .pointer("/item/name")
+                    .and_then(Value::as_str)
+                    .unwrap_or("");
+                let arguments = val
+                    .pointer("/item/arguments")
+                    .and_then(Value::as_str)
+                    .unwrap_or("");
+                (!name.is_empty()).then(|| {
+                    chunk_with(
+                        serde_json::json!({ "tool_calls": [{
+                            "index": index, "id": call_id, "type": "function",
+                            "function": { "name": name, "arguments": arguments }
+                        }]}),
+                        Value::Null,
+                    )
+                })
+            } else {
+                None
+            }
+        }
+        "response.function_call_arguments.delta" => {
+            let delta = val.get("delta").and_then(Value::as_str).unwrap_or("");
+            let index = val.get("output_index").and_then(Value::as_u64).unwrap_or(0);
+            (!delta.is_empty()).then(|| {
+                chunk_with(
+                    serde_json::json!({ "tool_calls": [{
+                        "index": index, "function": { "arguments": delta }
+                    }]}),
+                    Value::Null,
+                )
+            })
+        }
+        "response.completed" => {
+            let has_function_call = val
+                .pointer("/output")
+                .and_then(Value::as_array)
+                .map(|items| {
+                    items
+                        .iter()
+                        .any(|item| item.get("type").and_then(Value::as_str) == Some("function_call"))
+                })
+                .unwrap_or(false);
+            let finish = if has_function_call { "tool_calls" } else { "stop" };
+            let mut chunk = serde_json::json!({
+                "id": chatcmpl_id,
+                "object": "chat.completion.chunk",
+                "created": created,
+                "model": model_name,
+                "choices": [{ "index": 0, "delta": {}, "finish_reason": finish }]
+            });
+            // 保留真实 usage，让 StreamFinalizer 捕获
+            if let Some(usage) = extract_usage_from_json(&val) {
+                chunk["usage"] = serde_json::json!({
+                    "prompt_tokens": usage.prompt_tokens,
+                    "completion_tokens": usage.completion_tokens,
+                    "total_tokens": usage.total_tokens
+                });
+            }
+            Some(format!(
+                "data: {}\n\n",
+                serde_json::to_string(&chunk).unwrap_or_default()
+            ))
+        }
+        _ => None,
+    }
 }
 
 /// 将非流式 Chat Completion 响应转换为 OpenAI Responses 响应结构。
@@ -2116,7 +2386,9 @@ mod tests {
         let input = responses.get("input").unwrap().as_array().unwrap();
         assert_eq!(input.len(), 1);
         assert_eq!(input[0].get("role").unwrap(), "user");
-        assert_eq!(input[0].get("content").unwrap(), "Hello world");
+        // user content 归一为 input_text part 数组（Responses 规范形态）
+        assert_eq!(input[0].pointer("/content/0/type").unwrap(), "input_text");
+        assert_eq!(input[0].pointer("/content/0/text").unwrap(), "Hello world");
     }
 
     #[test]
@@ -2157,13 +2429,71 @@ mod tests {
         let chunk2 =
             anthropic_sse_event_to_openai_chunk(delta_event, "claude-3-5-sonnet", 1700000000, "chatcmpl-test").unwrap();
         assert!(chunk2.contains("Paris"));
+    }
 
-        let message_delta =
-            "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"tool_use\"}}\n\n";
-        let chunk3 =
-            anthropic_sse_event_to_openai_chunk(message_delta, "claude-3-5-sonnet", 1700000000, "chatcmpl-test")
-                .unwrap();
-        assert!(chunk3.contains("tool_calls"));
+    #[test]
+    fn test_convert_chat_to_responses_full_mapping() {
+        let chat = serde_json::json!({
+            "model": "m",
+            "messages": [
+                { "role": "system", "content": "系统提示" },
+                { "role": "user", "content": "你好" },
+                { "role": "assistant", "content": "", "tool_calls": [
+                    { "id": "call_1", "type": "function",
+                      "function": { "name": "bash", "arguments": "{\"cmd\":\"ls\"}" } }
+                ]},
+                { "role": "tool", "tool_call_id": "call_1", "content": "输出" }
+            ]
+        });
+        let responses = convert_chat_completions_to_responses(&chat);
+        // system 并入 instructions，而非 input item
+        assert_eq!(responses.get("instructions").unwrap(), "系统提示");
+        assert!(responses.get("messages").is_none());
+        let input = responses.get("input").unwrap().as_array().unwrap();
+        assert_eq!(input.len(), 3);
+        // user 字符串 content → input_text part 数组
+        assert_eq!(input[0].get("role").unwrap(), "user");
+        assert_eq!(input[0].pointer("/content/0/type").unwrap(), "input_text");
+        assert_eq!(input[0].pointer("/content/0/text").unwrap(), "你好");
+        // assistant.tool_calls → function_call item
+        assert_eq!(input[1].get("type").unwrap(), "function_call");
+        assert_eq!(input[1].get("call_id").unwrap(), "call_1");
+        assert_eq!(input[1].get("name").unwrap(), "bash");
+        // tool → function_call_output item
+        assert_eq!(input[2].get("type").unwrap(), "function_call_output");
+        assert_eq!(input[2].get("output").unwrap(), "输出");
+    }
+
+    #[test]
+    fn test_responses_sse_event_to_openai_chunk_text() {
+        let event =
+            "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"你好\"}\n\n";
+        let chunk = responses_sse_event_to_openai_chunk(event, "m", 1, "cc").unwrap();
+        assert!(chunk.contains("\"content\":\"你好\""));
+
+        let completed = "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"output\":[],\"usage\":{\"input_tokens\":9,\"output_tokens\":3,\"total_tokens\":12}}}\n\n";
+        let chunk = responses_sse_event_to_openai_chunk(completed, "m", 1, "cc").unwrap();
+        assert!(chunk.contains("\"finish_reason\":\"stop\""));
+        assert!(chunk.contains("\"prompt_tokens\":9"));
+    }
+
+    #[test]
+    fn test_convert_responses_result_to_chat_response() {
+        let result = serde_json::json!({
+            "id": "resp_1",
+            "status": "completed",
+            "output": [
+                { "type": "message", "role": "assistant",
+                  "content": [{ "type": "output_text", "text": "答案" }] }
+            ],
+            "usage": { "input_tokens": 8, "output_tokens": 2, "total_tokens": 10 }
+        });
+        let chat = convert_responses_result_to_chat_response(&result, "m");
+        assert_eq!(chat.get("object").unwrap(), "chat.completion");
+        let choice = chat.pointer("/choices/0").unwrap();
+        assert_eq!(choice.pointer("/message/content").unwrap(), "答案");
+        assert_eq!(choice.get("finish_reason").unwrap(), "stop");
+        assert_eq!(chat.pointer("/usage/prompt_tokens").unwrap(), 8);
     }
 
     #[test]
