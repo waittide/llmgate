@@ -497,6 +497,14 @@ pub(super) fn parse_anthropic(val: &Value) -> Option<RelayRequest> {
                 Role::User
             };
             let mut parts = Vec::new();
+            let flush = |parts: &mut Vec<ContentPart>, role: Role, req: &mut RelayRequest| {
+                if !parts.is_empty() {
+                    req.messages.push(Message {
+                        role,
+                        content: std::mem::take(parts),
+                    });
+                }
+            };
             match msg.get("content") {
                 Some(Value::String(s)) if !s.is_empty() => {
                     parts.push(ContentPart::Text {
@@ -526,20 +534,29 @@ pub(super) fn parse_anthropic(val: &Value) -> Option<RelayRequest> {
                                     arguments: block.get("input").cloned().unwrap_or_else(|| json!({})),
                                 });
                             }
-                            Some("tool_result") => parts.push(ContentPart::ToolResult {
-                                call_id: owned_str(block.get("tool_use_id")).unwrap_or_default(),
-                                name:    call_names
-                                    .get(
-                                        owned_str(block.get("tool_use_id"))
-                                            .unwrap_or_default()
-                                            .as_str(),
-                                    )
-                                    .cloned(),
-                                content: block
-                                    .get("content")
-                                    .cloned()
-                                    .unwrap_or_else(|| Value::String(String::new())),
-                            }),
+                            Some("tool_result") => {
+                                // 与 chat/gemini parser 统一：工具结果拆为独立 Tool 消息，
+                                // 否则 emit 侧（chat/responses/gemini）会丢弃 tool_result
+                                flush(&mut parts, role, &mut req);
+                                let call_id = owned_str(block.get("tool_use_id")).unwrap_or_default();
+                                req.messages.push(Message {
+                                    role:    Role::Tool,
+                                    content: vec![ContentPart::ToolResult {
+                                        call_id,
+                                        name: call_names
+                                            .get(
+                                                owned_str(block.get("tool_use_id"))
+                                                    .unwrap_or_default()
+                                                    .as_str(),
+                                            )
+                                            .cloned(),
+                                        content: block
+                                            .get("content")
+                                            .cloned()
+                                            .unwrap_or_else(|| Value::String(String::new())),
+                                    }],
+                                });
+                            }
                             // 扩展思考块转为 Thinking（签名保留）
                             Some("thinking") => parts.push(ContentPart::Thinking {
                                 text:      owned_str(block.get("thinking")).unwrap_or_default(),
@@ -552,7 +569,7 @@ pub(super) fn parse_anthropic(val: &Value) -> Option<RelayRequest> {
                 }
                 _ => {}
             }
-            req.messages.push(Message { role, content: parts });
+            flush(&mut parts, role, &mut req);
         }
     }
 
@@ -2139,5 +2156,33 @@ mod tests {
         assert_eq!(parts.len(), 2);
         assert_eq!(parts[0].pointer("/text").unwrap(), "看图");
         assert!(chat.get("instructions").is_none());
+    }
+
+    #[test]
+    fn anthropic_tool_round_trip_to_chat() {
+        // 回归：anthropic 工具回合转 Chat 时 tool_result 曾被内联在 user 消息里
+        // 并被 emit 丢弃，DeepSeek 报 "insufficient tool messages following
+        // tool_calls message"
+        let anthropic = json!({
+            "model": "m",
+            "max_tokens": 512,
+            "messages": [
+                { "role": "user", "content": "What's the weather?" },
+                { "role": "assistant", "content": [
+                    { "type": "tool_use", "id": "toolu_1", "name": "get_weather", "input": { "city": "Paris" } }
+                ]},
+                { "role": "user", "content": [
+                    { "type": "tool_result", "tool_use_id": "toolu_1", "content": "23C sunny" }
+                ]}
+            ],
+            "tools": [{ "name": "get_weather", "input_schema": { "type": "object" } }]
+        });
+        let chat = convert(ApiFormat::AnthropicMessage, &anthropic, ApiFormat::OpenaiCompletion);
+        let messages = chat.get("messages").unwrap().as_array().unwrap();
+        assert_eq!(messages.len(), 3);
+        assert_eq!(messages[1].pointer("/tool_calls/0/id").unwrap(), "toolu_1");
+        assert_eq!(messages[2].get("role").unwrap(), "tool");
+        assert_eq!(messages[2].get("tool_call_id").unwrap(), "toolu_1");
+        assert_eq!(messages[2].get("content").unwrap(), "23C sunny");
     }
 }
