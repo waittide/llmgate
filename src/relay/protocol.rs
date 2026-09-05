@@ -1403,34 +1403,53 @@ pub fn convert_anthropic_to_openai_chat_response(val: &Value, model_name: &str) 
     })
 }
 
-/// 将 Anthropic SSE 事件字符串转换为对应的 OpenAI Chat Completion SSE chunk 行。
-pub fn anthropic_sse_event_to_openai_chunk(
-    event_str: &str,
-    model_name: &str,
-    created: i64,
-    chatcmpl_id: &str,
-) -> Option<String> {
-    let mut event_type = "";
-    let mut data_str = "";
+/// Anthropic SSE → OpenAI Chat Completion SSE 的有状态转换器。
+/// Anthropic 的 tool_use 块索引是内容块序号（thinking/text 块在前时非 0 起始），
+/// 必须重映射为严格从 0 递增的 `tool_calls[].index`（OpenAI SDK 流式解析的前提）。
+#[derive(Default)]
+pub struct AnthropicToChatChunkConverter {
+    tool_indexes: std::collections::HashMap<u64, u64>,
+}
 
-    for line in event_str.lines() {
-        let trimmed = line.trim();
-        if let Some(et) = trimmed.strip_prefix("event:") {
-            event_type = et.trim();
-        } else if let Some(d) = trimmed.strip_prefix("data:") {
-            data_str = d.trim();
+impl AnthropicToChatChunkConverter {
+    /// 分配（或复用）内容块索引对应的 tool_calls 序号。
+    fn tool_index(&mut self, block_index: u64) -> u64 {
+        let next = self.tool_indexes.len() as u64;
+        *self.tool_indexes.entry(block_index).or_insert(next)
+    }
+}
+
+impl SseChunkConverter for AnthropicToChatChunkConverter {
+    fn convert_event(&mut self, event_str: &str, model_name: &str, created: i64, chatcmpl_id: &str) -> Option<String> {
+        let mut event_type = "";
+        let mut data_str = "";
+        for line in event_str.lines() {
+            let trimmed = line.trim();
+            if let Some(et) = trimmed.strip_prefix("event:") {
+                event_type = et.trim();
+            } else if let Some(d) = trimmed.strip_prefix("data:") {
+                data_str = d.trim();
+            }
         }
-    }
+        if data_str.is_empty() {
+            return None;
+        }
+        let val: serde_json::Value = serde_json::from_str(data_str).ok()?;
 
-    if data_str.is_empty() {
-        return None;
-    }
+        let chunk_with = |delta: Value, finish: Value| -> String {
+            let chunk = serde_json::json!({
+                "id": chatcmpl_id,
+                "object": "chat.completion.chunk",
+                "created": created,
+                "model": model_name,
+                "choices": [{ "index": 0, "delta": delta, "finish_reason": finish }]
+            });
+            format!("data: {}\n\n", serde_json::to_string(&chunk).unwrap_or_default())
+        };
 
-    let val: serde_json::Value = serde_json::from_str(data_str).ok()?;
-
-    match event_type {
-        "message_start" => {
-            if let Some(usage) = val.pointer("/message/usage") {
+        match event_type {
+            "message_start" => {
+                let usage = val.pointer("/message/usage")?;
                 let prompt_tokens = usage
                     .get("input_tokens")
                     .and_then(Value::as_i64)
@@ -1439,162 +1458,94 @@ pub fn anthropic_sse_event_to_openai_chunk(
                     .get("output_tokens")
                     .and_then(Value::as_i64)
                     .unwrap_or(0);
-                let total_tokens = prompt_tokens + completion_tokens;
                 let chunk = serde_json::json!({
                     "id": chatcmpl_id,
                     "object": "chat.completion.chunk",
                     "created": created,
                     "model": model_name,
-                    "choices": [{
-                        "index": 0,
-                        "delta": {},
-                        "finish_reason": null
-                    }],
+                    "choices": [{ "index": 0, "delta": {}, "finish_reason": null }],
                     "usage": {
                         "prompt_tokens": prompt_tokens,
                         "completion_tokens": completion_tokens,
-                        "total_tokens": total_tokens
+                        "total_tokens": prompt_tokens + completion_tokens
                     }
                 });
-                return Some(format!(
+                Some(format!(
                     "data: {}\n\n",
                     serde_json::to_string(&chunk).unwrap_or_default()
-                ));
+                ))
             }
-        }
-        "content_block_start" => {
-            let index = val.get("index").and_then(Value::as_u64).unwrap_or(0);
-            if let Some(cb) = val.get("content_block")
-                && cb.get("type").and_then(Value::as_str) == Some("tool_use")
-            {
+            "content_block_start" => {
+                let block_index = val.get("index").and_then(Value::as_u64).unwrap_or(0);
+                let cb = val.get("content_block")?;
+                if cb.get("type").and_then(Value::as_str) != Some("tool_use") {
+                    return None;
+                }
+                let tool_index = self.tool_index(block_index);
                 let id = cb.get("id").and_then(Value::as_str).unwrap_or("");
                 let name = cb.get("name").and_then(Value::as_str).unwrap_or("");
-                let chunk = serde_json::json!({
-                    "id": chatcmpl_id,
-                    "object": "chat.completion.chunk",
-                    "created": created,
-                    "model": model_name,
-                    "choices": [{
-                        "index": 0,
-                        "delta": {
-                            "tool_calls": [{
-                                "index": index,
-                                "id": id,
-                                "type": "function",
-                                "function": {
-                                    "name": name,
-                                    "arguments": ""
-                                }
-                            }]
-                        },
-                        "finish_reason": null
-                    }]
-                });
-                return Some(format!(
-                    "data: {}\n\n",
-                    serde_json::to_string(&chunk).unwrap_or_default()
-                ));
+                Some(chunk_with(
+                    serde_json::json!({ "tool_calls": [{
+                        "index": tool_index, "id": id, "type": "function",
+                        "function": { "name": name, "arguments": "" }
+                    }]}),
+                    Value::Null,
+                ))
             }
-        }
-        "content_block_delta" => {
-            let index = val.get("index").and_then(Value::as_u64).unwrap_or(0);
-            if let Some(text) = val.pointer("/delta/text").and_then(|t| t.as_str()) {
-                let chunk = serde_json::json!({
-                    "id": chatcmpl_id,
-                    "object": "chat.completion.chunk",
-                    "created": created,
-                    "model": model_name,
-                    "choices": [{
-                        "index": 0,
-                        "delta": { "content": text },
-                        "finish_reason": null
-                    }]
-                });
-                return Some(format!(
-                    "data: {}\n\n",
-                    serde_json::to_string(&chunk).unwrap_or_default()
-                ));
-            } else if let Some(thinking) = val.pointer("/delta/thinking").and_then(|t| t.as_str()) {
-                // 扩展思考的 thinking_delta 转发为 reasoning_content（社区事实标准）：
-                // 既让支持该字段的客户端渲染思考过程，也保证转换流持续有字节流动，
-                // 避免 StreamFinalizer 的停滞超时误杀长思考生成。
-                let chunk = serde_json::json!({
-                    "id": chatcmpl_id,
-                    "object": "chat.completion.chunk",
-                    "created": created,
-                    "model": model_name,
-                    "choices": [{
-                        "index": 0,
-                        "delta": { "reasoning_content": thinking },
-                        "finish_reason": null
-                    }]
-                });
-                return Some(format!(
-                    "data: {}\n\n",
-                    serde_json::to_string(&chunk).unwrap_or_default()
-                ));
-            } else if let Some(partial) = val.pointer("/delta/partial_json").and_then(|t| t.as_str()) {
-                let chunk = serde_json::json!({
-                    "id": chatcmpl_id,
-                    "object": "chat.completion.chunk",
-                    "created": created,
-                    "model": model_name,
-                    "choices": [{
-                        "index": 0,
-                        "delta": {
-                            "tool_calls": [{
-                                "index": index,
-                                "function": {
-                                    "arguments": partial
-                                }
-                            }]
-                        },
-                        "finish_reason": null
-                    }]
-                });
-                return Some(format!(
-                    "data: {}\n\n",
-                    serde_json::to_string(&chunk).unwrap_or_default()
-                ));
-            }
-        }
-        "message_delta" => {
-            let stop_reason = val.pointer("/delta/stop_reason").and_then(|s| s.as_str());
-            let finish_reason = anthropic_to_openai_finish_reason(stop_reason);
-            let mut chunk = serde_json::json!({
-                "id": chatcmpl_id,
-                "object": "chat.completion.chunk",
-                "created": created,
-                "model": model_name,
-                "choices": [{
-                    "index": 0,
-                    "delta": {},
-                    "finish_reason": finish_reason
-                }]
-            });
-            // 保留 Anthropic 的 output_tokens，让 StreamFinalizer 能恢复
-            // 真实的补全 token 数，而不是退化为估算值。
-            if let Some(usage) = val.get("usage") {
-                let output_tokens = usage
-                    .get("output_tokens")
-                    .and_then(Value::as_i64)
-                    .unwrap_or(0);
-                if output_tokens > 0 {
-                    chunk["usage"] = serde_json::json!({ "completion_tokens": output_tokens });
+            "content_block_delta" => {
+                if let Some(text) = val.pointer("/delta/text").and_then(|t| t.as_str()) {
+                    Some(chunk_with(serde_json::json!({ "content": text }), Value::Null))
+                } else if let Some(thinking) = val.pointer("/delta/thinking").and_then(|t| t.as_str()) {
+                    // 扩展思考的 thinking_delta 转发为 reasoning_content（社区事实标准）：
+                    // 既让支持该字段的客户端渲染思考过程，也保证转换流持续有字节流动，
+                    // 避免 StreamFinalizer 的停滞超时误杀长思考生成。
+                    Some(chunk_with(
+                        serde_json::json!({ "reasoning_content": thinking }),
+                        Value::Null,
+                    ))
+                } else if let Some(partial) = val.pointer("/delta/partial_json").and_then(|t| t.as_str()) {
+                    let block_index = val.get("index").and_then(Value::as_u64).unwrap_or(0);
+                    let tool_index = self.tool_index(block_index);
+                    Some(chunk_with(
+                        serde_json::json!({ "tool_calls": [{
+                            "index": tool_index, "function": { "arguments": partial }
+                        }]}),
+                        Value::Null,
+                    ))
+                } else {
+                    None
                 }
             }
-            return Some(format!(
-                "data: {}\n\n",
-                serde_json::to_string(&chunk).unwrap_or_default()
-            ));
+            "message_delta" => {
+                let stop_reason = val.pointer("/delta/stop_reason").and_then(|s| s.as_str());
+                let finish_reason = anthropic_to_openai_finish_reason(stop_reason);
+                let mut chunk = serde_json::json!({
+                    "id": chatcmpl_id,
+                    "object": "chat.completion.chunk",
+                    "created": created,
+                    "model": model_name,
+                    "choices": [{ "index": 0, "delta": {}, "finish_reason": finish_reason }]
+                });
+                // 保留 Anthropic 的 output_tokens，让 StreamFinalizer 能恢复
+                // 真实的补全 token 数，而不是退化为估算值。
+                if let Some(usage) = val.get("usage") {
+                    let output_tokens = usage
+                        .get("output_tokens")
+                        .and_then(Value::as_i64)
+                        .unwrap_or(0);
+                    if output_tokens > 0 {
+                        chunk["usage"] = serde_json::json!({ "completion_tokens": output_tokens });
+                    }
+                }
+                Some(format!(
+                    "data: {}\n\n",
+                    serde_json::to_string(&chunk).unwrap_or_default()
+                ))
+            }
+            "message_stop" => Some("data: [DONE]\n\n".to_string()),
+            _ => None,
         }
-        "message_stop" => {
-            return Some("data: [DONE]\n\n".to_string());
-        }
-        _ => {}
     }
-
-    None
 }
 
 /// 将 OpenAI `image_url` 内容块转换为 Gemini 格式。Base64 `data:` URI 转换为 `inlineData`；公开 URL 转换为 `fileData`。
@@ -2923,42 +2874,80 @@ mod tests {
 
     #[test]
     fn test_anthropic_sse_event_to_openai_chunk() {
+        let mut converter = AnthropicToChatChunkConverter::default();
         let event = "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"Hello\"}}\n\n";
-        let chunk = anthropic_sse_event_to_openai_chunk(event, "claude-3-5-sonnet", 1700000000, "chatcmpl-test");
-        assert!(chunk.is_some());
-        let chunk_str = chunk.unwrap();
+        let chunk_str = converter
+            .convert_event(event, "claude-3-5-sonnet", 1700000000, "chatcmpl-test")
+            .unwrap();
         assert!(chunk_str.starts_with("data: "));
         assert!(chunk_str.contains("Hello"));
         assert!(chunk_str.contains("chatcmpl-test"));
 
         let stop_event = "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n";
-        let stop_chunk =
-            anthropic_sse_event_to_openai_chunk(stop_event, "claude-3-5-sonnet", 1700000000, "chatcmpl-test");
+        let stop_chunk = converter.convert_event(stop_event, "claude-3-5-sonnet", 1700000000, "chatcmpl-test");
         assert_eq!(stop_chunk, Some("data: [DONE]\n\n".to_string()));
     }
 
     #[test]
     fn test_anthropic_sse_event_to_openai_chunk_thinking() {
+        let mut converter = AnthropicToChatChunkConverter::default();
         let event = "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"thinking hard\"}}\n\n";
-        let chunk = anthropic_sse_event_to_openai_chunk(event, "claude-3-5-sonnet", 1700000000, "chatcmpl-test");
-        assert!(chunk.is_some());
-        let chunk_str = chunk.unwrap();
+        let chunk_str = converter
+            .convert_event(event, "claude-3-5-sonnet", 1700000000, "chatcmpl-test")
+            .unwrap();
         assert!(chunk_str.contains("\"reasoning_content\":\"thinking hard\""));
         assert!(!chunk_str.contains("\"content\""));
     }
 
     #[test]
     fn test_anthropic_sse_event_to_openai_chunk_tool_calls() {
+        let mut converter = AnthropicToChatChunkConverter::default();
         let start_event = "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"tool_use\",\"id\":\"call_test123\",\"name\":\"get_weather\",\"input\":{}}}\n\n";
-        let chunk1 =
-            anthropic_sse_event_to_openai_chunk(start_event, "claude-3-5-sonnet", 1700000000, "chatcmpl-test").unwrap();
+        let chunk1 = converter
+            .convert_event(start_event, "claude-3-5-sonnet", 1700000000, "chatcmpl-test")
+            .unwrap();
         assert!(chunk1.contains("call_test123"));
         assert!(chunk1.contains("get_weather"));
 
         let delta_event = "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"city\\\":\\\"Paris\\\"}\"}}\n\n";
-        let chunk2 =
-            anthropic_sse_event_to_openai_chunk(delta_event, "claude-3-5-sonnet", 1700000000, "chatcmpl-test").unwrap();
+        let chunk2 = converter
+            .convert_event(delta_event, "claude-3-5-sonnet", 1700000000, "chatcmpl-test")
+            .unwrap();
         assert!(chunk2.contains("Paris"));
+    }
+
+    #[test]
+    fn test_anthropic_sse_tool_index_remaps_to_sequential() {
+        // thinking(0)/text(1) 块在前时，tool_use 的块索引是 2+；
+        // 转换后 tool_calls[].index 必须归一为 0、1
+        let mut converter = AnthropicToChatChunkConverter::default();
+        let start = |index: u64, id: &str| {
+            format!(
+                "event: content_block_start\ndata: {{\"type\":\"content_block_start\",\"index\":{index},\"content_block\":{{\"type\":\"tool_use\",\"id\":\"{id}\",\"name\":\"calc\",\"input\":{{}}}}}}\n\n"
+            )
+        };
+        let chunk1 = converter
+            .convert_event(&start(2, "call_a"), "m", 1, "cc")
+            .unwrap();
+        let chunk2 = converter
+            .convert_event(&start(3, "call_b"), "m", 1, "cc")
+            .unwrap();
+        assert!(chunk1.contains("\"index\":0"));
+        assert!(chunk2.contains("\"index\":1"));
+
+        let delta = |index: u64, args: &str| {
+            format!(
+                "event: content_block_delta\ndata: {{\"type\":\"content_block_delta\",\"index\":{index},\"delta\":{{\"type\":\"input_json_delta\",\"partial_json\":\"{args}\"}}}}\n\n"
+            )
+        };
+        let d1 = converter
+            .convert_event(&delta(2, "1"), "m", 1, "cc")
+            .unwrap();
+        let d2 = converter
+            .convert_event(&delta(3, "2"), "m", 1, "cc")
+            .unwrap();
+        assert!(d1.contains("\"index\":0"));
+        assert!(d2.contains("\"index\":1"));
     }
 
     #[test]
@@ -3179,6 +3168,15 @@ mod tests {
     }
 
     #[test]
+    fn test_anthropic_sse_event_message_start_usage() {
+        let start_event = "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"usage\":{\"input_tokens\":42,\"output_tokens\":0}}}\n\n";
+        let mut converter = AnthropicToChatChunkConverter::default();
+        let chunk = converter
+            .convert_event(start_event, "claude-3-5-sonnet", 1700000000, "chatcmpl-test")
+            .unwrap();
+        assert!(chunk.contains("\"prompt_tokens\":42"));
+    }
+    #[test]
     fn test_convert_chat_to_responses_incomplete_status() {
         let chat = serde_json::json!({
             "choices": [{
@@ -3203,14 +3201,6 @@ mod tests {
         });
         let openai = convert_gemini_to_openai_chat_response(&gemini, "gemini-2.5-pro");
         assert_eq!(openai.pointer("/choices/0/finish_reason").unwrap(), "content_filter");
-    }
-
-    #[test]
-    fn test_anthropic_sse_event_message_start_usage() {
-        let start_event = "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"usage\":{\"input_tokens\":42,\"output_tokens\":0}}}\n\n";
-        let chunk =
-            anthropic_sse_event_to_openai_chunk(start_event, "claude-3-5-sonnet", 1700000000, "chatcmpl-test").unwrap();
-        assert!(chunk.contains("\"prompt_tokens\":42"));
     }
 
     #[test]
