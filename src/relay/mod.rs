@@ -700,58 +700,15 @@ async fn handle_successful_json(
     let response_headers = serialize_headers(upstream_resp.headers());
     let raw_bytes = upstream_resp.bytes().await.unwrap_or_default();
     let parsed = serde_json::from_slice::<serde_json::Value>(&raw_bytes).ok();
-    let converted_to_chat = parsed
-        .as_ref()
-        .and_then(|val| match ctx.channel.channel_type {
-            ChannelProvider::Anthropic => {
-                if ctx.format != ApiFormat::AnthropicMessage {
-                    Some(protocol::convert_anthropic_to_openai_chat_response(
-                        val,
-                        &ctx.log_base.model,
-                    ))
-                } else {
-                    None
-                }
-            }
-            ChannelProvider::Gemini => Some(protocol::convert_gemini_to_openai_chat_response(
-                val,
-                &ctx.log_base.model,
-            )),
-            ChannelProvider::OpenaiResponses => {
-                if ctx.format != ApiFormat::OpenaiResponse {
-                    Some(protocol::convert_responses_result_to_chat_response(
-                        val,
-                        &ctx.log_base.model,
-                    ))
-                } else {
-                    None
-                }
-            }
-            ChannelProvider::OpenaiCompletion => None,
-        });
-    let converted = if ctx.format == ApiFormat::AnthropicMessage
-        && ctx.channel.channel_type != ChannelProvider::Anthropic
-    {
-        parsed.as_ref().map(|val| {
-            if ctx.channel.channel_type == ChannelProvider::OpenaiResponses {
-                protocol::convert_responses_to_anthropic_response(val, &ctx.log_base.model)
-            } else {
-                let chat = converted_to_chat.as_ref().unwrap_or(val);
-                protocol::convert_openai_chat_to_anthropic_response(chat, &ctx.log_base.model)
-            }
-        })
-    } else if ctx.format == ApiFormat::OpenaiResponse && ctx.channel.channel_type != ChannelProvider::OpenaiResponses {
-        converted_to_chat
-            .as_ref()
-            .or(parsed.as_ref())
-            .map(|val| protocol::convert_openai_chat_to_responses_response(val, &ctx.log_base.model))
-    } else if ctx.format == ApiFormat::GeminiGenerate && ctx.channel.channel_type != ChannelProvider::Gemini {
-        converted_to_chat
-            .as_ref()
-            .or(parsed.as_ref())
-            .map(|val| protocol::convert_openai_chat_to_gemini_response(val, &ctx.log_base.model))
+    // 跨格式：上游格式 → IR → 客户端格式；同格式直通
+    let upstream_format = ir::channel_format(&ctx.channel.channel_type);
+    let converted = if ctx.format == upstream_format {
+        parsed.clone()
     } else {
-        converted_to_chat
+        parsed.as_ref().and_then(|val| {
+            let resp = ir::parse_response(upstream_format, val, &ctx.log_base.model)?;
+            Some(ir::emit_response(&resp, ctx.format))
+        })
     };
     let resp_bytes = converted
         .as_ref()

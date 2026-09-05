@@ -7,8 +7,11 @@
 use serde_json::Value;
 
 pub mod request;
-
-use crate::{model::ChannelProvider, relay::protocol::ApiFormat};
+pub mod response;
+use crate::{
+    model::ChannelProvider,
+    relay::{protocol::ApiFormat, state::Usage},
+};
 
 /// 渠道提供方 ↔ 协议格式的唯一映射。
 pub fn channel_format(provider: &ChannelProvider) -> ApiFormat {
@@ -120,6 +123,27 @@ pub struct RelayRequest {
     pub stream:              bool,
 }
 
+/// 终止原因；未知原因透传（Chat finish_reason 是开放集合）。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum StopReason {
+    #[default]
+    Stop,
+    Length,
+    ToolUse,
+    ContentFilter,
+    Other(String),
+}
+
+/// 非流式响应的中间定义。
+#[derive(Debug, Clone, Default)]
+pub struct RelayResponse {
+    pub model:       String,
+    /// 产出顺序：Thinking 在前（Chat reasoning_content 语义）
+    pub content:     Vec<ContentPart>,
+    pub stop_reason: StopReason,
+    pub usage:       Usage,
+}
+
 /// 解析原始请求载荷为 IR；无法解析（非对象等）返回 None。
 pub fn parse_request(format: ApiFormat, val: &Value) -> Option<RelayRequest> {
     match format {
@@ -137,5 +161,25 @@ pub fn emit_request(req: &RelayRequest, format: ApiFormat) -> Value {
         ApiFormat::OpenaiResponse => request::emit_responses(req),
         ApiFormat::AnthropicMessage => request::emit_anthropic(req),
         ApiFormat::GeminiGenerate => request::emit_gemini(req),
+    }
+}
+
+/// 解析上游非流式响应为 IR。
+pub fn parse_response(format: ApiFormat, val: &Value, model_fallback: &str) -> Option<RelayResponse> {
+    match format {
+        ApiFormat::OpenaiCompletion => response::parse_chat(val, model_fallback),
+        ApiFormat::OpenaiResponse => response::parse_responses(val, model_fallback),
+        ApiFormat::AnthropicMessage => response::parse_anthropic(val, model_fallback),
+        ApiFormat::GeminiGenerate => response::parse_gemini(val, model_fallback),
+    }
+}
+
+/// 将 IR 响应发射为目标格式载荷。
+pub fn emit_response(resp: &RelayResponse, format: ApiFormat) -> Value {
+    match format {
+        ApiFormat::OpenaiCompletion => response::emit_chat(resp),
+        ApiFormat::OpenaiResponse => response::emit_responses(resp),
+        ApiFormat::AnthropicMessage => response::emit_anthropic(resp),
+        ApiFormat::GeminiGenerate => response::emit_gemini(resp),
     }
 }
