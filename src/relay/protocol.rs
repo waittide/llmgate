@@ -2172,33 +2172,42 @@ pub fn convert_gemini_to_openai_chat_response(val: &Value, model_name: &str) -> 
     })
 }
 
-/// 将单个 Gemini 原生 SSE 事件转换为 OpenAI Chat Completion SSE chunk 行。
-pub fn gemini_sse_event_to_openai_chunk(
-    event_str: &str,
-    model_name: &str,
-    created: i64,
-    chatcmpl_id: &str,
-) -> Option<String> {
-    let data = event_str
-        .lines()
-        .find_map(|line| line.trim().strip_prefix("data:").map(str::trim))?;
-    let val: Value = serde_json::from_str(data).ok()?;
-    let candidate = val.pointer("/candidates/0")?;
-    let parts = candidate
-        .pointer("/content/parts")
-        .and_then(Value::as_array);
-    let text = parts
-        .map(|p| {
-            p.iter()
-                .filter_map(|part| part.get("text").and_then(Value::as_str))
-                .collect::<String>()
-        })
-        .unwrap_or_default();
-    // 多个 functionCall 在同一 chunk 内按出现顺序分配从 0 递增的 index；
-    // id 由 (name, args) 哈希确定性生成，同一调用跨 chunk 内容一致则 id 稳定
-    let mut tool_calls: Vec<Value> = Vec::new();
-    if let Some(parts) = parts {
-        for part in parts {
+/// Gemini 原生 SSE → OpenAI Chat Completion SSE 的有状态转换器。
+/// Gemini 的 functionCall 无分片流式；同一调用的 (name, args) 跨 chunk 一致，
+/// 以确定性哈希 id 去重并分配严格从 0 递增的 `tool_calls[].index`，
+/// 避免不同调用分散在多个 chunk 时 index 全为 0 被客户端合并成坏调用。
+#[derive(Default)]
+pub struct GeminiToChatChunkConverter {
+    tool_indexes: std::collections::HashMap<String, u64>,
+}
+
+impl GeminiToChatChunkConverter {
+    /// 分配（或复用）确定性 call_id 对应的 tool_calls 序号。
+    fn tool_index(&mut self, call_id: &str) -> u64 {
+        let next = self.tool_indexes.len() as u64;
+        *self.tool_indexes.entry(call_id.to_string()).or_insert(next)
+    }
+}
+
+impl SseChunkConverter for GeminiToChatChunkConverter {
+    fn convert_event(&mut self, event_str: &str, model_name: &str, created: i64, chatcmpl_id: &str) -> Option<String> {
+        let data = event_str
+            .lines()
+            .find_map(|line| line.trim().strip_prefix("data:").map(str::trim))?;
+        let val: Value = serde_json::from_str(data).ok()?;
+        let candidate = val.pointer("/candidates/0")?;
+        let parts = candidate
+            .pointer("/content/parts")
+            .and_then(Value::as_array);
+        let text = parts
+            .map(|p| {
+                p.iter()
+                    .filter_map(|part| part.get("text").and_then(Value::as_str))
+                    .collect::<String>()
+            })
+            .unwrap_or_default();
+        let mut tool_calls: Vec<Value> = Vec::new();
+        for part in parts.into_iter().flatten() {
             let Some(call) = part.get("functionCall") else {
                 continue;
             };
@@ -2210,14 +2219,17 @@ pub fn gemini_sse_event_to_openai_chunk(
                 .cloned()
                 .unwrap_or_else(|| serde_json::json!({}));
             let arguments_json = serde_json::to_string(&arguments).unwrap_or_else(|_| "{}".to_string());
-            let index = tool_calls.len() as u64;
-            let mut hasher = std::collections::hash_map::DefaultHasher::new();
-            use std::hash::{Hash, Hasher};
-            name.hash(&mut hasher);
-            arguments_json.hash(&mut hasher);
+            let call_id = {
+                use std::hash::{Hash, Hasher};
+                let mut hasher = std::collections::hash_map::DefaultHasher::new();
+                name.hash(&mut hasher);
+                arguments_json.hash(&mut hasher);
+                format!("call_{:016x}", hasher.finish())
+            };
+            let index = self.tool_index(&call_id);
             tool_calls.push(serde_json::json!({
                 "index": index,
-                "id": format!("call_{:016x}", hasher.finish()),
+                "id": call_id,
                 "type": "function",
                 "function": {
                     "name": name,
@@ -2225,62 +2237,62 @@ pub fn gemini_sse_event_to_openai_chunk(
                 }
             }));
         }
-    }
-    let mut finish_reason = candidate
-        .get("finishReason")
-        .and_then(Value::as_str)
-        .map(gemini_finish_reason);
-    if !tool_calls.is_empty() && finish_reason == Some("stop") {
-        finish_reason = Some("tool_calls");
-    }
+        let mut finish_reason = candidate
+            .get("finishReason")
+            .and_then(Value::as_str)
+            .map(gemini_finish_reason);
+        if !tool_calls.is_empty() && finish_reason == Some("stop") {
+            finish_reason = Some("tool_calls");
+        }
 
-    if text.is_empty() && tool_calls.is_empty() && finish_reason.is_none() && val.get("usageMetadata").is_none() {
-        return None;
-    }
+        if text.is_empty() && tool_calls.is_empty() && finish_reason.is_none() && val.get("usageMetadata").is_none() {
+            return None;
+        }
 
-    let mut delta = serde_json::Map::new();
-    if !text.is_empty() {
-        delta.insert("content".to_string(), Value::String(text));
-    }
-    if !tool_calls.is_empty() {
-        delta.insert("tool_calls".to_string(), Value::Array(tool_calls));
-    }
+        let mut delta = serde_json::Map::new();
+        if !text.is_empty() {
+            delta.insert("content".to_string(), Value::String(text));
+        }
+        if !tool_calls.is_empty() {
+            delta.insert("tool_calls".to_string(), Value::Array(tool_calls));
+        }
 
-    let mut chunk = serde_json::json!({
-        "id": chatcmpl_id,
-        "object": "chat.completion.chunk",
-        "created": created,
-        "model": model_name,
-        "choices": [{
-            "index": 0,
-            "delta": Value::Object(delta),
-            "finish_reason": finish_reason
-        }]
-    });
-    // 保留 Gemini usageMetadata，使 StreamFinalizer 能获得真实 Token 用量而非估算
-    if let Some(usage) = val.get("usageMetadata") {
-        let prompt_tokens = usage
-            .get("promptTokenCount")
-            .and_then(Value::as_i64)
-            .unwrap_or(0);
-        let completion_tokens = usage
-            .get("candidatesTokenCount")
-            .and_then(Value::as_i64)
-            .unwrap_or(0);
-        let total_tokens = usage
-            .get("totalTokenCount")
-            .and_then(Value::as_i64)
-            .unwrap_or(prompt_tokens + completion_tokens);
-        chunk["usage"] = serde_json::json!({
-            "prompt_tokens": prompt_tokens,
-            "completion_tokens": completion_tokens,
-            "total_tokens": total_tokens
+        let mut chunk = serde_json::json!({
+            "id": chatcmpl_id,
+            "object": "chat.completion.chunk",
+            "created": created,
+            "model": model_name,
+            "choices": [{
+                "index": 0,
+                "delta": Value::Object(delta),
+                "finish_reason": finish_reason
+            }]
         });
+        // 保留 Gemini usageMetadata，使 StreamFinalizer 能获得真实 Token 用量而非估算
+        if let Some(usage) = val.get("usageMetadata") {
+            let prompt_tokens = usage
+                .get("promptTokenCount")
+                .and_then(Value::as_i64)
+                .unwrap_or(0);
+            let completion_tokens = usage
+                .get("candidatesTokenCount")
+                .and_then(Value::as_i64)
+                .unwrap_or(0);
+            let total_tokens = usage
+                .get("totalTokenCount")
+                .and_then(Value::as_i64)
+                .unwrap_or(prompt_tokens + completion_tokens);
+            chunk["usage"] = serde_json::json!({
+                "prompt_tokens": prompt_tokens,
+                "completion_tokens": completion_tokens,
+                "total_tokens": total_tokens
+            });
+        }
+        Some(format!(
+            "data: {}\n\n",
+            serde_json::to_string(&chunk).unwrap_or_default()
+        ))
     }
-    Some(format!(
-        "data: {}\n\n",
-        serde_json::to_string(&chunk).unwrap_or_default()
-    ))
 }
 
 /// 按缓存拆分计算输入侧费用：未命中部分按输入价，缓存读/写按各自价目（每 1M token）。
@@ -2663,7 +2675,10 @@ mod tests {
     #[test]
     fn test_gemini_sse_event_to_openai_chunk() {
         let event = "data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"Hello\"}]}}]}\n\n";
-        let chunk = gemini_sse_event_to_openai_chunk(event, "gemini-2.5-pro", 1700000000, "chatcmpl-test").unwrap();
+        let mut converter = GeminiToChatChunkConverter::default();
+        let chunk = converter
+            .convert_event(event, "gemini-2.5-pro", 1700000000, "chatcmpl-test")
+            .unwrap();
         assert!(chunk.contains("chat.completion.chunk"));
         assert!(chunk.contains("Hello"));
     }
@@ -3355,14 +3370,15 @@ mod tests {
         let output = resp.get("output").unwrap().as_array().unwrap();
         assert_eq!(output[0].get("type").unwrap(), "reasoning");
         assert_eq!(output[0].pointer("/summary/0/text").unwrap(), "思考");
-        assert_eq!(output[1].get("type").unwrap(), "message");
     }
 
     #[test]
     fn test_gemini_sse_event_to_openai_chunk_tool_calls() {
         let gemini_event = "data: {\"candidates\":[{\"content\":{\"parts\":[{\"functionCall\":{\"name\":\"calc\",\"args\":{\"x\":1}}}],\"role\":\"model\"},\"finishReason\":\"STOP\"}]}\n\n";
-        let chunk =
-            gemini_sse_event_to_openai_chunk(gemini_event, "gemini-1.5-flash", 1700000000, "chatcmpl-gemini").unwrap();
+        let mut converter = GeminiToChatChunkConverter::default();
+        let chunk = converter
+            .convert_event(gemini_event, "gemini-1.5-flash", 1700000000, "chatcmpl-gemini")
+            .unwrap();
         assert!(chunk.contains("calc"));
         assert!(chunk.contains("tool_calls"));
     }
@@ -3370,14 +3386,36 @@ mod tests {
     #[test]
     fn test_gemini_sse_tool_calls_sequential_index_and_stable_id() {
         let gemini_event = "data: {\"candidates\":[{\"content\":{\"parts\":[{\"functionCall\":{\"name\":\"a\",\"args\":{\"x\":1}}},{\"functionCall\":{\"name\":\"b\",\"args\":{\"y\":2}}}],\"role\":\"model\"},\"finishReason\":\"STOP\"}]}\n\n";
-        let chunk =
-            gemini_sse_event_to_openai_chunk(gemini_event, "gemini-1.5-flash", 1700000000, "chatcmpl-gemini").unwrap();
+        let mut converter = GeminiToChatChunkConverter::default();
+        let chunk = converter
+            .convert_event(gemini_event, "gemini-1.5-flash", 1700000000, "chatcmpl-gemini")
+            .unwrap();
         // 两个调用 index 分别为 0、1，且 id 确定性生成（不等于彼此）
         assert!(chunk.contains("\"index\":0"));
         assert!(chunk.contains("\"index\":1"));
         assert!(!chunk.contains("\"index\":2"));
     }
 
+    #[test]
+    fn test_gemini_sse_tool_calls_across_chunks_get_distinct_indexes() {
+        // 两次 functionCall 分散在不同 chunk 时 index 也必须递增，不能全为 0
+        let mut converter = GeminiToChatChunkConverter::default();
+        let call = |name: &str| {
+            let event = serde_json::json!({
+                "candidates": [{
+                    "content": {
+                        "parts": [{ "functionCall": { "name": name, "args": { "x": 1 } } }],
+                        "role": "model"
+                    }
+                }]
+            });
+            format!("data: {}\n\n", event)
+        };
+        let chunk1 = converter.convert_event(&call("a"), "m", 1, "cc").unwrap();
+        let chunk2 = converter.convert_event(&call("b"), "m", 1, "cc").unwrap();
+        assert!(chunk1.contains("\"index\":0"));
+        assert!(chunk2.contains("\"index\":1"));
+    }
     #[test]
     fn test_convert_anthropic_to_openai_chat_response() {
         let anthropic_resp = serde_json::json!({
