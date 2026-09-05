@@ -147,13 +147,57 @@ pub fn convert_responses_to_chat_completions(val: &Value) -> Value {
         None => return val.clone(),
     };
 
-    // 移除 Responses API 专属字段，避免在标准 Chat Completions 上引发 400 Bad Request
-    obj.remove("include");
+    // 字段卫生：Responses 专有字段不能透传给 Chat 上游（OpenAI 会 400
+    // Unrecognized request argument），能映射的先映射再剥离。
+    if let Some(max_out) = obj.remove("max_output_tokens")
+        && obj.get("max_tokens").is_none()
+        && obj.get("max_completion_tokens").is_none()
+    {
+        obj.insert("max_completion_tokens".to_string(), max_out);
+    }
+    if let Some(effort) = obj
+        .get("reasoning")
+        .and_then(|r| r.get("effort"))
+        .and_then(Value::as_str)
+        .filter(|e| !e.is_empty())
+    {
+        obj.insert("reasoning_effort".to_string(), Value::String(effort.to_string()));
+    }
+    if let Some(verbosity) = obj
+        .get("text")
+        .and_then(|t| t.get("verbosity"))
+        .and_then(Value::as_str)
+        .filter(|v| !v.is_empty())
+    {
+        obj.insert("verbosity".to_string(), Value::String(verbosity.to_string()));
+    }
+    for key in [
+        "include",
+        "max_output_tokens",
+        "previous_response_id",
+        "truncation",
+        "reasoning",
+        "text",
+        "background",
+        "prompt",
+        "conversation",
+    ] {
+        obj.remove(key);
+    }
+
     if let Some(tools) = obj.get_mut("tools").and_then(Value::as_array_mut) {
         *tools = tools
             .iter()
             .filter_map(convert_responses_tool_to_chat)
             .collect();
+    }
+    // 全部为不可转换的非 function 工具（如 web_search）时移除，避免空数组上游校验失败
+    if obj
+        .get("tools")
+        .and_then(Value::as_array)
+        .is_some_and(|tools| tools.is_empty())
+    {
+        obj.remove("tools");
     }
 
     if let Some(choice) = obj.get_mut("tool_choice")
@@ -173,150 +217,162 @@ pub fn convert_responses_to_chat_completions(val: &Value) -> Value {
         // 生成的 function_call 标识符映射表，当 `call_id` 缺失时记录并在对应的 `function_call_output` 中复用
         let mut call_lookup: Vec<(String, String)> = Vec::new();
 
-        if let Some(items) = input.as_array() {
-            for item in items {
-                let item_type = item.get("type").and_then(Value::as_str).unwrap_or("");
-                match item_type {
-                    "function_call" => {
-                        let call_id = item
-                            .get("call_id")
-                            .and_then(Value::as_str)
-                            .map(str::to_string)
-                            .or_else(|| item.get("id").and_then(Value::as_str).map(str::to_string))
-                            .unwrap_or_else(|| format!("call_{}", nanoid::nanoid!(20)));
-                        let raw_id = item
-                            .get("id")
-                            .and_then(Value::as_str)
-                            .unwrap_or("")
-                            .to_string();
-                        call_lookup.push((raw_id, call_id.clone()));
-                        let name = item
-                            .get("name")
-                            .and_then(Value::as_str)
-                            .unwrap_or("")
-                            .to_string();
-                        let arguments = item
-                            .get("arguments")
-                            .cloned()
-                            .unwrap_or(Value::String("{}".to_string()));
-                        let call = serde_json::json!({
-                            "id": call_id,
-                            "type": "function",
-                            "function": { "name": name, "arguments": arguments }
-                        });
+        // Responses 允许 input 直接为字符串
+        let items: Vec<Value> = match input {
+            Value::String(text) => vec![serde_json::json!({
+                "type": "message",
+                "role": "user",
+                "content": [{ "type": "input_text", "text": text }]
+            })],
+            Value::Array(items) => items,
+            _ => Vec::new(),
+        };
+        for item in &items {
+            let item_type = item.get("type").and_then(Value::as_str).unwrap_or("");
+            match item_type {
+                "function_call" => {
+                    let call_id = item
+                        .get("call_id")
+                        .and_then(Value::as_str)
+                        .map(str::to_string)
+                        .or_else(|| item.get("id").and_then(Value::as_str).map(str::to_string))
+                        .unwrap_or_else(|| format!("call_{}", nanoid::nanoid!(20)));
+                    let raw_id = item
+                        .get("id")
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                        .to_string();
+                    call_lookup.push((raw_id, call_id.clone()));
+                    let name = item
+                        .get("name")
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                        .to_string();
+                    let arguments = item
+                        .get("arguments")
+                        .cloned()
+                        .unwrap_or(Value::String("{}".to_string()));
+                    let call = serde_json::json!({
+                        "id": call_id,
+                        "type": "function",
+                        "function": { "name": name, "arguments": arguments }
+                    });
 
+                    let entry = current_assistant.get_or_insert_with(serde_json::Map::new);
+                    entry.insert("role".to_string(), Value::String("assistant".to_string()));
+                    if !entry.contains_key("content") {
+                        entry.insert("content".to_string(), Value::Null);
+                    }
+                    let calls = entry
+                        .entry("tool_calls".to_string())
+                        .or_insert_with(|| Value::Array(vec![]));
+                    if let Some(arr) = calls.as_array_mut() {
+                        arr.push(call);
+                    }
+                }
+                "function_call_output" => {
+                    // 工具结果输出将结束当前 assistant 轮次
+                    if let Some(assistant) = current_assistant.take() {
+                        messages.push(Value::Object(assistant));
+                    }
+                    let call_id = item
+                        .get("call_id")
+                        .and_then(Value::as_str)
+                        .map(str::to_string)
+                        .or_else(|| item.get("id").and_then(Value::as_str).map(str::to_string))
+                        .or_else(|| call_lookup.pop().map(|(_, used)| used));
+                    let content = match item.get("output").cloned() {
+                        Some(Value::String(s)) => Value::String(s),
+                        Some(other) => Value::String(serde_json::to_string(&other).unwrap_or_default()),
+                        None => Value::String(String::new()),
+                    };
+                    messages.push(serde_json::json!({
+                        "role": "tool",
+                        "tool_call_id": call_id.unwrap_or_default(),
+                        "content": content
+                    }));
+                }
+                // reasoning / web_search_call 等无法映射为消息的项：跳过，
+                // 避免退化成空 user 消息污染上下文
+                "reasoning" => {}
+                "message" | "" => {
+                    let role = item.get("role").and_then(|r| r.as_str()).unwrap_or("user");
+                    let content_val = match item.get("content") {
+                        Some(Value::Array(parts)) => {
+                            let mut converted_parts = Vec::new();
+                            let mut text = String::new();
+                            let mut text_only = true;
+                            for part in parts {
+                                let ptype = part.get("type").and_then(|t| t.as_str()).unwrap_or("");
+                                match ptype {
+                                    "input_text" | "text" | "output_text" => {
+                                        text.push_str(part.get("text").and_then(Value::as_str).unwrap_or(""));
+                                    }
+                                    "input_image" | "image_url" => {
+                                        text_only = false;
+                                        if let Some(url) = part.get("image_url") {
+                                            converted_parts.push(serde_json::json!({
+                                                "type": "image_url",
+                                                "image_url": url
+                                            }));
+                                        }
+                                    }
+                                    _ => {
+                                        // 未知 part 类型原样保留，避免内容静默丢失
+                                        text_only = false;
+                                        converted_parts.push(part.clone());
+                                    }
+                                }
+                            }
+                            if text_only {
+                                Value::String(text)
+                            } else {
+                                let mut merged = Vec::new();
+                                if !text.is_empty() {
+                                    merged.push(serde_json::json!({ "type": "text", "text": text }));
+                                }
+                                merged.extend(converted_parts);
+                                Value::Array(merged)
+                            }
+                        }
+                        Some(other) => other.clone(),
+                        None => Value::String(String::new()),
+                    };
+
+                    if role == "assistant" {
+                        // 助手输出文本属于当前 assistant 轮次，合并至当前消息中
                         let entry = current_assistant.get_or_insert_with(serde_json::Map::new);
                         entry.insert("role".to_string(), Value::String("assistant".to_string()));
-                        if !entry.contains_key("content") {
-                            entry.insert("content".to_string(), Value::Null);
+                        match entry.get("content") {
+                            Some(Value::Null) => {
+                                entry.insert("content".to_string(), content_val);
+                            }
+                            Some(_) => {
+                                // 追加至已有的文本内容之后
+                                let existing = entry.get("content").and_then(Value::as_str).unwrap_or("");
+                                let combined = if existing.is_empty() {
+                                    content_val.as_str().unwrap_or("").to_string()
+                                } else {
+                                    format!("{existing}{}", content_val.as_str().unwrap_or(""))
+                                };
+                                entry.insert("content".to_string(), Value::String(combined));
+                            }
+                            None => {
+                                entry.insert("content".to_string(), content_val);
+                            }
                         }
-                        let calls = entry
-                            .entry("tool_calls".to_string())
-                            .or_insert_with(|| Value::Array(vec![]));
-                        if let Some(arr) = calls.as_array_mut() {
-                            arr.push(call);
-                        }
-                    }
-                    "function_call_output" => {
-                        // 工具结果输出将结束当前 assistant 轮次
+                    } else {
+                        // user 消息（或非 assistant 项）将结束当前 assistant 轮次
                         if let Some(assistant) = current_assistant.take() {
                             messages.push(Value::Object(assistant));
                         }
-                        let call_id = item
-                            .get("call_id")
-                            .and_then(Value::as_str)
-                            .map(str::to_string)
-                            .or_else(|| item.get("id").and_then(Value::as_str).map(str::to_string))
-                            .or_else(|| call_lookup.pop().map(|(_, used)| used));
-                        let content = match item.get("output").cloned() {
-                            Some(Value::String(s)) => Value::String(s),
-                            Some(other) => Value::String(serde_json::to_string(&other).unwrap_or_default()),
-                            None => Value::String(String::new()),
-                        };
                         messages.push(serde_json::json!({
-                            "role": "tool",
-                            "tool_call_id": call_id.unwrap_or_default(),
-                            "content": content
+                            "role": role,
+                            "content": content_val
                         }));
                     }
-                    _ => {
-                        let role = item.get("role").and_then(|r| r.as_str()).unwrap_or("user");
-                        let content_val = match item.get("content") {
-                            Some(Value::Array(parts)) => {
-                                let mut converted_parts = Vec::new();
-                                let mut text = String::new();
-                                let mut text_only = true;
-                                for part in parts {
-                                    let ptype = part.get("type").and_then(|t| t.as_str()).unwrap_or("");
-                                    match ptype {
-                                        "input_text" | "text" | "output_text" => {
-                                            text.push_str(part.get("text").and_then(Value::as_str).unwrap_or(""));
-                                        }
-                                        "input_image" | "image_url" => {
-                                            text_only = false;
-                                            if let Some(url) = part.get("image_url") {
-                                                converted_parts.push(serde_json::json!({
-                                                    "type": "image_url",
-                                                    "image_url": url
-                                                }));
-                                            }
-                                        }
-                                        _ => {
-                                            // 未知 part 类型原样保留，避免内容静默丢失
-                                            text_only = false;
-                                            converted_parts.push(part.clone());
-                                        }
-                                    }
-                                }
-                                if text_only {
-                                    Value::String(text)
-                                } else {
-                                    let mut merged = Vec::new();
-                                    if !text.is_empty() {
-                                        merged.push(serde_json::json!({ "type": "text", "text": text }));
-                                    }
-                                    merged.extend(converted_parts);
-                                    Value::Array(merged)
-                                }
-                            }
-                            Some(other) => other.clone(),
-                            None => Value::String(String::new()),
-                        };
-
-                        if role == "assistant" {
-                            // 助手输出文本属于当前 assistant 轮次，合并至当前消息中
-                            let entry = current_assistant.get_or_insert_with(serde_json::Map::new);
-                            entry.insert("role".to_string(), Value::String("assistant".to_string()));
-                            match entry.get("content") {
-                                Some(Value::Null) => {
-                                    entry.insert("content".to_string(), content_val);
-                                }
-                                Some(_) => {
-                                    // 追加至已有的文本内容之后
-                                    let existing = entry.get("content").and_then(Value::as_str).unwrap_or("");
-                                    let combined = if existing.is_empty() {
-                                        content_val.as_str().unwrap_or("").to_string()
-                                    } else {
-                                        format!("{existing}{}", content_val.as_str().unwrap_or(""))
-                                    };
-                                    entry.insert("content".to_string(), Value::String(combined));
-                                }
-                                None => {
-                                    entry.insert("content".to_string(), content_val);
-                                }
-                            }
-                        } else {
-                            // user 消息（或非 assistant 项）将结束当前 assistant 轮次
-                            if let Some(assistant) = current_assistant.take() {
-                                messages.push(Value::Object(assistant));
-                            }
-                            messages.push(serde_json::json!({
-                                "role": role,
-                                "content": content_val
-                            }));
-                        }
-                    }
                 }
+                _ => {}
             }
         }
         if let Some(assistant) = current_assistant.take() {
@@ -2812,6 +2868,59 @@ mod tests {
         // 对象输出应序列化为 JSON 字符串
         let content = messages[1].get("content").unwrap().as_str().unwrap();
         assert!(content.contains("\"ok\""));
+    }
+
+    #[test]
+    fn test_convert_responses_string_input_and_item_hygiene() {
+        let responses_req = serde_json::json!({
+            "model": "m",
+            "input": "你好",
+            "max_output_tokens": 512,
+            "reasoning": { "effort": "high", "summary": "auto" },
+            "previous_response_id": "resp_prev",
+            "truncation": "auto",
+            "background": false,
+            "store": true,
+            "temperature": 0.7
+        });
+        let chat = convert_responses_to_chat_completions(&responses_req);
+        let messages = chat.get("messages").unwrap().as_array().unwrap();
+        // 字符串 input 必须成为一条 user 消息而不是被丢弃
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].pointer("/content").unwrap(), "你好");
+        assert_eq!(chat.get("max_completion_tokens").unwrap(), 512);
+        assert_eq!(chat.get("reasoning_effort").unwrap(), "high");
+        assert_eq!(chat.get("temperature").unwrap(), 0.7);
+        assert_eq!(chat.get("store").unwrap(), true);
+        // Responses 专有字段不能透传给 Chat 上游
+        for key in [
+            "max_output_tokens",
+            "reasoning",
+            "previous_response_id",
+            "truncation",
+            "background",
+        ] {
+            assert!(chat.get(key).is_none(), "{key} 应被剥离");
+        }
+    }
+
+    #[test]
+    fn test_convert_responses_skips_reasoning_items() {
+        // 无 store 模式下客户端会回放 reasoning 项；不能变成空 user 消息
+        let responses_req = serde_json::json!({
+            "model": "m",
+            "input": [
+                { "type": "message", "role": "user",
+                  "content": [{ "type": "input_text", "text": "问题" }] },
+                { "type": "reasoning", "id": "rs_1", "summary": [] },
+                { "type": "message", "role": "assistant",
+                  "content": [{ "type": "output_text", "text": "回答" }] }
+            ]
+        });
+        let chat = convert_responses_to_chat_completions(&responses_req);
+        let messages = chat.get("messages").unwrap().as_array().unwrap();
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[1].pointer("/content").unwrap(), "回答");
     }
 
     #[test]
