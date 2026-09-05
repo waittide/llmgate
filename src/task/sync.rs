@@ -39,7 +39,7 @@ pub async fn fetch_upstream_models(channel: &Channel) -> Result<Vec<String>> {
                 }
             }
         }
-        _ => {
+        ChannelProvider::OpenaiCompletion | ChannelProvider::OpenaiResponses | ChannelProvider::Anthropic => {
             if let Some(data_arr) = body.get("data").and_then(|d| d.as_array()) {
                 for item in data_arr {
                     if let Some(id) = item.get("id").and_then(|i| i.as_str()) {
