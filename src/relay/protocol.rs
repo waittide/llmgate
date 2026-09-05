@@ -1076,6 +1076,25 @@ pub fn anthropic_sse_event_to_openai_chunk(
                     "data: {}\n\n",
                     serde_json::to_string(&chunk).unwrap_or_default()
                 ));
+            } else if let Some(thinking) = val.pointer("/delta/thinking").and_then(|t| t.as_str()) {
+                // 扩展思考的 thinking_delta 转发为 reasoning_content（社区事实标准）：
+                // 既让支持该字段的客户端渲染思考过程，也保证转换流持续有字节流动，
+                // 避免 StreamFinalizer 的停滞超时误杀长思考生成。
+                let chunk = serde_json::json!({
+                    "id": chatcmpl_id,
+                    "object": "chat.completion.chunk",
+                    "created": created,
+                    "model": model_name,
+                    "choices": [{
+                        "index": 0,
+                        "delta": { "reasoning_content": thinking },
+                        "finish_reason": null
+                    }]
+                });
+                return Some(format!(
+                    "data: {}\n\n",
+                    serde_json::to_string(&chunk).unwrap_or_default()
+                ));
             } else if let Some(partial) = val.pointer("/delta/partial_json").and_then(|t| t.as_str()) {
                 let chunk = serde_json::json!({
                     "id": chatcmpl_id,
@@ -2016,6 +2035,16 @@ mod tests {
         let stop_chunk =
             anthropic_sse_event_to_openai_chunk(stop_event, "claude-3-5-sonnet", 1700000000, "chatcmpl-test");
         assert_eq!(stop_chunk, Some("data: [DONE]\n\n".to_string()));
+    }
+
+    #[test]
+    fn test_anthropic_sse_event_to_openai_chunk_thinking() {
+        let event = "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"thinking hard\"}}\n\n";
+        let chunk = anthropic_sse_event_to_openai_chunk(event, "claude-3-5-sonnet", 1700000000, "chatcmpl-test");
+        assert!(chunk.is_some());
+        let chunk_str = chunk.unwrap();
+        assert!(chunk_str.contains("\"reasoning_content\":\"thinking hard\""));
+        assert!(!chunk_str.contains("\"content\""));
     }
 
     #[test]
