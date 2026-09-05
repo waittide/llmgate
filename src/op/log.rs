@@ -172,7 +172,7 @@ pub async fn list_request_logs(state: &AppState, query: &LogListQuery<'_>) -> Re
 
     let mut where_qb = QueryBuilder::<sqlx::Sqlite>::new("SELECT COUNT(*) FROM request_logs WHERE 1=1");
     let mut list_qb = QueryBuilder::<sqlx::Sqlite>::new(
-        "SELECT id, status, model, target_channel, target_model, '' as request_url, '' as request_headers, '' as request_body, '' as response_url, '' as response_headers, '' as response_body, prompt_tokens, completion_tokens, total_tokens, cost, wait_time, round, error, rounds_detail, created_at FROM request_logs WHERE 1=1",
+        "SELECT id, status, model, target_channel, target_model, '' as request_url, '' as request_headers, '' as request_body, '' as response_url, '' as response_headers, '' as response_body, prompt_tokens, completion_tokens, total_tokens, cache_read_tokens, cache_write_tokens, cost, wait_time, round, error, rounds_detail, created_at FROM request_logs WHERE 1=1",
     );
     if !query.model.trim().is_empty() {
         let model = query.model.trim();
