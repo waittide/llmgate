@@ -623,7 +623,7 @@ fn handle_successful_stream(state: &AppState, upstream_resp: reqwest::Response, 
         )
         .boxed(),
         ChannelProvider::OpenaiResponses => {
-            if ctx.format != ApiFormat::OpenaiResponse {
+            if ctx.format == ApiFormat::OpenaiCompletion {
                 ProviderToOpenaiStream::new(
                     mapped_stream,
                     ctx.log_base.model.clone(),

@@ -379,4 +379,34 @@ mod tests {
         assert!(output.contains("\"input_tokens\":42"));
         assert!(output.contains("\"output_tokens\":7"));
     }
+
+    #[tokio::test]
+    async fn converts_responses_events_to_anthropic_events() {
+        let chunks = vec![
+            Ok(Bytes::from_static(
+                b"event: response.output_text.delta\ndata: {\"delta\":\"Hello from responses\"}\n\n",
+            )),
+            Ok(Bytes::from_static(
+                b"event: response.completed\ndata: {\"status\":\"completed\"}\n\n",
+            )),
+        ];
+        let output = OpenaiToAnthropicStream::new(
+            stream::iter(chunks),
+            "test-model".to_string(),
+            OpenaiStreamFormat::Responses,
+        )
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .map(Result::unwrap)
+        .fold(String::new(), |mut output, chunk| {
+            output.push_str(&String::from_utf8_lossy(&chunk));
+            output
+        });
+
+        assert!(output.contains("event: message_start"));
+        assert!(output.contains("event: content_block_delta"));
+        assert!(output.contains("\"text\":\"Hello from responses\""));
+        assert_eq!(output.matches("event: message_stop").count(), 1);
+    }
 }
