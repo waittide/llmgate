@@ -388,7 +388,7 @@ fn validate_relay_request(
 ) -> Result<(protocol::ChatRequestMetadata, Group), Box<Response>> {
     let metadata = match parse_request_metadata(body_bytes) {
         Some(m) if !m.model.trim().is_empty() => m,
-        _ => {
+        Some(_) | None => {
             return Err(Box::new(error(
                 StatusCode::BAD_REQUEST,
                 "Invalid request: missing model",
@@ -1050,7 +1050,7 @@ pub async fn forward_relay(
 
         let ch = match channel::get_channel(&state, channel_model.channel_id) {
             Ok(c) if c.enabled => c,
-            _ => {
+            Ok(_) | Err(_) => {
                 state
                     .route_manager
                     .report_failure(current_group.id, item.id, 60);
