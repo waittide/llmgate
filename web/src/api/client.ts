@@ -40,14 +40,6 @@ export function setAPIKey(value: string | null) {
     apiKey = value;
 }
 
-// sseUrl 构造 SSE 连接地址: 原生 EventSource 无法携带 Authorization 请求头,
-// 以 ?token= 查询参数兜底（后端 admin_auth_middleware 支持该取值方式）。
-export function sseUrl(path: string): string {
-    const bearer = getActiveBearer();
-    if (!bearer) return path;
-    const separator = path.includes('?') ? '&' : '?';
-    return `${path}${separator}token=${encodeURIComponent(bearer)}`;
-}
 function getActiveBearer(): string | null {
     if (apiKey || authToken) return apiKey || authToken;
     try {
@@ -92,4 +84,73 @@ export async function apiRequest<T>(path: string, options: RequestOptions = {}):
         throw new ApiError(response.status, data?.message || `Request failed: ${response.status}`);
     }
     return data?.data as T;
+}
+
+// openSseStream 以 fetch + ReadableStream 打开 SSE 连接（可携带 Authorization 请求头，
+// 规避原生 EventSource 无法自定义请求头的限制）。连接断开后每 3 秒自动重连，
+// 直至调用方执行返回的取消函数；每个完整事件（空行分隔）回调一次。
+export function openSseStream(
+    path: string,
+    onEvent: (eventType: string, data: string) => void,
+    onError?: (error: Error) => void,
+): () => void {
+    const controller = new AbortController();
+    let reconnectTimer: number | undefined;
+    let closed = false;
+
+    const connect = async () => {
+        if (closed) return;
+        try {
+            const headers = new Headers();
+            const bearer = getActiveBearer();
+            if (bearer) headers.set('Authorization', `Bearer ${bearer}`);
+            const response = await fetch(path, {
+                headers,
+                credentials: 'include',
+                signal: controller.signal,
+            });
+            if (!response.ok || !response.body) {
+                throw new Error(`SSE 连接失败: ${response.status}`);
+            }
+            const reader = response.body.getReader();
+            const decoder = new TextDecoder();
+            let buffer = '';
+            let done = false;
+            while (!done) {
+                const chunk = await reader.read();
+                done = chunk.done;
+                buffer += decoder.decode(chunk.value ?? new Uint8Array(), { stream: true });
+                // 事件以空行分隔（兼容 \r\n\r\n）
+                let boundary = buffer.search(/\r?\n\r?\n/);
+                while (boundary >= 0) {
+                    const block = buffer.slice(0, boundary);
+                    const separator = /^\r?\n\r?\n/.exec(buffer.slice(boundary))?.[0] ?? '';
+                    buffer = buffer.slice(boundary + separator.length);
+                    let eventType = 'message';
+                    const dataLines: string[] = [];
+                    for (const line of block.split('\n')) {
+                        if (line.startsWith(':')) continue; // 注释/保活行
+                        if (line.startsWith('event:')) eventType = line.slice(6).trim();
+                        else if (line.startsWith('data:')) dataLines.push(line.slice(5).trim());
+                    }
+                    if (dataLines.length > 0) onEvent(eventType, dataLines.join('\n'));
+                    boundary = buffer.search(/\r?\n\r?\n/);
+                }
+            }
+        } catch (error) {
+            onError?.(error instanceof Error ? error : new Error(String(error)));
+            if (closed) return;
+        }
+        // 断线/流结束后延迟重连
+        reconnectTimer = window.setTimeout(() => {
+            void connect();
+        }, 3000);
+    };
+
+    void connect();
+    return () => {
+        closed = true;
+        window.clearTimeout(reconnectTimer);
+        controller.abort();
+    };
 }

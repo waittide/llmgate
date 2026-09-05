@@ -1,6 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useEffect, useState } from 'react';
-import { apiRequest, sseUrl } from './client';
+import { apiRequest, openSseStream } from './client';
 
 // RequestState 表示 Relay 请求的实时状态。
 export type RequestState = 'running' | 'committed' | 'success' | 'failed' | 'canceled';
@@ -128,20 +128,22 @@ export function useLogDetail(id: number, enabled: boolean) {
 export function useLogListLiveSync() {
     const queryClient = useQueryClient();
     useEffect(() => {
-        const source = new EventSource(sseUrl('/api/v1/log/overview/stream'), { withCredentials: true });
         let timer: number | undefined;
-        source.addEventListener('overview', () => {
-            window.clearTimeout(timer);
-            timer = window.setTimeout(() => {
-                void queryClient.invalidateQueries({ queryKey: ['logs'] });
-            }, 500);
-        });
-        source.onerror = () => {
-            // 断线时 EventSource 自动重连, 无需额外处理
-        };
+        const cancel = openSseStream(
+            '/api/v1/log/overview/stream',
+            () => {
+                window.clearTimeout(timer);
+                timer = window.setTimeout(() => {
+                    void queryClient.invalidateQueries({ queryKey: ['logs'] });
+                }, 500);
+            },
+            () => {
+                // 断线由 openSseStream 自动重连, 无需额外处理
+            },
+        );
         return () => {
             window.clearTimeout(timer);
-            source.close();
+            cancel();
         };
     }, [queryClient]);
 }

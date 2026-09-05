@@ -1,6 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useEffect, useMemo, useState } from 'react';
-import { apiRequest, sseUrl } from './client';
+import { apiRequest, openSseStream } from './client';
 import { groupListQueryOptions } from './queries';
 import type { ChannelModel } from './channel';
 
@@ -82,25 +82,22 @@ export function useGroupList(enabled = true, runtimeEnabled = false) {
     useEffect(() => {
         if (!enabled || !runtimeEnabled || !hasInitialData) return;
 
-        const source = new EventSource(sseUrl('/api/v1/group/runtime/stream'), { withCredentials: true });
-        source.addEventListener('runtime', (event) => {
-            try {
-                const update = JSON.parse((event as MessageEvent<string>).data) as GroupRuntimeStatus;
-                setRuntimeByGroup((current) => {
-                    const next = new Map(current);
-                    next.set(update.group_id, update);
-                    return next;
-                });
-            } catch {
-                return;
-            }
-        });
-        source.onerror = () => setRuntimeByGroup((current) => current.size === 0 ? current : new Map());
-
-        return () => {
-            source.close();
-            setRuntimeByGroup((current) => current.size === 0 ? current : new Map());
-        };
+        return openSseStream(
+            '/api/v1/group/runtime/stream',
+            (_eventType, data) => {
+                try {
+                    const update = JSON.parse(data) as GroupRuntimeStatus;
+                    setRuntimeByGroup((current) => {
+                        const next = new Map(current);
+                        next.set(update.group_id, update);
+                        return next;
+                    });
+                } catch {
+                    return;
+                }
+            },
+            () => setRuntimeByGroup((current) => current.size === 0 ? current : new Map()),
+        );
     }, [enabled, hasInitialData, runtimeEnabled]);
     // 未开启实时连接时不合并 runtime，避免连接关闭前推送的状态残留在列表上。
     const runtimeActive = enabled && runtimeEnabled;
