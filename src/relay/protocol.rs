@@ -80,6 +80,32 @@ fn flatten_text_content_arrays(obj: &mut serde_json::Map<String, Value>) {
     }
 }
 
+/// 将 Chat Completions 的 function tool 转换为 Responses API 的扁平结构。
+fn convert_chat_tool_to_responses(tool: &Value) -> Option<Value> {
+    if tool.get("type").and_then(Value::as_str) != Some("function") {
+        return None;
+    }
+
+    tool.pointer("/function/name")?;
+
+    let mut flat = serde_json::Map::new();
+    flat.insert("type".to_string(), Value::String("function".to_string()));
+    flat.insert(
+        "name".to_string(),
+        tool.pointer("/function/name")
+            .cloned()
+            .unwrap_or(Value::Null),
+    );
+    if let Some(description) = tool.pointer("/function/description") {
+        flat.insert("description".to_string(), description.clone());
+    }
+    if let Some(parameters) = tool.pointer("/function/parameters") {
+        flat.insert("parameters".to_string(), parameters.clone());
+    }
+
+    Some(Value::Object(flat))
+}
+
 /// 将 Responses API 的 function tool 转换为 Chat Completions 的嵌套结构。
 fn convert_responses_tool_to_chat(tool: &Value) -> Option<Value> {
     let tool_type = tool
@@ -414,6 +440,19 @@ pub fn convert_chat_completions_to_responses(val: &Value) -> Value {
                 }
             }
         }
+    }
+
+    // Chat 嵌套 tools/function 结构扁平化为 Responses 形态，否则 Responses 上游 400 校验失败
+    if let Some(tools) = obj.get_mut("tools").and_then(Value::as_array_mut) {
+        *tools = tools
+            .iter()
+            .filter_map(convert_chat_tool_to_responses)
+            .collect();
+    }
+    if let Some(choice) = obj.get_mut("tool_choice")
+        && let Some(name) = choice.pointer("/function/name").and_then(Value::as_str)
+    {
+        *choice = serde_json::json!({ "type": "function", "name": name });
     }
 
     if let Some(instructions) = instructions {
@@ -2445,6 +2484,37 @@ mod tests {
         // user content 归一为 input_text part 数组（Responses 规范形态）
         assert_eq!(input[0].pointer("/content/0/type").unwrap(), "input_text");
         assert_eq!(input[0].pointer("/content/0/text").unwrap(), "Hello world");
+    }
+
+    #[test]
+    fn test_convert_chat_tools_to_responses_flat_structure() {
+        let chat_req = serde_json::json!({
+            "model": "gpt-5.6-sol",
+            "messages": [{ "role": "user", "content": "Weather?" }],
+            "tools": [{
+                "type": "function",
+                "function": {
+                    "name": "get_weather",
+                    "description": "Get weather",
+                    "parameters": { "type": "object", "properties": { "city": { "type": "string" } } }
+                }
+            }],
+            "tool_choice": { "type": "function", "function": { "name": "get_weather" } }
+        });
+        let responses = convert_chat_completions_to_responses(&chat_req);
+        // tools 必须扁平化为 Responses 形态：{type, name, description, parameters}
+        let tools = responses.get("tools").unwrap().as_array().unwrap();
+        assert_eq!(tools.len(), 1);
+        let tool = &tools[0];
+        assert_eq!(tool.get("type").unwrap(), "function");
+        assert_eq!(tool.get("name").unwrap(), "get_weather");
+        assert!(tool.get("function").is_none());
+        assert_eq!(tool.pointer("/parameters/properties/city/type").unwrap(), "string");
+        // tool_choice 同步扁平化：{"type":"function","name":...}
+        let choice = responses.get("tool_choice").unwrap();
+        assert_eq!(choice.get("type").unwrap(), "function");
+        assert_eq!(choice.get("name").unwrap(), "get_weather");
+        assert!(choice.get("function").is_none());
     }
 
     #[test]
