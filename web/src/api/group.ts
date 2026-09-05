@@ -1,6 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useEffect, useMemo, useState } from 'react';
-import { apiRequest } from './client';
+import { apiRequest, sseUrl } from './client';
 import { groupListQueryOptions } from './queries';
 import type { ChannelModel } from './channel';
 
@@ -82,7 +82,7 @@ export function useGroupList(enabled = true, runtimeEnabled = false) {
     useEffect(() => {
         if (!enabled || !runtimeEnabled || !hasInitialData) return;
 
-        const source = new EventSource('/api/v1/group/runtime/stream', { withCredentials: true });
+        const source = new EventSource(sseUrl('/api/v1/group/runtime/stream'), { withCredentials: true });
         source.addEventListener('runtime', (event) => {
             try {
                 const update = JSON.parse((event as MessageEvent<string>).data) as GroupRuntimeStatus;

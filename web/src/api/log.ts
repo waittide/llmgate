@@ -1,6 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useEffect, useState } from 'react';
-import { apiRequest } from './client';
+import { apiRequest, sseUrl } from './client';
 
 // RequestState 表示 Relay 请求的实时状态。
 export type RequestState = 'running' | 'committed' | 'success' | 'failed' | 'canceled';
@@ -128,7 +128,7 @@ export function useLogDetail(id: number, enabled: boolean) {
 export function useLogListLiveSync() {
     const queryClient = useQueryClient();
     useEffect(() => {
-        const source = new EventSource('/api/v1/log/overview/stream', { withCredentials: true });
+        const source = new EventSource(sseUrl('/api/v1/log/overview/stream'), { withCredentials: true });
         let timer: number | undefined;
         source.addEventListener('overview', () => {
             window.clearTimeout(timer);

@@ -39,6 +39,15 @@ export function setAuthToken(value: string | null) {
 export function setAPIKey(value: string | null) {
     apiKey = value;
 }
+
+// sseUrl 构造 SSE 连接地址: 原生 EventSource 无法携带 Authorization 请求头,
+// 以 ?token= 查询参数兜底（后端 admin_auth_middleware 支持该取值方式）。
+export function sseUrl(path: string): string {
+    const bearer = getActiveBearer();
+    if (!bearer) return path;
+    const separator = path.includes('?') ? '&' : '?';
+    return `${path}${separator}token=${encodeURIComponent(bearer)}`;
+}
 function getActiveBearer(): string | null {
     if (apiKey || authToken) return apiKey || authToken;
     try {

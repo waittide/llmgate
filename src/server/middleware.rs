@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use axum::{
     extract::{Request, State},
-    http::{StatusCode, header},
+    http::{HeaderMap, StatusCode, header},
     middleware::Next,
     response::Response,
 };
@@ -20,19 +20,28 @@ pub struct AuthContext {
     pub is_anthropic_header: bool,
 }
 
-pub async fn admin_auth_middleware(State(state): State<AppState>, mut req: Request, next: Next) -> Response {
-    let mut token_opt = None;
-
-    if let Some(auth_header) = req.headers().get(header::AUTHORIZATION)
+/// 从 Authorization 头提取 JWT；SSE（EventSource 无法携带自定义请求头）允许
+/// ?token= 查询参数兜底。
+fn extract_admin_token(headers: &HeaderMap, query: Option<&str>) -> Option<String> {
+    if let Some(auth_header) = headers.get(header::AUTHORIZATION)
         && let Ok(auth_str) = auth_header.to_str()
         && let Some(stripped) = auth_str.strip_prefix("Bearer ")
+        && !stripped.trim().is_empty()
     {
-        token_opt = Some(stripped.trim().to_string());
+        return Some(stripped.trim().to_string());
     }
+    let query = query?;
+    query
+        .split('&')
+        .find_map(|kv| kv.strip_prefix("token="))
+        .filter(|t| !t.is_empty())
+        .map(str::to_string)
+}
 
-    let token = match token_opt {
-        Some(t) if !t.is_empty() => t,
-        _ => return error(StatusCode::UNAUTHORIZED, "鉴权失败"),
+pub async fn admin_auth_middleware(State(state): State<AppState>, mut req: Request, next: Next) -> Response {
+    let token = match extract_admin_token(req.headers(), req.uri().query()) {
+        Some(t) => t,
+        None => return error(StatusCode::UNAUTHORIZED, "鉴权失败"),
     };
 
     let secret = state.jwt_secret.read().clone();
@@ -110,4 +119,36 @@ pub async fn api_key_auth_middleware(State(state): State<AppState>, mut req: Req
 
     req.extensions_mut().insert(Arc::new(auth_context));
     next.run(req).await
+}
+
+#[cfg(test)]
+mod tests {
+    use axum::http::HeaderValue;
+
+    use super::*;
+
+    #[test]
+    fn test_extract_admin_token_header_priority() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::AUTHORIZATION,
+            HeaderValue::from_static("Bearer jwt-from-header"),
+        );
+        assert_eq!(
+            extract_admin_token(&headers, Some("token=jwt-from-query")),
+            Some("jwt-from-header".to_string())
+        );
+    }
+
+    #[test]
+    fn test_extract_admin_token_query_fallback() {
+        let headers = HeaderMap::new();
+        assert_eq!(
+            extract_admin_token(&headers, Some("a=1&token=jwt-from-query")),
+            Some("jwt-from-query".to_string())
+        );
+        assert_eq!(extract_admin_token(&headers, Some("a=1")), None);
+        assert_eq!(extract_admin_token(&headers, Some("token=")), None);
+        assert_eq!(extract_admin_token(&headers, None), None);
+    }
 }
