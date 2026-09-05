@@ -1058,6 +1058,29 @@ pub fn convert_anthropic_to_openai_chat_request(val: &Value) -> Value {
     }
     obj.insert("messages".to_string(), Value::Array(messages));
 
+    // 字段卫生：Anthropic 专有参数透传给 OpenAI 上游会被 400（Unrecognized
+    // request argument），可映射的先映射再剥离。
+    if let Some(stop) = obj.remove("stop_sequences") {
+        obj.insert("stop".to_string(), stop);
+    }
+    if let Some(user_id) = obj
+        .remove("metadata")
+        .and_then(|m| m.get("user_id").cloned())
+    {
+        obj.insert("user".to_string(), user_id);
+    }
+    if let Some(choice) = obj.get_mut("tool_choice")
+        && choice
+            .get("disable_parallel_tool_use")
+            .and_then(Value::as_bool)
+            == Some(true)
+    {
+        obj.insert("parallel_tool_calls".to_string(), Value::Bool(false));
+    }
+    for key in ["top_k", "thinking", "mcp_servers", "context_management", "service_tier"] {
+        obj.remove(key);
+    }
+
     if let Some(tools) = obj.get_mut("tools").and_then(Value::as_array_mut) {
         *tools = tools
             .iter()
@@ -3635,6 +3658,29 @@ mod tests {
         assert_eq!(openai.pointer("/messages/1/content").unwrap(), "Hello");
         assert_eq!(openai.pointer("/tools/0/function/name").unwrap(), "read_file");
         assert_eq!(openai.pointer("/tools/0/function/parameters/type").unwrap(), "object");
+    }
+
+    #[test]
+    fn test_convert_anthropic_request_field_hygiene() {
+        let anthropic = serde_json::json!({
+            "model": "m",
+            "max_tokens": 512,
+            "system": "s",
+            "messages": [{ "role": "user", "content": "Hi" }],
+            "stop_sequences": ["END", "!"],
+            "metadata": { "user_id": "user-9" },
+            "tool_choice": { "type": "tool", "name": "read_file", "disable_parallel_tool_use": true },
+            "top_k": 40,
+            "thinking": { "type": "enabled", "budget_tokens": 2048 }
+        });
+        let openai = convert_anthropic_to_openai_chat_request(&anthropic);
+        assert_eq!(openai.pointer("/stop/0").unwrap(), "END");
+        assert_eq!(openai.get("user").unwrap(), "user-9");
+        assert_eq!(openai.get("parallel_tool_calls").unwrap(), false);
+        assert_eq!(openai.pointer("/tool_choice/function/name").unwrap(), "read_file");
+        for key in ["stop_sequences", "metadata", "top_k", "thinking"] {
+            assert!(openai.get(key).is_none(), "{key} 应被剥离");
+        }
     }
 
     #[test]
