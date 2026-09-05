@@ -8,8 +8,7 @@ use bytes::Bytes;
 use futures::Stream;
 use serde_json::{Value, json};
 
-use super::sse_event_end;
-use crate::relay::{protocol::extract_usage_from_json, state::Usage};
+use crate::relay::{SseBuffer, protocol::extract_usage_from_json, state::Usage};
 
 #[derive(Clone, Copy)]
 pub enum OpenaiStreamFormat {
@@ -27,7 +26,7 @@ struct ToolState {
 pub struct OpenaiToAnthropicStream<S> {
     inner:            S,
     format:           OpenaiStreamFormat,
-    buffer:           Vec<u8>,
+    sse:              SseBuffer,
     pending:          VecDeque<Bytes>,
     model:            String,
     message_id:       String,
@@ -43,7 +42,7 @@ impl<S> OpenaiToAnthropicStream<S> {
         let mut stream = Self {
             inner,
             format,
-            buffer: Vec::new(),
+            sse: SseBuffer::default(),
             pending: VecDeque::new(),
             model,
             message_id: format!("msg_{}", nanoid::nanoid!(24)),
@@ -277,33 +276,27 @@ where
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let this = self.as_mut().get_mut();
-        if let Some(chunk) = this.pending.pop_front() {
-            return Poll::Ready(Some(Ok(chunk)));
-        }
-        match Pin::new(&mut this.inner).poll_next(cx) {
-            Poll::Ready(Some(Ok(bytes))) => {
-                this.buffer.extend_from_slice(&bytes);
-                while let Some(end) = sse_event_end(&this.buffer) {
-                    let event = String::from_utf8_lossy(&this.buffer[..end]).to_string();
-                    this.handle_event(&event);
-                    this.buffer.drain(..end);
-                }
-                if let Some(chunk) = this.pending.pop_front() {
-                    Poll::Ready(Some(Ok(chunk)))
-                } else {
-                    cx.waker().wake_by_ref();
-                    Poll::Pending
-                }
+        loop {
+            if let Some(chunk) = this.pending.pop_front() {
+                return Poll::Ready(Some(Ok(chunk)));
             }
-            Poll::Ready(Some(Err(error))) => Poll::Ready(Some(Err(error))),
-            Poll::Ready(None) => {
-                this.complete(None);
-                this.pending
-                    .pop_front()
-                    .map(|chunk| Poll::Ready(Some(Ok(chunk))))
-                    .unwrap_or(Poll::Ready(None))
+            match Pin::new(&mut this.inner).poll_next(cx) {
+                Poll::Ready(Some(Ok(bytes))) => {
+                    this.sse.feed(&bytes);
+                    while let Some(event) = this.sse.next_event() {
+                        this.handle_event(&event);
+                    }
+                }
+                Poll::Ready(Some(Err(error))) => return Poll::Ready(Some(Err(error))),
+                Poll::Ready(None) => {
+                    this.complete(None);
+                    return match this.pending.pop_front() {
+                        Some(chunk) => Poll::Ready(Some(Ok(chunk))),
+                        None => Poll::Ready(None),
+                    };
+                }
+                Poll::Pending => return Poll::Pending,
             }
-            Poll::Pending => Poll::Pending,
         }
     }
 }

@@ -117,6 +117,26 @@ pub(crate) fn parse_sse_event(event_str: &str) -> (&str, String) {
     (event_type, data_parts.join("\n"))
 }
 
+/// 事件级 SSE 缓冲：跨网络分片累积字节，按完整事件逐个吐出。
+#[derive(Default)]
+pub(crate) struct SseBuffer {
+    buf: Vec<u8>,
+}
+
+impl SseBuffer {
+    pub(crate) fn feed(&mut self, bytes: &[u8]) {
+        self.buf.extend_from_slice(bytes);
+    }
+
+    /// 取出下一个完整事件（含结束符），无完整事件时返回 None。
+    pub(crate) fn next_event(&mut self) -> Option<String> {
+        let end = sse_event_end(&self.buf)?;
+        let event = String::from_utf8_lossy(&self.buf[..end]).into_owned();
+        self.buf.drain(..end);
+        Some(event)
+    }
+}
+
 fn extract_usage_from_sse_buffer(buffer: &mut Vec<u8>, usage: &mut Option<Usage>) {
     while let Some(end) = sse_event_end(buffer) {
         let event_bytes = &buffer[..end];

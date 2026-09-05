@@ -8,8 +8,7 @@ use bytes::Bytes;
 use futures::Stream;
 use serde_json::{Value, json};
 
-use super::sse_event_end;
-use crate::relay::{protocol::extract_usage_from_json, state::Usage};
+use crate::relay::{SseBuffer, protocol::extract_usage_from_json, state::Usage};
 
 #[derive(Default)]
 struct ToolState {
@@ -21,7 +20,7 @@ struct ToolState {
 /// Gemini 无分片 functionCall：参数增量先累积，finish 时一次性补发完整调用。
 pub struct OpenaiToGeminiStream<S> {
     inner:     S,
-    buffer:    Vec<u8>,
+    sse:       SseBuffer,
     pending:   VecDeque<Bytes>,
     model:     String,
     tools:     BTreeMap<u64, ToolState>,
@@ -33,7 +32,7 @@ impl<S> OpenaiToGeminiStream<S> {
     pub fn new(inner: S, model: String) -> Self {
         Self {
             inner,
-            buffer: Vec::new(),
+            sse: SseBuffer::default(),
             pending: VecDeque::new(),
             model,
             tools: BTreeMap::new(),
@@ -171,38 +170,32 @@ where
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let this = self.as_mut().get_mut();
-        if let Some(chunk) = this.pending.pop_front() {
-            return Poll::Ready(Some(Ok(chunk)));
-        }
-        match Pin::new(&mut this.inner).poll_next(cx) {
-            Poll::Ready(Some(Ok(bytes))) => {
-                this.buffer.extend_from_slice(&bytes);
-                while let Some(end) = sse_event_end(&this.buffer) {
-                    let event = String::from_utf8_lossy(&this.buffer[..end]).to_string();
-                    for data in event
-                        .lines()
-                        .filter_map(|line| line.trim().strip_prefix("data:").map(str::trim))
-                    {
-                        this.handle_data(data);
+        loop {
+            if let Some(chunk) = this.pending.pop_front() {
+                return Poll::Ready(Some(Ok(chunk)));
+            }
+            match Pin::new(&mut this.inner).poll_next(cx) {
+                Poll::Ready(Some(Ok(bytes))) => {
+                    this.sse.feed(&bytes);
+                    while let Some(event) = this.sse.next_event() {
+                        for data in event
+                            .lines()
+                            .filter_map(|line| line.trim().strip_prefix("data:").map(str::trim))
+                        {
+                            this.handle_data(data);
+                        }
                     }
-                    this.buffer.drain(..end);
                 }
-                if let Some(chunk) = this.pending.pop_front() {
-                    Poll::Ready(Some(Ok(chunk)))
-                } else {
-                    cx.waker().wake_by_ref();
-                    Poll::Pending
+                Poll::Ready(Some(Err(error))) => return Poll::Ready(Some(Err(error))),
+                Poll::Ready(None) => {
+                    this.complete();
+                    return match this.pending.pop_front() {
+                        Some(chunk) => Poll::Ready(Some(Ok(chunk))),
+                        None => Poll::Ready(None),
+                    };
                 }
+                Poll::Pending => return Poll::Pending,
             }
-            Poll::Ready(Some(Err(error))) => Poll::Ready(Some(Err(error))),
-            Poll::Ready(None) => {
-                this.complete();
-                this.pending
-                    .pop_front()
-                    .map(|chunk| Poll::Ready(Some(Ok(chunk))))
-                    .unwrap_or(Poll::Ready(None))
-            }
-            Poll::Pending => Poll::Pending,
         }
     }
 }

@@ -8,8 +8,7 @@ use bytes::Bytes;
 use futures::Stream;
 use serde_json::{Value, json};
 
-use super::sse_event_end;
-use crate::relay::{protocol::extract_usage_from_json, state::Usage};
+use crate::relay::{SseBuffer, protocol::extract_usage_from_json, state::Usage};
 
 /// 将单个供应商原生 SSE 事件转换为 OpenAI Chat Completion SSE chunk 字符串。
 /// 有状态实现（如 Responses 的 item_id → 工具序号映射）通过 trait 而非函数指针接入。
@@ -26,10 +25,11 @@ impl<F: FnMut(&str, &str, i64, &str) -> Option<String>> SseChunkConverter for F 
 /// 将供应商原生 SSE 字节流转换为标准 OpenAI Chat Completion SSE chunk 流。
 pub struct ProviderToOpenaiStream<S> {
     inner:          S,
-    buffer:         Vec<u8>,
+    sse:            SseBuffer,
     pending_chunks: VecDeque<Bytes>,
     model:          String,
     chatcmpl_id:    String,
+    created:        i64,
     done_emitted:   bool,
     convert_event:  Box<dyn SseChunkConverter + Send>,
 }
@@ -38,10 +38,11 @@ impl<S> ProviderToOpenaiStream<S> {
     pub fn new(inner: S, model: String, convert_event: impl SseChunkConverter + Send + 'static) -> Self {
         Self {
             inner,
-            buffer: Vec::new(),
+            sse: SseBuffer::default(),
             pending_chunks: VecDeque::new(),
             model,
             chatcmpl_id: format!("chatcmpl-{}", nanoid::nanoid!(24)),
+            created: chrono::Utc::now().timestamp(),
             done_emitted: false,
             convert_event: Box::new(convert_event),
         }
@@ -56,49 +57,35 @@ where
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let this = self.as_mut().get_mut();
-
-        if let Some(chunk) = this.pending_chunks.pop_front() {
-            if chunk.as_ref() == b"data: [DONE]\n\n" {
-                this.done_emitted = true;
-            }
-            return Poll::Ready(Some(Ok(chunk)));
-        }
-
-        match Pin::new(&mut this.inner).poll_next(cx) {
-            Poll::Ready(Some(Ok(bytes))) => {
-                this.buffer.extend_from_slice(&bytes);
-                let created = chrono::Utc::now().timestamp();
-                while let Some(end) = sse_event_end(&this.buffer) {
-                    let event_str = String::from_utf8_lossy(&this.buffer[..end]).to_string();
-                    if let Some(chunk) =
-                        this.convert_event
-                            .convert_event(&event_str, &this.model, created, &this.chatcmpl_id)
-                    {
-                        this.pending_chunks.push_back(Bytes::from(chunk));
-                    }
-                    this.buffer.drain(..end);
-                }
-
-                if let Some(chunk) = this.pending_chunks.pop_front() {
-                    if chunk.as_ref() == b"data: [DONE]\n\n" {
-                        this.done_emitted = true;
-                    }
-                    Poll::Ready(Some(Ok(chunk)))
-                } else {
-                    cx.waker().wake_by_ref();
-                    Poll::Pending
-                }
-            }
-            Poll::Ready(Some(Err(e))) => Poll::Ready(Some(Err(e))),
-            Poll::Ready(None) => {
-                if !this.done_emitted {
+        loop {
+            if let Some(chunk) = this.pending_chunks.pop_front() {
+                if chunk.as_ref() == b"data: [DONE]\n\n" {
                     this.done_emitted = true;
-                    Poll::Ready(Some(Ok(Bytes::from_static(b"data: [DONE]\n\n"))))
-                } else {
-                    Poll::Ready(None)
                 }
+                return Poll::Ready(Some(Ok(chunk)));
             }
-            Poll::Pending => Poll::Pending,
+            match Pin::new(&mut this.inner).poll_next(cx) {
+                Poll::Ready(Some(Ok(bytes))) => {
+                    this.sse.feed(&bytes);
+                    while let Some(event) = this.sse.next_event() {
+                        if let Some(chunk) =
+                            this.convert_event
+                                .convert_event(&event, &this.model, this.created, &this.chatcmpl_id)
+                        {
+                            this.pending_chunks.push_back(Bytes::from(chunk));
+                        }
+                    }
+                }
+                Poll::Ready(Some(Err(e))) => return Poll::Ready(Some(Err(e))),
+                Poll::Ready(None) => {
+                    if this.done_emitted {
+                        return Poll::Ready(None);
+                    }
+                    this.done_emitted = true;
+                    return Poll::Ready(Some(Ok(Bytes::from_static(b"data: [DONE]\n\n"))));
+                }
+                Poll::Pending => return Poll::Pending,
+            }
         }
     }
 }
@@ -115,7 +102,7 @@ struct ToolCallState {
 /// 将 OpenAI Chat Completions SSE 流适配转换为 OpenAI Responses SSE 流。
 pub struct ChatCompletionsToResponsesStream<S> {
     inner:           S,
-    buffer:          Vec<u8>,
+    sse:             SseBuffer,
     pending:         VecDeque<Bytes>,
     response_id:     String,
     message_id:      String,
@@ -134,7 +121,7 @@ impl<S> ChatCompletionsToResponsesStream<S> {
     pub fn new(inner: S, model: String) -> Self {
         Self {
             inner,
-            buffer: Vec::new(),
+            sse: SseBuffer::default(),
             pending: VecDeque::new(),
             response_id: format!("resp_{}", nanoid::nanoid!(24)),
             message_id: format!("msg_{}", nanoid::nanoid!(24)),
@@ -433,39 +420,32 @@ where
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let this = self.as_mut().get_mut();
         this.start_response();
-        if let Some(chunk) = this.pending.pop_front() {
-            return Poll::Ready(Some(Ok(chunk)));
-        }
-
-        match Pin::new(&mut this.inner).poll_next(cx) {
-            Poll::Ready(Some(Ok(bytes))) => {
-                this.buffer.extend_from_slice(&bytes);
-                while let Some(end) = sse_event_end(&this.buffer) {
-                    let event = String::from_utf8_lossy(&this.buffer[..end]).to_string();
-                    for data in event
-                        .lines()
-                        .filter_map(|line| line.trim().strip_prefix("data:").map(str::trim))
-                    {
-                        this.handle_data(data);
+        loop {
+            if let Some(chunk) = this.pending.pop_front() {
+                return Poll::Ready(Some(Ok(chunk)));
+            }
+            match Pin::new(&mut this.inner).poll_next(cx) {
+                Poll::Ready(Some(Ok(bytes))) => {
+                    this.sse.feed(&bytes);
+                    while let Some(event) = this.sse.next_event() {
+                        for data in event
+                            .lines()
+                            .filter_map(|line| line.trim().strip_prefix("data:").map(str::trim))
+                        {
+                            this.handle_data(data);
+                        }
                     }
-                    this.buffer.drain(..end);
                 }
-                if let Some(chunk) = this.pending.pop_front() {
-                    Poll::Ready(Some(Ok(chunk)))
-                } else {
-                    cx.waker().wake_by_ref();
-                    Poll::Pending
+                Poll::Ready(Some(Err(error))) => return Poll::Ready(Some(Err(error))),
+                Poll::Ready(None) => {
+                    this.complete();
+                    return match this.pending.pop_front() {
+                        Some(chunk) => Poll::Ready(Some(Ok(chunk))),
+                        None => Poll::Ready(None),
+                    };
                 }
+                Poll::Pending => return Poll::Pending,
             }
-            Poll::Ready(Some(Err(error))) => Poll::Ready(Some(Err(error))),
-            Poll::Ready(None) => {
-                this.complete();
-                this.pending
-                    .pop_front()
-                    .map(|chunk| Poll::Ready(Some(Ok(chunk))))
-                    .unwrap_or(Poll::Ready(None))
-            }
-            Poll::Pending => Poll::Pending,
         }
     }
 }
