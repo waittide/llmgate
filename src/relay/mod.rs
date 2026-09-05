@@ -847,10 +847,87 @@ fn build_failed_relay_response(state: &AppState, ctx: FailedRelayContext) -> Res
         .unwrap_or_else(|e| {
             tracing::error!("构建错误响应失败: {}", e);
             Response::builder()
-                .status(StatusCode::BAD_GATEWAY)
-                .body(Body::from("Bad Gateway"))
+                .status(StatusCode::INTERNAL_SERVER_ERROR)
+                .body(Body::from("Internal Server Error"))
                 .unwrap_or_default()
         })
+}
+
+/// 单渠道发送（含 key 级轮换）：401/403/429 且存在未试 key 时，冷却当前 key
+/// 并顺延未试 key 重试（不消耗轮次）；key 穷尽后返回最后一个响应。
+/// 传输错误/超时以 String 记述（含 "timeout" 字样者映射为网关超时）。
+struct SendPlan<'a> {
+    state:                    &'a AppState,
+    channel:                  &'a Channel,
+    key_pool:                 &'a [String],
+    endpoint:                 &'a str,
+    body:                     Bytes,
+    client_headers:           &'a HeaderMap,
+    stream:                   bool,
+    timeout_secs:             Option<u64>,
+    first_event_timeout_secs: u64,
+    cooldown_seconds:         i64,
+}
+
+async fn send_with_key_rotation(plan: SendPlan<'_>) -> Result<(reqwest::Response, usize), String> {
+    let SendPlan {
+        state,
+        channel: ch,
+        key_pool,
+        endpoint: target_endpoint,
+        body: body_bytes,
+        client_headers,
+        stream,
+        timeout_secs,
+        first_event_timeout_secs,
+        cooldown_seconds,
+    } = plan;
+    let client = get_client();
+    let mut key_idx = state.key_pool.pick(ch.id, key_pool.len());
+    let mut tried_keys = std::collections::HashSet::new();
+    loop {
+        let req_builder = match build_upstream_request(
+            client,
+            ch,
+            &key_pool[key_idx],
+            target_endpoint,
+            Some(body_bytes.clone()),
+            timeout_secs,
+            Some(client_headers),
+        ) {
+            Ok(rb) => rb,
+            Err(e) => break Err(format!("构建渠道 {} 请求失败: {}", ch.name, e)),
+        };
+        let fut = req_builder.send();
+        let res = if stream {
+            match tokio::time::timeout(std::time::Duration::from_secs(first_event_timeout_secs), fut).await {
+                Ok(r) => r.map_err(|e| e.to_string()),
+                Err(_) => Err(format!(
+                    "上游流式响应在 {}s 内未返回初始响应头",
+                    first_event_timeout_secs
+                )),
+            }
+        } else {
+            fut.await.map_err(|e| e.to_string())
+        };
+        match res {
+            // key 级可重试错误：冷却当前 key，换未试过的 key 重试（不消耗轮次）
+            Ok(resp) if matches!(resp.status().as_u16(), 401 | 403 | 429) && key_pool.len() > 1 => {
+                state
+                    .key_pool
+                    .report_failure(ch.id, key_idx, cooldown_seconds);
+                tried_keys.insert(key_idx);
+                match (0..key_pool.len()).find(|idx| !tried_keys.contains(idx)) {
+                    Some(next) => {
+                        key_idx = next;
+                        continue;
+                    }
+                    None => break Ok((resp, key_idx)),
+                }
+            }
+            other => break other.map(|resp| (resp, key_idx)),
+        }
+    }
 }
 
 pub async fn forward_relay(
@@ -1019,60 +1096,25 @@ pub async fn forward_relay(
             )
         };
 
-        let client = get_client();
-        let body_bytes = Bytes::from(final_body);
-        let mut key_idx = state.key_pool.pick(ch.id, key_pool.len());
-        let mut tried_keys = std::collections::HashSet::new();
-        let first_event_timeout_secs = current_group
-            .relay_config
-            .stream_first_event_timeout_seconds
-            .max(5) as u64;
-        let send_res = loop {
-            let req_builder = match build_upstream_request(
-                client,
-                &ch,
-                &key_pool[key_idx],
-                &target_endpoint,
-                Some(body_bytes.clone()),
-                timeout_secs,
-                Some(&headers),
-            ) {
-                Ok(rb) => rb,
-                Err(e) => break Err(format!("构建渠道 {} 请求失败: {}", ch.name, e)),
-            };
-            let fut = req_builder.send();
-            let res = if metadata.stream {
-                match tokio::time::timeout(std::time::Duration::from_secs(first_event_timeout_secs), fut).await {
-                    Ok(r) => r.map_err(|e| e.to_string()),
-                    Err(_) => Err(format!(
-                        "上游流式响应在 {}s 内未返回初始响应头",
-                        first_event_timeout_secs
-                    )),
-                }
-            } else {
-                fut.await.map_err(|e| e.to_string())
-            };
-            match res {
-                // key 级可重试错误：冷却当前 key，换未试过的 key 重试（不消耗轮次）
-                Ok(resp) if matches!(resp.status().as_u16(), 401 | 403 | 429) && key_pool.len() > 1 => {
-                    state
-                        .key_pool
-                        .report_failure(ch.id, key_idx, current_group.relay_config.cooldown_seconds);
-                    tried_keys.insert(key_idx);
-                    match (0..key_pool.len()).find(|idx| !tried_keys.contains(idx)) {
-                        Some(next) => {
-                            key_idx = next;
-                            continue;
-                        }
-                        None => break Ok(resp),
-                    }
-                }
-                other => break other,
-            }
-        };
+        let send_res = send_with_key_rotation(SendPlan {
+            state: &state,
+            channel: &ch,
+            key_pool: &key_pool,
+            endpoint: &target_endpoint,
+            body: Bytes::from(final_body),
+            client_headers: &headers,
+            stream: metadata.stream,
+            timeout_secs,
+            first_event_timeout_secs: current_group
+                .relay_config
+                .stream_first_event_timeout_seconds
+                .max(5) as u64,
+            cooldown_seconds: current_group.relay_config.cooldown_seconds,
+        })
+        .await;
 
         match send_res {
-            Ok(upstream_resp) => {
+            Ok((upstream_resp, key_idx)) => {
                 let status = upstream_resp.status();
                 if status.is_success() {
                     state
@@ -1215,7 +1257,10 @@ pub async fn forward_relay(
 }
 #[cfg(test)]
 mod tests {
+    use serde_json::json;
+
     use super::*;
+    use crate::{op, server::middleware::AuthContext, test_support};
 
     #[test]
     fn sse_event_end_finds_lf_and_crlf() {
@@ -1381,6 +1426,211 @@ mod tests {
         assert!(next_item.unwrap().is_none());
         assert!(finalizer.interrupted);
 
+        let _ = std::fs::remove_file(db_path);
+    }
+
+    // ---------- 故障转移集成测试（wiremock 假上游 + 临时 DB） ----------
+
+    fn test_auth() -> std::sync::Arc<AuthContext> {
+        std::sync::Arc::new(AuthContext {
+            api_key:             crate::model::APIKey {
+                id:               1,
+                name:             "test".into(),
+                api_key:          "sk-test".into(),
+                enabled:          true,
+                expire_at:        0,
+                max_cost:         0.0,
+                supported_models: String::new(),
+            },
+            supported_models:    Vec::new(),
+            is_anthropic_header: false,
+        })
+    }
+
+    async fn chat_body(model: &str) -> Bytes {
+        Bytes::from(
+            json!({
+                "model": model,
+                "messages": [{ "role": "user", "content": "hi" }]
+            })
+            .to_string(),
+        )
+    }
+
+    const CHAT_OK_BODY: &str = r#"{"id":"x","choices":[{"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}"#;
+
+    async fn add_channel(
+        state: &AppState,
+        name: &str,
+        base_url: &str,
+        key: &str,
+        model_name: &str,
+    ) -> crate::model::ChannelModel {
+        let mut ch = crate::model::Channel {
+            name: name.into(),
+            channel_type: crate::model::ChannelProvider::OpenaiCompletion,
+            enabled: true,
+            base_url: base_url.into(),
+            key: key.into(),
+            models: vec![crate::model::ChannelModel {
+                name: model_name.into(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        op::channel::create_channel(state, &mut ch).await.unwrap();
+        ch.models[0].clone()
+    }
+
+    #[tokio::test]
+    async fn key_rotation_on_401_uses_untried_key() {
+        let (state, db_path) = test_support::setup_test_state("failover_key").await;
+        let server = wiremock::MockServer::start().await;
+
+        wiremock::Mock::given(wiremock::matchers::header("authorization", "Bearer k1"))
+            .respond_with(wiremock::ResponseTemplate::new(401).set_body_string("bad key"))
+            .up_to_n_times(1)
+            .expect(1)
+            .mount(&server)
+            .await;
+        wiremock::Mock::given(wiremock::matchers::header("authorization", "Bearer k2"))
+            .respond_with(wiremock::ResponseTemplate::new(200).set_body_string(CHAT_OK_BODY))
+            .up_to_n_times(1)
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let model = add_channel(&state, "ch", &server.uri(), "k1\nk2", "m-keyrot").await;
+        let mut group = crate::model::Group {
+            name: "m-keyrot".into(),
+            mode: crate::model::GroupMode::Failover,
+            items: vec![crate::model::GroupItem {
+                channel_model_id: model.id,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        op::group::create_group(&state, &mut group).await.unwrap();
+
+        let resp = forward_relay(
+            state.clone(),
+            test_auth(),
+            ApiFormat::OpenaiCompletion,
+            None,
+            Uri::from_static("/v1/chat/completions"),
+            HeaderMap::new(),
+            chat_body("m-keyrot").await,
+        )
+        .await;
+        assert_eq!(resp.status(), 200);
+        server.verify().await;
+        let _ = std::fs::remove_file(db_path);
+    }
+
+    #[tokio::test]
+    async fn failover_to_next_channel_on_500() {
+        let (state, db_path) = test_support::setup_test_state("failover_500").await;
+        let down = wiremock::MockServer::start().await;
+        let up = wiremock::MockServer::start().await;
+
+        wiremock::Mock::given(wiremock::matchers::any())
+            .respond_with(wiremock::ResponseTemplate::new(500).set_body_string("boom"))
+            .up_to_n_times(1)
+            .expect(1)
+            .mount(&down)
+            .await;
+        wiremock::Mock::given(wiremock::matchers::any())
+            .respond_with(wiremock::ResponseTemplate::new(200).set_body_string(CHAT_OK_BODY))
+            .expect(1)
+            .mount(&up)
+            .await;
+
+        let model_a = add_channel(&state, "a", &down.uri(), "k", "m-fail").await;
+        let model_b = add_channel(&state, "b", &up.uri(), "k", "m-fail").await;
+        let mut group = crate::model::Group {
+            name: "m-fail".into(),
+            mode: crate::model::GroupMode::Failover,
+            items: vec![
+                crate::model::GroupItem {
+                    channel_model_id: model_a.id,
+                    ..Default::default()
+                },
+                crate::model::GroupItem {
+                    channel_model_id: model_b.id,
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+        op::group::create_group(&state, &mut group).await.unwrap();
+
+        let resp = forward_relay(
+            state.clone(),
+            test_auth(),
+            ApiFormat::OpenaiCompletion,
+            None,
+            Uri::from_static("/v1/chat/completions"),
+            HeaderMap::new(),
+            chat_body("m-fail").await,
+        )
+        .await;
+        assert_eq!(resp.status(), 200);
+        down.verify().await;
+        up.verify().await;
+        let _ = std::fs::remove_file(db_path);
+    }
+
+    #[tokio::test]
+    async fn client_error_stops_failover() {
+        let (state, db_path) = test_support::setup_test_state("failover_400").await;
+        let bad = wiremock::MockServer::start().await;
+        let healthy = wiremock::MockServer::start().await;
+
+        wiremock::Mock::given(wiremock::matchers::any())
+            .respond_with(wiremock::ResponseTemplate::new(400).set_body_string("bad request"))
+            .up_to_n_times(1)
+            .expect(1)
+            .mount(&bad)
+            .await;
+        // 健康渠道不应被触达：400 属于请求错误，继续重试只会烧钱
+        wiremock::Mock::given(wiremock::matchers::any())
+            .respond_with(wiremock::ResponseTemplate::new(200).set_body_string(CHAT_OK_BODY))
+            .expect(0)
+            .mount(&healthy)
+            .await;
+
+        let model_a = add_channel(&state, "a", &bad.uri(), "k", "m-400").await;
+        let model_b = add_channel(&state, "b", &healthy.uri(), "k", "m-400").await;
+        let mut group = crate::model::Group {
+            name: "m-400".into(),
+            mode: crate::model::GroupMode::Failover,
+            items: vec![
+                crate::model::GroupItem {
+                    channel_model_id: model_a.id,
+                    ..Default::default()
+                },
+                crate::model::GroupItem {
+                    channel_model_id: model_b.id,
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+        op::group::create_group(&state, &mut group).await.unwrap();
+
+        let resp = forward_relay(
+            state.clone(),
+            test_auth(),
+            ApiFormat::OpenaiCompletion,
+            None,
+            Uri::from_static("/v1/chat/completions"),
+            HeaderMap::new(),
+            chat_body("m-400").await,
+        )
+        .await;
+        assert_eq!(resp.status(), 400);
+        bad.verify().await;
+        healthy.verify().await;
         let _ = std::fs::remove_file(db_path);
     }
 }
