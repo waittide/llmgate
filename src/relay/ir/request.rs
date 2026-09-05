@@ -340,8 +340,9 @@ pub(super) fn parse_responses(val: &Value) -> Option<RelayRequest> {
         _ => Vec::new(),
     };
 
-    // 生成的 function_call 标识符映射；`call_id` 缺失时在对应 output 中复用
-    let mut call_lookup: Vec<(String, String)> = Vec::new();
+    // 生成的 call_id 栈：function_call_output 缺失 call_id 时按序回退复用
+    let mut call_lookup: Vec<String> = Vec::new();
+
     // 连续 assistant 输出项（文本 + 函数调用）聚合为单条消息
     let mut pending_assistant: Option<Message> = None;
     for item in &items {
@@ -350,7 +351,7 @@ pub(super) fn parse_responses(val: &Value) -> Option<RelayRequest> {
                 let call_id = owned_str(item.get("call_id"))
                     .or_else(|| owned_str(item.get("id")))
                     .unwrap_or_else(|| format!("call_{}", nanoid::nanoid!(20)));
-                call_lookup.push((owned_str(item.get("id")).unwrap_or_default(), call_id.clone()));
+                call_lookup.push(call_id.clone());
                 let message = pending_assistant.get_or_insert_with(|| Message {
                     role:    Role::Assistant,
                     content: Vec::new(),
@@ -367,7 +368,7 @@ pub(super) fn parse_responses(val: &Value) -> Option<RelayRequest> {
                 }
                 let call_id = owned_str(item.get("call_id"))
                     .or_else(|| owned_str(item.get("id")))
-                    .or_else(|| call_lookup.pop().map(|(_, used)| used))
+                    .or_else(|| call_lookup.pop())
                     .unwrap_or_default();
                 let content = match item.get("output") {
                     Some(Value::String(s)) => Value::String(s.clone()),

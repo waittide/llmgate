@@ -641,16 +641,29 @@ pub struct ResponsesSink {
     created_at:  i64,
     sequence:    u64,
     started:     bool,
-    /// (item_id, output_index)
-    reasoning:   Option<(String, usize)>,
-    message:     Option<(String, usize)>,
+    reasoning:   Option<OutputItem>,
+    message:     Option<OutputItem>,
     text:        String,
-    /// call_id → (item_id, name, output_index, 累积 arguments)
-    tools:       std::collections::BTreeMap<String, (String, String, usize, String)>,
+    tools:       std::collections::BTreeMap<String, PendingToolCall>,
     next_output: usize,
     usage:       Option<Usage>,
     completed:   bool,
     pending:     VecDeque<Bytes>,
+}
+
+/// 已开始的 Responses 输出项（输出索引按开始顺序从 0 分配）。
+#[derive(Clone)]
+struct OutputItem {
+    item_id:      String,
+    output_index: usize,
+}
+
+/// Responses sink 中累积中的函数调用。
+struct PendingToolCall {
+    item_id:      String,
+    name:         String,
+    output_index: usize,
+    arguments:    String,
 }
 
 impl ResponsesSink {
@@ -719,7 +732,10 @@ impl ResponsesSink {
         }
         let item_id = format!("msg_{}", nanoid::nanoid!(24));
         let output_index = self.alloc_output();
-        self.message = Some((item_id.clone(), output_index));
+        self.message = Some(OutputItem {
+            item_id: item_id.clone(),
+            output_index,
+        });
         self.push_event(
             "response.output_item.added",
             json!({
@@ -750,7 +766,10 @@ impl ResponsesSink {
         }
         let item_id = format!("rs_{}", nanoid::nanoid!(24));
         let output_index = self.alloc_output();
-        self.reasoning = Some((item_id.clone(), output_index));
+        self.reasoning = Some(OutputItem {
+            item_id: item_id.clone(),
+            output_index,
+        });
         self.push_event(
             "response.output_item.added",
             json!({
@@ -776,7 +795,7 @@ impl ResponsesSink {
         self.completed = true;
         let mut output = Vec::new();
 
-        if let Some((item_id, output_index)) = &self.reasoning {
+        if let Some(OutputItem { item_id, output_index }) = &self.reasoning {
             self.push_event(
                 "response.output_item.done",
                 json!({
@@ -786,7 +805,7 @@ impl ResponsesSink {
             );
         }
 
-        if let Some((item_id, output_index)) = self.message.clone() {
+        if let Some(OutputItem { item_id, output_index }) = self.message.clone() {
             self.push_event(
                 "response.output_text.done",
                 json!({
@@ -822,7 +841,12 @@ impl ResponsesSink {
 
         let tool_keys: Vec<String> = self.tools.keys().cloned().collect();
         for call_id in tool_keys {
-            let (item_id, name, output_index, arguments) = self.tools.remove(&call_id).expect("key exists");
+            let PendingToolCall {
+                item_id,
+                name,
+                output_index,
+                arguments,
+            } = self.tools.remove(&call_id).expect("key exists");
             self.push_event(
                 "response.function_call_arguments.done",
                 json!({
@@ -885,7 +909,7 @@ impl EventSink for ResponsesSink {
         match event {
             StreamEvent::TextDelta { text } => {
                 self.start_message();
-                let Some((item_id, output_index)) = self.message.clone() else {
+                let Some(OutputItem { item_id, output_index }) = self.message.clone() else {
                     return Vec::new();
                 };
                 self.text.push_str(text);
@@ -902,7 +926,7 @@ impl EventSink for ResponsesSink {
             }
             StreamEvent::ThinkingDelta { text } => {
                 self.start_reasoning();
-                let Some((item_id, output_index)) = self.reasoning.clone() else {
+                let Some(OutputItem { item_id, output_index }) = self.reasoning.clone() else {
                     return Vec::new();
                 };
                 self.push_event(
@@ -924,7 +948,12 @@ impl EventSink for ResponsesSink {
                 let output_index = self.alloc_output();
                 self.tools.insert(
                     call_id.clone(),
-                    (item_id.clone(), name.clone(), output_index, arguments.clone()),
+                    PendingToolCall {
+                        item_id: item_id.clone(),
+                        name: name.clone(),
+                        output_index,
+                        arguments: arguments.clone(),
+                    },
                 );
                 self.push_event(
                     "response.output_item.added",
@@ -952,7 +981,13 @@ impl EventSink for ResponsesSink {
                 }
             }
             StreamEvent::ToolCallDelta { call_id, arguments } => {
-                let Some((item_id, _, output_index, accumulated)) = self.tools.get_mut(call_id) else {
+                let Some(PendingToolCall {
+                    item_id,
+                    output_index,
+                    arguments: accumulated,
+                    ..
+                }) = self.tools.get_mut(call_id)
+                else {
                     return Vec::new();
                 };
                 accumulated.push_str(arguments);
@@ -1145,10 +1180,16 @@ impl EventSink for AnthropicSink {
 /// Google Gemini streamGenerateContent SSE 流。
 pub struct GeminiSink {
     model:     String,
-    tools:     HashMap<String, (String, String)>, // call_id → (name, arguments)
+    tools:     HashMap<String, PendingGeminiCall>,
     usage:     Option<Usage>,
     completed: bool,
     pending:   VecDeque<Bytes>,
+}
+
+/// Gemini sink 中累积中的函数调用（finish 时一次性补发完整调用）。
+struct PendingGeminiCall {
+    name:      String,
+    arguments: String,
 }
 
 impl GeminiSink {
@@ -1174,9 +1215,9 @@ impl GeminiSink {
         }
         self.completed = true;
         let mut parts = Vec::new();
-        for (name, arguments) in self.tools.values() {
-            let parsed: Value = serde_json::from_str(arguments).unwrap_or_else(|_| json!({}));
-            parts.push(json!({ "functionCall": { "name": name, "args": parsed } }));
+        for call in self.tools.values() {
+            let parsed: Value = serde_json::from_str(&call.arguments).unwrap_or_else(|_| json!({}));
+            parts.push(json!({ "functionCall": { "name": call.name, "args": parsed } }));
         }
         let (prompt_tokens, completion_tokens, total_tokens) = self
             .usage
@@ -1210,12 +1251,17 @@ impl EventSink for GeminiSink {
                 name,
                 arguments,
             } => {
-                self.tools
-                    .insert(call_id.clone(), (name.clone(), arguments.clone()));
+                self.tools.insert(
+                    call_id.clone(),
+                    PendingGeminiCall {
+                        name:      name.clone(),
+                        arguments: arguments.clone(),
+                    },
+                );
             }
             StreamEvent::ToolCallDelta { call_id, arguments } => {
-                if let Some((_, args)) = self.tools.get_mut(call_id) {
-                    args.push_str(arguments);
+                if let Some(call) = self.tools.get_mut(call_id) {
+                    call.arguments.push_str(arguments);
                 }
             }
             StreamEvent::Usage(usage) => {
