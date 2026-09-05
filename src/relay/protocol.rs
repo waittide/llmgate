@@ -50,9 +50,7 @@ pub fn rewrite_request_body_in_json(body: &[u8], new_model: &str, param_override
     body.to_vec()
 }
 
-/// 将 messages 中纯文本的 content 数组扁平化为字符串。字符串是 OpenAI 兼容
-/// API 的基础形态，部分供应商（如 MiniMax）不接受数组形式的纯文本 content，
-/// 会报"内容为空"(2013)；含多模态部分（图片等）的数组保持原样。
+/// 将 messages 中纯文本的 content 数组扁平化为字符串；含多模态部分（图片等）的数组保持原样。
 fn flatten_text_content_arrays(obj: &mut serde_json::Map<String, Value>) {
     let Some(messages) = obj.get_mut("messages").and_then(Value::as_array_mut) else {
         return;
@@ -252,8 +250,6 @@ pub fn convert_responses_to_chat_completions(val: &Value) -> Value {
                                     let ptype = part.get("type").and_then(|t| t.as_str()).unwrap_or("");
                                     match ptype {
                                         "input_text" | "text" | "output_text" => {
-                                            // 相邻文本 part 合并：多 part 输出数组会被
-                                            // 仅接受字符串 content 的供应商拒绝（如 MiniMax 2013）
                                             text.push_str(part.get("text").and_then(Value::as_str).unwrap_or(""));
                                         }
                                         "input_image" | "image_url" => {
@@ -3119,7 +3115,6 @@ mod tests {
 
     #[test]
     fn test_rewrite_flattens_text_content_arrays() {
-        // MiniMax 等供应商不接受数组形式的纯文本 content（报 2013 内容为空）
         let body = serde_json::json!({
             "model": "m",
             "messages": [
@@ -3414,7 +3409,6 @@ mod tests {
         assert_eq!(messages.len(), 3);
         assert_eq!(messages[0].get("role").unwrap(), "system");
         assert_eq!(messages[0].get("content").unwrap(), "系统提示");
-        // 多个相邻文本 part 合并为字符串（MiniMax 等供应商不接受数组 content）
         assert_eq!(messages[1].get("content").unwrap(), "part1 part2");
         let parts = messages[2].get("content").unwrap().as_array().unwrap();
         assert_eq!(parts.len(), 2);
