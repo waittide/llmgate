@@ -1679,6 +1679,9 @@ pub fn convert_gemini_to_openai_chat_request(val: &Value) -> Value {
         }
     }
 
+    // Gemini 的 functionResponse 只带函数名；记录 functionCall 生成的 call_id，
+    // 让对应 tool 消息能引用同一 id（OpenAI 上游强校验 tool_call_id 匹配）
+    let mut call_ids: std::collections::HashMap<String, String> = std::collections::HashMap::new();
     if let Some(contents) = val.get("contents").and_then(Value::as_array) {
         for content in contents {
             let role = content
@@ -1697,8 +1700,10 @@ pub fn convert_gemini_to_openai_chat_request(val: &Value) -> Value {
                         .get("args")
                         .cloned()
                         .unwrap_or_else(|| serde_json::json!({}));
+                    let call_id = format!("call_{}", nanoid::nanoid!(20));
+                    call_ids.insert(name.to_string(), call_id.clone());
                     tool_calls.push(serde_json::json!({
-                        "id": format!("call_{}", nanoid::nanoid!(20)),
+                        "id": call_id,
                         "type": "function",
                         "function": {
                             "name": name,
@@ -1706,13 +1711,46 @@ pub fn convert_gemini_to_openai_chat_request(val: &Value) -> Value {
                         }
                     }));
                 } else if let Some(resp) = part.get("functionResponse") {
-                    let call_id = format!("call_{}", nanoid::nanoid!(20));
-                    let output = resp.get("response").cloned().unwrap_or(Value::Null);
+                    let name = resp.get("name").and_then(Value::as_str).unwrap_or("");
+                    let call_id = call_ids
+                        .get(name)
+                        .cloned()
+                        .unwrap_or_else(|| format!("call_{}", nanoid::nanoid!(20)));
+                    let content = match resp.get("response") {
+                        Some(Value::String(s)) => Value::String(s.clone()),
+                        Some(other) => Value::String(serde_json::to_string(other).unwrap_or_default()),
+                        None => Value::String(String::new()),
+                    };
                     messages.push(serde_json::json!({
                         "role": "tool",
                         "tool_call_id": call_id,
-                        "content": serde_json::to_string(&output).unwrap_or_default()
+                        "content": content
                     }));
+                } else if let Some(image) = part
+                    .get("inlineData")
+                    .or_else(|| part.get("inline_data"))
+                    .or_else(|| part.get("fileData"))
+                    .or_else(|| part.get("file_data"))
+                {
+                    let url = if let Some(data) = image.get("data").and_then(Value::as_str) {
+                        format!(
+                            "data:{};base64,{}",
+                            image
+                                .get("mimeType")
+                                .and_then(Value::as_str)
+                                .unwrap_or("image/png"),
+                            data
+                        )
+                    } else {
+                        image
+                            .get("fileUri")
+                            .and_then(Value::as_str)
+                            .unwrap_or("")
+                            .to_string()
+                    };
+                    if !url.is_empty() {
+                        text_parts.push(serde_json::json!({ "type": "image_url", "image_url": { "url": url } }));
+                    }
                 }
             }
             let chat_role = if role == "model" { "assistant" } else { role };
@@ -1735,7 +1773,7 @@ pub fn convert_gemini_to_openai_chat_request(val: &Value) -> Value {
     }
     obj.insert("messages".to_string(), Value::Array(messages));
 
-    // generationConfig → temperature/top_p/max_tokens
+    // generationConfig → temperature/top_p/max_tokens 等
     if let Some(config) = val
         .get("generation_config")
         .or_else(|| val.get("generationConfig"))
@@ -1751,6 +1789,27 @@ pub fn convert_gemini_to_openai_chat_request(val: &Value) -> Value {
             .or_else(|| config.get("max_output_tokens"))
         {
             obj.insert("max_tokens".to_string(), max.clone());
+        }
+        if let Some(stop) = config
+            .get("stopSequences")
+            .or_else(|| config.get("stop_sequences"))
+        {
+            obj.insert("stop".to_string(), stop.clone());
+        }
+        if let Some(freq) = config
+            .get("frequencyPenalty")
+            .or_else(|| config.get("frequency_penalty"))
+        {
+            obj.insert("frequency_penalty".to_string(), freq.clone());
+        }
+        if let Some(pres) = config
+            .get("presencePenalty")
+            .or_else(|| config.get("presence_penalty"))
+        {
+            obj.insert("presence_penalty".to_string(), pres.clone());
+        }
+        if let Some(seed) = config.get("seed") {
+            obj.insert("seed".to_string(), seed.clone());
         }
     }
 
@@ -2989,6 +3048,65 @@ mod tests {
         assert_eq!(messages[3].get("role").unwrap(), "tool");
         assert_eq!(chat.pointer("/tools/0/function/name").unwrap(), "get_weather");
         assert_eq!(chat.get("max_tokens").unwrap(), 128);
+    }
+
+    #[test]
+    fn test_convert_gemini_tool_response_reuses_call_id_and_unwraps_string() {
+        let gemini = serde_json::json!({
+            "contents": [
+                { "role": "model", "parts": [{ "functionCall": { "name": "get_weather", "args": { "city": "Paris" } } }] },
+                { "role": "user", "parts": [{ "functionResponse": { "name": "get_weather", "response": "sunny, 24C" } }] }
+            ]
+        });
+        let chat = convert_gemini_to_openai_chat_request(&gemini);
+        let messages = chat.get("messages").unwrap().as_array().unwrap();
+        let call_id = messages[0]
+            .pointer("/tool_calls/0/id")
+            .unwrap()
+            .as_str()
+            .unwrap();
+        assert_eq!(
+            messages[1]
+                .pointer("/tool_call_id")
+                .unwrap()
+                .as_str()
+                .unwrap(),
+            call_id
+        );
+        // 字符串 response 不能被二次 JSON 编码成带引号的转义串
+        assert_eq!(messages[1].pointer("/content").unwrap(), "sunny, 24C");
+    }
+
+    #[test]
+    fn test_convert_gemini_multimodal_and_generation_config() {
+        let gemini = serde_json::json!({
+            "contents": [
+                { "role": "user", "parts": [
+                    { "text": "what is this" },
+                    { "inlineData": { "mimeType": "image/png", "data": "aGVsbG8=" } }
+                ] }
+            ],
+            "generationConfig": {
+                "stopSequences": ["END"],
+                "frequencyPenalty": 0.2,
+                "presencePenalty": 0.3,
+                "seed": 7
+            }
+        });
+        let chat = convert_gemini_to_openai_chat_request(&gemini);
+        let parts = chat
+            .pointer("/messages/0/content")
+            .unwrap()
+            .as_array()
+            .unwrap();
+        assert_eq!(
+            parts[1].pointer("/image_url/url").unwrap(),
+            "data:image/png;base64,aGVsbG8="
+        );
+        assert_eq!(chat.pointer("/stop/0").unwrap(), "END");
+        assert_eq!(chat.get("frequency_penalty").unwrap(), 0.2);
+        assert_eq!(chat.get("presence_penalty").unwrap(), 0.3);
+        assert_eq!(chat.get("seed").unwrap(), 7);
     }
 
     #[test]
