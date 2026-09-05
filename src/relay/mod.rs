@@ -102,6 +102,21 @@ pub(crate) fn sse_event_end(buf: &[u8]) -> Option<usize> {
     None
 }
 
+/// 解析单个 SSE 事件：返回 `event:` 字段（缺失为 ""）与按标准拼接的 `data:` 载荷。
+pub(crate) fn parse_sse_event(event_str: &str) -> (&str, String) {
+    let mut event_type = "";
+    let mut data_parts: Vec<&str> = Vec::new();
+    for line in event_str.lines() {
+        let trimmed = line.trim();
+        if let Some(et) = trimmed.strip_prefix("event:") {
+            event_type = et.trim();
+        } else if let Some(d) = trimmed.strip_prefix("data:") {
+            data_parts.push(d.trim());
+        }
+    }
+    (event_type, data_parts.join("\n"))
+}
+
 fn extract_usage_from_sse_buffer(buffer: &mut Vec<u8>, usage: &mut Option<Usage>) {
     while let Some(end) = sse_event_end(buffer) {
         let event_bytes = &buffer[..end];

@@ -636,20 +636,11 @@ pub struct ResponsesToChatChunkConverter {
 
 impl SseChunkConverter for ResponsesToChatChunkConverter {
     fn convert_event(&mut self, event_str: &str, model_name: &str, created: i64, chatcmpl_id: &str) -> Option<String> {
-        let mut event_type = "";
-        let mut data_str = "";
-        for line in event_str.lines() {
-            let trimmed = line.trim();
-            if let Some(et) = trimmed.strip_prefix("event:") {
-                event_type = et.trim();
-            } else if let Some(d) = trimmed.strip_prefix("data:") {
-                data_str = d.trim();
-            }
-        }
+        let (event_type, data_str) = crate::relay::parse_sse_event(event_str);
         if data_str.is_empty() {
             return None;
         }
-        let val: Value = serde_json::from_str(data_str).ok()?;
+        let val: Value = serde_json::from_str(&data_str).ok()?;
 
         let chunk_with = |delta: Value, finish: Value| -> String {
             let chunk = serde_json::json!({
@@ -1553,20 +1544,11 @@ impl AnthropicToChatChunkConverter {
 
 impl SseChunkConverter for AnthropicToChatChunkConverter {
     fn convert_event(&mut self, event_str: &str, model_name: &str, created: i64, chatcmpl_id: &str) -> Option<String> {
-        let mut event_type = "";
-        let mut data_str = "";
-        for line in event_str.lines() {
-            let trimmed = line.trim();
-            if let Some(et) = trimmed.strip_prefix("event:") {
-                event_type = et.trim();
-            } else if let Some(d) = trimmed.strip_prefix("data:") {
-                data_str = d.trim();
-            }
-        }
+        let (event_type, data_str) = crate::relay::parse_sse_event(event_str);
         if data_str.is_empty() {
             return None;
         }
-        let val: serde_json::Value = serde_json::from_str(data_str).ok()?;
+        let val: serde_json::Value = serde_json::from_str(&data_str).ok()?;
 
         let chunk_with = |delta: Value, finish: Value| -> String {
             let chunk = serde_json::json!({
@@ -2347,10 +2329,11 @@ impl GeminiToChatChunkConverter {
 
 impl SseChunkConverter for GeminiToChatChunkConverter {
     fn convert_event(&mut self, event_str: &str, model_name: &str, created: i64, chatcmpl_id: &str) -> Option<String> {
-        let data = event_str
-            .lines()
-            .find_map(|line| line.trim().strip_prefix("data:").map(str::trim))?;
-        let val: Value = serde_json::from_str(data).ok()?;
+        let (_, data) = crate::relay::parse_sse_event(event_str);
+        if data.is_empty() {
+            return None;
+        }
+        let val: Value = serde_json::from_str(&data).ok()?;
         let candidate = val.pointer("/candidates/0")?;
         let parts = candidate
             .pointer("/content/parts")

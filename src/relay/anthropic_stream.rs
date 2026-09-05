@@ -225,19 +225,13 @@ impl<S> OpenaiToAnthropicStream<S> {
     }
 
     fn handle_event(&mut self, event: &str) {
-        let event_type = event
-            .lines()
-            .find_map(|line| line.trim().strip_prefix("event:").map(str::trim))
-            .unwrap_or("");
-        let data = event
-            .lines()
-            .find_map(|line| line.trim().strip_prefix("data:").map(str::trim));
-        let Some(data) = data else {
+        let (event_type, data) = crate::relay::parse_sse_event(event);
+        if data.is_empty() {
             return;
-        };
+        }
         match self.format {
-            OpenaiStreamFormat::ChatCompletions => self.handle_chat(data),
-            OpenaiStreamFormat::Responses => self.handle_responses(event_type, data),
+            OpenaiStreamFormat::ChatCompletions => self.handle_chat(&data),
+            OpenaiStreamFormat::Responses => self.handle_responses(event_type, &data),
         }
     }
 
