@@ -217,33 +217,41 @@ pub fn convert_responses_to_chat_completions(val: &Value) -> Value {
                         let content_val = match item.get("content") {
                             Some(Value::Array(parts)) => {
                                 let mut converted_parts = Vec::new();
+                                let mut text = String::new();
+                                let mut text_only = true;
                                 for part in parts {
                                     let ptype = part.get("type").and_then(|t| t.as_str()).unwrap_or("");
-                                    if ptype == "input_text" || ptype == "text" || ptype == "output_text" {
-                                        if let Some(text) = part.get("text") {
-                                            converted_parts.push(serde_json::json!({
-                                                "type": "text",
-                                                "text": text
-                                            }));
+                                    match ptype {
+                                        "input_text" | "text" | "output_text" => {
+                                            // 相邻文本 part 合并：多 part 输出数组会被
+                                            // 仅接受字符串 content 的供应商拒绝（如 MiniMax 2013）
+                                            text.push_str(part.get("text").and_then(Value::as_str).unwrap_or(""));
                                         }
-                                    } else if (ptype == "input_image" || ptype == "image_url")
-                                        && let Some(url) = part.get("image_url")
-                                    {
-                                        converted_parts.push(serde_json::json!({
-                                            "type": "image_url",
-                                            "image_url": url
-                                        }));
+                                        "input_image" | "image_url" => {
+                                            text_only = false;
+                                            if let Some(url) = part.get("image_url") {
+                                                converted_parts.push(serde_json::json!({
+                                                    "type": "image_url",
+                                                    "image_url": url
+                                                }));
+                                            }
+                                        }
+                                        _ => {
+                                            // 未知 part 类型原样保留，避免内容静默丢失
+                                            text_only = false;
+                                            converted_parts.push(part.clone());
+                                        }
                                     }
                                 }
-                                if converted_parts.len() == 1
-                                    && converted_parts[0].get("type").and_then(|t| t.as_str()) == Some("text")
-                                {
-                                    converted_parts[0]
-                                        .get("text")
-                                        .cloned()
-                                        .unwrap_or(Value::Array(converted_parts))
+                                if text_only {
+                                    Value::String(text)
                                 } else {
-                                    Value::Array(converted_parts)
+                                    let mut merged = Vec::new();
+                                    if !text.is_empty() {
+                                        merged.push(serde_json::json!({ "type": "text", "text": text }));
+                                    }
+                                    merged.extend(converted_parts);
+                                    Value::Array(merged)
                                 }
                             }
                             Some(other) => other.clone(),
@@ -289,6 +297,14 @@ pub fn convert_responses_to_chat_completions(val: &Value) -> Value {
         if let Some(assistant) = current_assistant.take() {
             messages.push(Value::Object(assistant));
         }
+        // instructions 是 Responses 请求的顶层系统提示，转换为首条 system 消息
+        if let Some(instructions) = obj.get("instructions").and_then(Value::as_str) {
+            let instructions = instructions.trim();
+            if !instructions.is_empty() {
+                messages.insert(0, serde_json::json!({ "role": "system", "content": instructions }));
+            }
+        }
+        obj.remove("instructions");
         obj.insert("messages".to_string(), Value::Array(messages));
     }
 
@@ -2357,5 +2373,35 @@ mod tests {
         assert!((cost - expected).abs() < 1e-12);
         // 无价目时恒为 0
         assert_eq!(calculate_cost(115, 7, 100, 5, None), 0.0);
+    }
+
+    #[test]
+    fn test_convert_responses_merges_text_parts_and_instructions() {
+        let responses_req = serde_json::json!({
+            "model": "m",
+            "instructions": "系统提示",
+            "input": [
+                { "type": "message", "role": "user", "content": [
+                    { "type": "input_text", "text": "part1 " },
+                    { "type": "input_text", "text": "part2" }
+                ]},
+                { "type": "message", "role": "user", "content": [
+                    { "type": "input_text", "text": "看图" },
+                    { "type": "input_image", "image_url": "https://x/y.png" }
+                ]}
+            ]
+        });
+        let chat = convert_responses_to_chat_completions(&responses_req);
+        let messages = chat.get("messages").unwrap().as_array().unwrap();
+        assert_eq!(messages.len(), 3);
+        assert_eq!(messages[0].get("role").unwrap(), "system");
+        assert_eq!(messages[0].get("content").unwrap(), "系统提示");
+        // 多个相邻文本 part 合并为字符串（MiniMax 等供应商不接受数组 content）
+        assert_eq!(messages[1].get("content").unwrap(), "part1 part2");
+        let parts = messages[2].get("content").unwrap().as_array().unwrap();
+        assert_eq!(parts.len(), 2);
+        assert_eq!(parts[0].pointer("/text").unwrap(), "看图");
+        // instructions 已消费，不再残留于转发体
+        assert!(chat.get("instructions").is_none());
     }
 }
