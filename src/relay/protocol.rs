@@ -66,7 +66,9 @@ fn flatten_text_content_arrays(obj: &mut serde_json::Map<String, Value>) {
         let mut all_text = true;
         for part in parts {
             match part.get("type").and_then(Value::as_str) {
-                Some("text") | Some("input_text") | Some("output_text") => {
+                // 带 cache_control 的块承载提示缓存断点，扁平化会将其丢弃导致缓存失效，
+                // 与多模态块一样保持数组原样
+                Some("text") | Some("input_text") | Some("output_text") if part.get("cache_control").is_none() => {
                     text.push_str(part.get("text").and_then(Value::as_str).unwrap_or(""));
                 }
                 _ => {
@@ -3525,6 +3527,25 @@ mod tests {
         assert_eq!(messages[1].get("content").unwrap(), "part1 part2");
         assert!(messages[2].get("content").unwrap().is_array());
         assert_eq!(val.get("model").unwrap(), "m2");
+    }
+
+    #[test]
+    fn test_rewrite_keeps_cache_control_arrays() {
+        // 带 cache_control 的文本块承载缓存断点，不能被扁平化丢弃
+        let body = serde_json::json!({
+            "model": "m",
+            "messages": [
+                { "role": "user", "content": [
+                    { "type": "text", "text": "缓存块", "cache_control": { "type": "ephemeral" } }
+                ]}
+            ]
+        });
+        let out = rewrite_request_body_in_json(&serde_json::to_vec(&body).unwrap(), "m2", None);
+        let val: Value = serde_json::from_slice(&out).unwrap();
+        let content = val.pointer("/messages/0/content").unwrap();
+        assert!(content.is_array());
+        assert_eq!(content.pointer("/0/text").unwrap(), "缓存块");
+        assert!(content.pointer("/0/cache_control/type").is_some());
     }
     #[test]
     fn test_convert_anthropic_to_openai_chat_response_tool_calls() {
