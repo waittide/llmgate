@@ -657,6 +657,18 @@ pub fn convert_openai_chat_to_responses_response(val: &Value, model_name: &str) 
         .and_then(Value::as_str)
         .unwrap_or("");
     let mut output = Vec::new();
+    // reasoning_content（思考链）转为 reasoning 输出项，保留给支持该形态的客户端
+    if let Some(reasoning) = message
+        .and_then(|message| message.get("reasoning_content"))
+        .and_then(Value::as_str)
+        .filter(|reasoning| !reasoning.is_empty())
+    {
+        output.push(serde_json::json!({
+            "id": format!("rs_{}", nanoid::nanoid!(24)),
+            "type": "reasoning",
+            "summary": [{ "type": "summary_text", "text": reasoning }]
+        }));
+    }
     if !text.is_empty() {
         output.push(serde_json::json!({
             "id": format!("msg_{}", nanoid::nanoid!(24)),
@@ -725,6 +737,14 @@ pub fn convert_openai_chat_to_anthropic_response(val: &Value, model_name: &str) 
     let choice = val.pointer("/choices/0");
     let message = choice.and_then(|choice| choice.get("message"));
     let mut content = Vec::new();
+    // 思考链（reasoning_content）转为 Anthropic thinking 块；其余场景保持原语义
+    if let Some(reasoning) = message
+        .and_then(|message| message.get("reasoning_content"))
+        .and_then(Value::as_str)
+        .filter(|reasoning| !reasoning.is_empty())
+    {
+        content.push(serde_json::json!({ "type": "thinking", "thinking": reasoning }));
+    }
     if let Some(text) = message
         .and_then(|message| message.get("content"))
         .and_then(Value::as_str)
@@ -749,6 +769,10 @@ pub fn convert_openai_chat_to_anthropic_response(val: &Value, model_name: &str) 
                 "input": arguments
             }));
         }
+    }
+    // Anthropic SDK 要求助手 content 至少含一个块；全空时补空文本块兜底
+    if content.is_empty() {
+        content.push(serde_json::json!({ "type": "text", "text": "" }));
     }
     let input_tokens = val
         .pointer("/usage/prompt_tokens")
@@ -776,6 +800,18 @@ pub fn convert_responses_to_anthropic_response(val: &Value, model_name: &str) ->
     if let Some(output) = val.get("output").and_then(Value::as_array) {
         for item in output {
             match item.get("type").and_then(Value::as_str) {
+                Some("reasoning") => {
+                    // Responses 的 reasoning 输出项摘要保留为 Anthropic thinking 块
+                    if let Some(summary) = item.get("summary").and_then(Value::as_array) {
+                        let text: String = summary
+                            .iter()
+                            .filter_map(|part| part.get("text").and_then(Value::as_str))
+                            .collect();
+                        if !text.is_empty() {
+                            content.push(serde_json::json!({ "type": "thinking", "thinking": text }));
+                        }
+                    }
+                }
                 Some("message") => {
                     if let Some(parts) = item.get("content").and_then(Value::as_array) {
                         for part in parts {
@@ -1267,6 +1303,7 @@ fn anthropic_to_openai_finish_reason(reason: Option<&str>) -> &str {
 /// 将非流式 Anthropic message 响应转换为 OpenAI Chat Completion 响应。
 pub fn convert_anthropic_to_openai_chat_response(val: &Value, model_name: &str) -> Value {
     let mut text_parts = Vec::new();
+    let mut thinking_parts = Vec::new();
     let mut tool_calls = Vec::new();
 
     if let Some(arr) = val.get("content").and_then(|c| c.as_array()) {
@@ -1275,6 +1312,12 @@ pub fn convert_anthropic_to_openai_chat_response(val: &Value, model_name: &str) 
                 Some("text") => {
                     if let Some(t) = item.get("text").and_then(|t| t.as_str()) {
                         text_parts.push(t);
+                    }
+                }
+                Some("thinking") => {
+                    // 扩展思考块转为 reasoning_content（社区事实标准），不再静默丢弃
+                    if let Some(t) = item.get("thinking").and_then(|t| t.as_str()) {
+                        thinking_parts.push(t);
                     }
                 }
                 Some("tool_use") => {
@@ -1296,6 +1339,7 @@ pub fn convert_anthropic_to_openai_chat_response(val: &Value, model_name: &str) 
         }
     }
     let text = text_parts.join("");
+    let thinking = thinking_parts.join("");
 
     let prompt_tokens = val
         .pointer("/usage/input_tokens")
@@ -1317,6 +1361,9 @@ pub fn convert_anthropic_to_openai_chat_response(val: &Value, model_name: &str) 
         "role": "assistant",
         "content": if text.is_empty() && !tool_calls.is_empty() { Value::Null } else { Value::String(text) }
     });
+    if !thinking.is_empty() {
+        message["reasoning_content"] = Value::String(thinking);
+    }
     if !tool_calls.is_empty() {
         message["tool_calls"] = Value::Array(tool_calls);
     }
@@ -2766,6 +2813,88 @@ mod tests {
                 .unwrap(),
             "get_weather"
         );
+    }
+
+    #[test]
+    fn test_convert_anthropic_thinking_to_reasoning_content() {
+        let anthropic_resp = serde_json::json!({
+            "id": "msg_t",
+            "type": "message",
+            "role": "assistant",
+            "content": [
+                { "type": "thinking", "thinking": "深入思考中" },
+                { "type": "text", "text": "答案" }
+            ],
+            "model": "claude-4.5",
+            "stop_reason": "end_turn",
+            "usage": { "input_tokens": 5, "output_tokens": 6 }
+        });
+        let openai = convert_anthropic_to_openai_chat_response(&anthropic_resp, "claude-4.5");
+        assert_eq!(
+            openai
+                .pointer("/choices/0/message/reasoning_content")
+                .unwrap(),
+            "深入思考中"
+        );
+        assert_eq!(openai.pointer("/choices/0/message/content").unwrap(), "答案");
+    }
+
+    #[test]
+    fn test_convert_chat_to_anthropic_preserves_reasoning_and_empty_content() {
+        // reasoning_content 转为 thinking 块，且 content 不为空数组
+        let chat = serde_json::json!({
+            "choices": [{
+                "index": 0,
+                "message": { "role": "assistant", "content": "", "reasoning_content": "推理过程" },
+                "finish_reason": "stop"
+            }],
+            "usage": { "prompt_tokens": 1, "completion_tokens": 2 }
+        });
+        let anthropic = convert_openai_chat_to_anthropic_response(&chat, "m");
+        assert_eq!(anthropic.pointer("/content/0/type").unwrap(), "thinking");
+        assert_eq!(anthropic.pointer("/content/0/thinking").unwrap(), "推理过程");
+
+        // 全空响应兜底：content 至少含一个空文本块，不产生空数组
+        let chat_empty = serde_json::json!({
+            "choices": [{ "index": 0, "message": { "role": "assistant", "content": "" }, "finish_reason": "stop" }],
+            "usage": { "prompt_tokens": 0, "completion_tokens": 0 }
+        });
+        let anthropic = convert_openai_chat_to_anthropic_response(&chat_empty, "m");
+        let content = anthropic.get("content").unwrap().as_array().unwrap();
+        assert!(!content.is_empty());
+    }
+
+    #[test]
+    fn test_convert_responses_to_anthropic_preserves_reasoning_summary() {
+        let resp = serde_json::json!({
+            "output": [
+                { "id": "rs_1", "type": "reasoning", "summary": [{ "type": "summary_text", "text": "摘要思考" }] },
+                { "id": "msg_1", "type": "message", "role": "assistant",
+                  "content": [{ "type": "output_text", "text": "正文" }] }
+            ],
+            "usage": { "input_tokens": 3, "output_tokens": 4 }
+        });
+        let anthropic = convert_responses_to_anthropic_response(&resp, "m");
+        assert_eq!(anthropic.pointer("/content/0/type").unwrap(), "thinking");
+        assert_eq!(anthropic.pointer("/content/0/thinking").unwrap(), "摘要思考");
+        assert_eq!(anthropic.pointer("/content/1/type").unwrap(), "text");
+    }
+
+    #[test]
+    fn test_convert_chat_to_responses_preserves_reasoning() {
+        let chat = serde_json::json!({
+            "choices": [{
+                "index": 0,
+                "message": { "role": "assistant", "content": "答案", "reasoning_content": "思考" },
+                "finish_reason": "stop"
+            }],
+            "usage": { "prompt_tokens": 1, "completion_tokens": 2, "total_tokens": 3 }
+        });
+        let resp = convert_openai_chat_to_responses_response(&chat, "m");
+        let output = resp.get("output").unwrap().as_array().unwrap();
+        assert_eq!(output[0].get("type").unwrap(), "reasoning");
+        assert_eq!(output[0].pointer("/summary/0/text").unwrap(), "思考");
+        assert_eq!(output[1].get("type").unwrap(), "message");
     }
 
     #[test]
