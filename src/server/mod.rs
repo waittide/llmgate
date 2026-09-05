@@ -89,11 +89,13 @@ pub fn build_router(state: AppState) -> Router {
     // 3. 公开管理员 API 路由（用户登录）
     let public_api_router = Router::new().route("/user/login", post(user::login));
 
-    // 4. 合并 /api/v1 路由
+    // 4. 合并 /api/v1 路由（trace 仅挂管理 API：终端保留后台请求记录；
+    //    /v1 中继的请求与错误详情已完整写入请求日志页，不再输出到终端）
     let api_v1 = Router::new()
         .merge(public_api_router)
         .merge(admin_router)
-        .merge(apikey_dashboard_router);
+        .merge(apikey_dashboard_router)
+        .layer(TraceLayer::new_for_http());
 
     // 5. 客户端模型代理中继路由 /v1（受 api_key_auth_middleware 保护）
     let client_v1 = Router::new()
@@ -145,6 +147,5 @@ pub fn build_router(state: AppState) -> Router {
         .layer(DefaultBodyLimit::max(64 * 1024 * 1024))
         .layer(cors)
         .layer(CompressionLayer::new())
-        .layer(TraceLayer::new_for_http())
         .with_state(state)
 }

@@ -511,17 +511,11 @@ fn record_round_failure(
         error:            Some(fail.err_body.to_string()),
     };
     rounds.push(round_log.clone());
+    // 客户端错误不触发冷却；该轮连同错误详情已记录在请求日志中，不再输出到终端
     if fail.should_cooldown {
         state
             .route_manager
             .report_failure(group_id, item_id, cooldown_seconds);
-    } else {
-        tracing::warn!(
-            "渠道 {} 返回客户端错误 {}，不触发冷却: {}",
-            fail.status,
-            fail.channel_name,
-            fail.err_body
-        );
     }
 
     state.in_flight.broadcast(RequestOverview {
