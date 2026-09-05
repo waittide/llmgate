@@ -52,7 +52,7 @@ impl<S> OpenaiToGeminiStream<S> {
 
     fn handle_data(&mut self, data: &str) {
         if data == "[DONE]" {
-            self.complete(None);
+            self.complete();
             return;
         }
         let Ok(value) = serde_json::from_str::<Value>(data) else {
@@ -86,37 +86,24 @@ impl<S> OpenaiToGeminiStream<S> {
             }
         }
 
-        let finished = choice
-            .get("finish_reason")
-            .is_some_and(|reason| !reason.is_null());
-        if finished {
-            for tool in self.tools.values() {
-                let parsed: Value = serde_json::from_str(&tool.arguments).unwrap_or_else(|_| json!({}));
-                parts.push(json!({ "functionCall": { "name": tool.name, "args": parsed } }));
-            }
+        let finish_reason = choice.get("finish_reason").and_then(Value::as_str);
+        if finish_reason.is_some() {
+            let mapped = finish_reason
+                .map(gemini_stream_finish_reason)
+                .unwrap_or("STOP");
+            let text = delta.get("content").and_then(Value::as_str).unwrap_or("");
+            self.emit_final(mapped, text);
+            return;
         }
 
-        let finish_reason = if finished {
-            Value::String(
-                match choice.get("finish_reason").and_then(Value::as_str) {
-                    Some("length") => "MAX_TOKENS",
-                    Some("content_filter") => "SAFETY",
-                    _ => "STOP",
-                }
-                .to_string(),
-            )
-        } else {
-            Value::Null
-        };
-
         let usage = self.usage.clone();
-        if parts.is_empty() && !finished && usage.is_none() {
+        if parts.is_empty() && usage.is_none() {
             return;
         }
         let mut chunk = json!({
             "candidates": [{
                 "content": { "role": "model", "parts": parts },
-                "finishReason": finish_reason
+                "finishReason": Value::Null
             }]
         });
         if let Some(usage) = usage {
@@ -126,20 +113,23 @@ impl<S> OpenaiToGeminiStream<S> {
                 "totalTokenCount": usage.total_tokens
             });
         }
+        self.push(chunk);
     }
 
-    fn complete(&mut self, finish_reason: Option<&str>) {
+    /// 发射终止 chunk（补发累积的完整 functionCall 与真实用量）；completed 防止重复发射。
+    fn emit_final(&mut self, finish_reason: &str, text: &str) {
         if self.completed {
             return;
         }
         self.completed = true;
-        // 若上游未发 finish_reason（如直接 [DONE]），补发累积的工具调用与终止事件
         let mut parts = Vec::new();
+        if !text.is_empty() {
+            parts.push(json!({ "text": text }));
+        }
         for tool in self.tools.values() {
             let parsed: Value = serde_json::from_str(&tool.arguments).unwrap_or_else(|_| json!({}));
             parts.push(json!({ "functionCall": { "name": tool.name, "args": parsed } }));
         }
-        let _ = finish_reason;
         let (prompt_tokens, completion_tokens, total_tokens) = self
             .usage
             .as_ref()
@@ -148,7 +138,7 @@ impl<S> OpenaiToGeminiStream<S> {
         self.push(json!({
             "candidates": [{
                 "content": { "role": "model", "parts": parts },
-                "finishReason": "STOP"
+                "finishReason": finish_reason
             }],
             "usageMetadata": {
                 "promptTokenCount": prompt_tokens,
@@ -156,6 +146,20 @@ impl<S> OpenaiToGeminiStream<S> {
                 "totalTokenCount": total_tokens
             }
         }));
+    }
+
+    fn complete(&mut self) {
+        // 上游未发 finish_reason（如直接 [DONE]）时按正常结束补发终止 chunk
+        self.emit_final("STOP", "");
+    }
+}
+
+/// OpenAI finish_reason → Gemini finishReason。
+fn gemini_stream_finish_reason(reason: &str) -> &str {
+    match reason {
+        "length" => "MAX_TOKENS",
+        "content_filter" => "SAFETY",
+        _ => "STOP",
     }
 }
 
@@ -192,7 +196,7 @@ where
             }
             Poll::Ready(Some(Err(error))) => Poll::Ready(Some(Err(error))),
             Poll::Ready(None) => {
-                this.complete(None);
+                this.complete();
                 this.pending
                     .pop_front()
                     .map(|chunk| Poll::Ready(Some(Ok(chunk))))
@@ -232,9 +236,69 @@ mod tests {
                 output
             });
 
-        eprintln!("OUT1: {}", output.replace('\n', "|"));
         assert!(output.contains("\"functionCall\":{\"args\":{\"x\":1},\"name\":\"calc\"}"));
         assert!(output.contains("\"finishReason\":\"STOP\""));
         assert!(output.contains("\"promptTokenCount\":3"));
+    }
+
+    #[tokio::test]
+    async fn emits_single_final_chunk_without_duplicates() {
+        let chunks = vec![
+            Ok(Bytes::from_static(
+                b"data: {\"choices\":[{\"delta\":{\"content\":\"Hi\"},\"finish_reason\":null}]}\n\n",
+            )),
+            Ok(Bytes::from_static(
+                b"data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"name\":\"calc\",\"arguments\":\"{\\\"x\\\":1}\"}}]},\"finish_reason\":\"tool_calls\"}]}\n\ndata: [DONE]\n\n",
+            )),
+        ];
+        let output = OpenaiToGeminiStream::new(stream::iter(chunks), "gemini-test".to_string())
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .map(Result::unwrap)
+            .fold(String::new(), |mut output, chunk| {
+                output.push_str(&String::from_utf8_lossy(&chunk));
+                output
+            });
+        // 终止块只发射一次，functionCall 不重复
+        assert_eq!(output.matches("\"finishReason\":\"STOP\"").count(), 1);
+        assert_eq!(output.matches("\"functionCall\"").count(), 1);
+    }
+
+    #[tokio::test]
+    async fn maps_length_finish_reason_at_done() {
+        let chunks = vec![
+            Ok(Bytes::from_static(
+                b"data: {\"choices\":[{\"delta\":{\"content\":\"Hi\"}}]}\n\n",
+            )),
+            Ok(Bytes::from_static(b"data: [DONE]\n\n")),
+        ];
+        let output = OpenaiToGeminiStream::new(stream::iter(chunks), "gemini-test".to_string())
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .map(Result::unwrap)
+            .fold(String::new(), |mut output, chunk| {
+                output.push_str(&String::from_utf8_lossy(&chunk));
+                output
+            });
+        assert!(output.contains("\"finishReason\":\"STOP\""));
+    }
+
+    #[tokio::test]
+    async fn maps_length_to_max_tokens() {
+        let chunks = vec![Ok(Bytes::from_static(
+            b"data: {\"choices\":[{\"delta\":{\"content\":\"Hi\"},\"finish_reason\":\"length\"}]}\n\n",
+        ))];
+        let output = OpenaiToGeminiStream::new(stream::iter(chunks), "gemini-test".to_string())
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .map(Result::unwrap)
+            .fold(String::new(), |mut output, chunk| {
+                output.push_str(&String::from_utf8_lossy(&chunk));
+                output
+            });
+        assert!(output.contains("\"finishReason\":\"MAX_TOKENS\""));
     }
 }
