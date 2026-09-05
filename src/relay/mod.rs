@@ -1,10 +1,7 @@
-pub mod anthropic_stream;
-pub mod gemini_stream;
 pub mod ir;
 pub mod protocol;
 pub mod route;
 pub mod state;
-pub mod stream;
 pub mod upstream;
 use std::{
     collections::HashSet,
@@ -27,14 +24,11 @@ use crate::{
     model::{Channel, ChannelModel, ChannelProvider, Group, ModelPrice, RequestLog, StatsMetrics, request_status},
     op::{AppState, channel, group, log, model, stats},
     relay::{
-        anthropic_stream::{OpenaiStreamFormat, OpenaiToAnthropicStream},
-        gemini_stream::OpenaiToGeminiStream,
         protocol::{
             ApiFormat, calculate_cost, calculate_input_cost, extract_usage_from_json, parse_request_metadata,
             rewrite_request_body_in_json,
         },
         state::{RequestOverview, Usage, millis_to_rfc3339},
-        stream::{ChatCompletionsToResponsesStream, ProviderToOpenaiStream},
         upstream::{build_upstream_request, get_client, normalize_base_url},
     },
     server::{middleware::AuthContext, resp::error},
@@ -598,60 +592,12 @@ fn handle_successful_stream(state: &AppState, upstream_resp: reqwest::Response, 
 
     let prompt_tokens = estimate_tokens(ctx.body_str);
 
-    let output_stream = match ctx.channel.channel_type {
-        ChannelProvider::Anthropic => {
-            if ctx.format != ApiFormat::AnthropicMessage {
-                ProviderToOpenaiStream::new(
-                    mapped_stream,
-                    ctx.log_base.model.clone(),
-                    protocol::AnthropicToChatChunkConverter::default(),
-                )
-                .boxed()
-            } else {
-                mapped_stream.boxed()
-            }
-        }
-        ChannelProvider::Gemini => {
-            if ctx.format == ApiFormat::GeminiGenerate {
-                mapped_stream.boxed()
-            } else {
-                ProviderToOpenaiStream::new(
-                    mapped_stream,
-                    ctx.log_base.model.clone(),
-                    protocol::GeminiToChatChunkConverter::default(),
-                )
-                .boxed()
-            }
-        }
-        ChannelProvider::OpenaiResponses => {
-            if ctx.format == ApiFormat::OpenaiCompletion {
-                ProviderToOpenaiStream::new(
-                    mapped_stream,
-                    ctx.log_base.model.clone(),
-                    protocol::ResponsesToChatChunkConverter::default(),
-                )
-                .boxed()
-            } else {
-                mapped_stream.boxed()
-            }
-        }
-        ChannelProvider::OpenaiCompletion => mapped_stream.boxed(),
-    };
-    let output_stream = if ctx.format == ApiFormat::AnthropicMessage
-        && ctx.channel.channel_type != ChannelProvider::Anthropic
-    {
-        let source_format = if ctx.channel.channel_type == ChannelProvider::OpenaiResponses {
-            OpenaiStreamFormat::Responses
-        } else {
-            OpenaiStreamFormat::ChatCompletions
-        };
-        OpenaiToAnthropicStream::new(output_stream, ctx.log_base.model.clone(), source_format).boxed()
-    } else if ctx.format == ApiFormat::OpenaiResponse && ctx.channel.channel_type != ChannelProvider::OpenaiResponses {
-        ChatCompletionsToResponsesStream::new(output_stream, ctx.log_base.model.clone()).boxed()
-    } else if ctx.format == ApiFormat::GeminiGenerate && ctx.channel.channel_type != ChannelProvider::Gemini {
-        OpenaiToGeminiStream::new(output_stream, ctx.log_base.model.clone()).boxed()
+    // 跨格式：上游 SSE → IR 事件 → 客户端 SSE；同格式直通
+    let upstream_format = ir::channel_format(&ctx.channel.channel_type);
+    let output_stream = if ctx.format == upstream_format {
+        mapped_stream.boxed()
     } else {
-        output_stream
+        ir::streaming::translate(mapped_stream, upstream_format, ctx.format, ctx.log_base.model.clone())
     };
     let finalizer = StreamFinalizer {
         inner: output_stream,

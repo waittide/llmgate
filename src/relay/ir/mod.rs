@@ -8,6 +8,7 @@ use serde_json::Value;
 
 pub mod request;
 pub mod response;
+pub mod streaming;
 use crate::{
     model::ChannelProvider,
     relay::{protocol::ApiFormat, state::Usage},
