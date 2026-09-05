@@ -473,14 +473,19 @@ pub fn convert_responses_result_to_chat_response(val: &Value, model_name: &str) 
         for item in output {
             match item.get("type").and_then(Value::as_str) {
                 Some("message") => {
-                    if let Some(parts) = item.get("content").and_then(Value::as_array) {
-                        for part in parts {
-                            if part.get("type").and_then(Value::as_str) == Some("output_text")
-                                && let Some(text) = part.get("text").and_then(Value::as_str)
-                            {
-                                content.push_str(text);
+                    // content 兼容字符串与 part 数组两种形态
+                    match item.get("content") {
+                        Some(Value::String(text)) => content.push_str(text),
+                        Some(Value::Array(parts)) => {
+                            for part in parts {
+                                if part.get("type").and_then(Value::as_str) == Some("output_text")
+                                    && let Some(text) = part.get("text").and_then(Value::as_str)
+                                {
+                                    content.push_str(text);
+                                }
                             }
                         }
+                        _ => {}
                     }
                 }
                 Some("function_call") => {
@@ -508,7 +513,14 @@ pub fn convert_responses_result_to_chat_response(val: &Value, model_name: &str) 
             "tool_calls": tool_calls
         })
     };
-    let finish_reason = if tool_calls.is_empty() { "stop" } else { "tool_calls" };
+    // finish_reason 精细映射：截断状态优先于工具调用与正常停止
+    let finish_reason = if val.get("status").and_then(Value::as_str) == Some("incomplete") {
+        "length"
+    } else if tool_calls.is_empty() {
+        "stop"
+    } else {
+        "tool_calls"
+    };
     let id = val
         .get("id")
         .and_then(Value::as_str)
@@ -706,16 +718,25 @@ pub fn convert_openai_chat_to_responses_response(val: &Value, model_name: &str) 
         .pointer("/usage/total_tokens")
         .and_then(Value::as_i64)
         .unwrap_or(input_tokens + output_tokens);
+    let truncated = choice
+        .and_then(|choice| choice.get("finish_reason"))
+        .and_then(Value::as_str)
+        .is_some_and(|reason| reason == "length");
+    let (status, incomplete_details) = if truncated {
+        ("incomplete", serde_json::json!({ "reason": "max_output_tokens" }))
+    } else {
+        ("completed", Value::Null)
+    };
     serde_json::json!({
         "id": format!("resp_{}", nanoid::nanoid!(24)),
         "object": "response",
         "created_at": chrono::Utc::now().timestamp(),
         "completed_at": chrono::Utc::now().timestamp(),
-        "status": "completed",
+        "status": status,
         "model": model_name,
         "output": output,
         "error": null,
-        "incomplete_details": null,
+        "incomplete_details": incomplete_details,
         "usage": {
             "input_tokens": input_tokens,
             "output_tokens": output_tokens,
@@ -1824,6 +1845,10 @@ fn gemini_finish_reason(reason: &str) -> &str {
     match reason {
         "MAX_TOKENS" => "length",
         "STOP" => "stop",
+        // 安全过滤 / 违禁词 / 复述拦截等阻断场景标记为 content_filter，
+        // 让客户端能区分正常结束与内容被拦截
+        "SAFETY" | "BLOCKLIST" | "PROHIBITED_CONTENT" | "SPII" | "RECITATION" => "content_filter",
+        "MALFORMED_FUNCTION_CALL" => "stop",
         _ => "stop",
     }
 }
@@ -2731,6 +2756,57 @@ mod tests {
         assert_eq!(choice.pointer("/message/content").unwrap(), "答案");
         assert_eq!(choice.get("finish_reason").unwrap(), "stop");
         assert_eq!(chat.pointer("/usage/prompt_tokens").unwrap(), 8);
+    }
+
+    #[test]
+    fn test_convert_responses_result_string_content_and_incomplete() {
+        // content 为字符串形态时同样提取文本
+        let string_content = serde_json::json!({
+            "id": "resp_2",
+            "status": "completed",
+            "output": [ { "type": "message", "role": "assistant", "content": "直接文本" } ],
+            "usage": { "input_tokens": 1, "output_tokens": 1, "total_tokens": 2 }
+        });
+        let chat = convert_responses_result_to_chat_response(&string_content, "m");
+        assert_eq!(chat.pointer("/choices/0/message/content").unwrap(), "直接文本");
+
+        // status=incomplete（token 截断）映射为 finish_reason=length
+        let truncated = serde_json::json!({
+            "id": "resp_3",
+            "status": "incomplete",
+            "incomplete_details": { "reason": "max_output_tokens" },
+            "output": [],
+            "usage": { "input_tokens": 1, "output_tokens": 0, "total_tokens": 1 }
+        });
+        let chat = convert_responses_result_to_chat_response(&truncated, "m");
+        assert_eq!(chat.pointer("/choices/0/finish_reason").unwrap(), "length");
+    }
+
+    #[test]
+    fn test_convert_chat_to_responses_incomplete_status() {
+        let chat = serde_json::json!({
+            "choices": [{
+                "index": 0,
+                "message": { "role": "assistant", "content": "被截断" },
+                "finish_reason": "length"
+            }],
+            "usage": { "prompt_tokens": 5, "completion_tokens": 6, "total_tokens": 11 }
+        });
+        let resp = convert_openai_chat_to_responses_response(&chat, "m");
+        assert_eq!(resp.get("status").unwrap(), "incomplete");
+        assert_eq!(resp.pointer("/incomplete_details/reason").unwrap(), "max_output_tokens");
+    }
+
+    #[test]
+    fn test_gemini_finish_reason_content_filter() {
+        let gemini = serde_json::json!({
+            "candidates": [{
+                "content": { "role": "model", "parts": [] },
+                "finishReason": "SAFETY"
+            }]
+        });
+        let openai = convert_gemini_to_openai_chat_response(&gemini, "gemini-2.5-pro");
+        assert_eq!(openai.pointer("/choices/0/finish_reason").unwrap(), "content_filter");
     }
 
     #[test]
