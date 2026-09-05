@@ -91,14 +91,14 @@ pub fn build_router(state: AppState) -> Router {
 
     // 4. 合并 /api/v1 路由（trace 仅挂管理 API：终端保留后台请求记录；
     //    /v1 中继的请求与错误详情已完整写入请求日志页，不再输出到终端）
-    let api_v1 = Router::new()
+    let api = Router::new()
         .merge(public_api_router)
         .merge(admin_router)
         .merge(apikey_dashboard_router)
         .layer(TraceLayer::new_for_http());
 
     // 5. 客户端模型代理中继路由 /v1（受 api_key_auth_middleware 保护）
-    let client_v1 = Router::new()
+    let client = Router::new()
         .route("/models", get(model::get_model_list))
         .route("/chat/completions", post(relay::chat_completions))
         .route("/responses", post(relay::responses))
@@ -148,8 +148,8 @@ pub fn build_router(state: AppState) -> Router {
 
     // 7. 根路由，静态前端 SPA 单页文件回退
     Router::new()
-        .nest("/api/v1", api_v1)
-        .nest("/v1", client_v1)
+        .nest("/api/v1", api)
+        .nest("/v1", client)
         .merge(client_v1beta)
         .fallback(static_files::serve_static)
         .layer(DefaultBodyLimit::max(64 * 1024 * 1024))
