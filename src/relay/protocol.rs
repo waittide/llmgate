@@ -50,7 +50,9 @@ pub fn rewrite_request_body_in_json(body: &[u8], new_model: &str, param_override
     body.to_vec()
 }
 
-/// 将 messages 中纯文本的 content 数组扁平化为字符串；含多模态部分（图片等）的数组保持原样。
+/// 将 messages 中恰好为 `{type, text}` 的纯文本 content 数组扁平化为字符串。
+/// 其余块（多模态、cache_control、citations 等附加字段）保持数组原样，
+/// 避免合并静默丢弃块级字段。
 fn flatten_text_content_arrays(obj: &mut serde_json::Map<String, Value>) {
     let Some(messages) = obj.get_mut("messages").and_then(Value::as_array_mut) else {
         return;
@@ -63,21 +65,21 @@ fn flatten_text_content_arrays(obj: &mut serde_json::Map<String, Value>) {
             continue;
         };
         let mut text = String::new();
-        let mut all_text = true;
+        let mut all_pure_text = true;
         for part in parts {
-            match part.get("type").and_then(Value::as_str) {
-                // 带 cache_control 的块承载提示缓存断点，扁平化会将其丢弃导致缓存失效，
-                // 与多模态块一样保持数组原样
-                Some("text") | Some("input_text") | Some("output_text") if part.get("cache_control").is_none() => {
-                    text.push_str(part.get("text").and_then(Value::as_str).unwrap_or(""));
-                }
-                _ => {
-                    all_text = false;
-                    break;
-                }
+            let is_pure_text = matches!(
+                part.get("type").and_then(Value::as_str),
+                Some("text") | Some("input_text") | Some("output_text")
+            ) && part
+                .as_object()
+                .is_some_and(|part_obj| part_obj.keys().all(|key| key == "type" || key == "text"));
+            if !is_pure_text {
+                all_pure_text = false;
+                break;
             }
+            text.push_str(part.get("text").and_then(Value::as_str).unwrap_or(""));
         }
-        if all_text && !parts.is_empty() {
+        if all_pure_text && !parts.is_empty() {
             msg_obj.insert("content".to_string(), Value::String(text));
         }
     }
@@ -3530,6 +3532,34 @@ mod tests {
         assert_eq!(content.pointer("/0/text").unwrap(), "缓存块");
         assert!(content.pointer("/0/cache_control/type").is_some());
     }
+
+    #[test]
+    fn test_rewrite_keeps_text_blocks_with_extra_fields() {
+        // 附带 citations 等块级字段的文本块合并会静默丢字段，必须保持数组原样
+        let body = serde_json::json!({
+            "model": "m",
+            "messages": [
+                { "role": "user", "content": [
+                    { "type": "text", "text": "引用内容", "citations": [{ "type": "web_search_result_location" }] },
+                    { "type": "text", "text": "普通文本" }
+                ]}
+            ]
+        });
+        let out = rewrite_request_body_in_json(&serde_json::to_vec(&body).unwrap(), "m2", None);
+        let val: Value = serde_json::from_slice(&out).unwrap();
+        let content = val
+            .pointer("/messages/0/content")
+            .unwrap()
+            .as_array()
+            .unwrap();
+        assert_eq!(content.len(), 2);
+        assert_eq!(
+            content[0].pointer("/citations/0/type").unwrap(),
+            "web_search_result_location"
+        );
+        assert_eq!(content[1].get("text").unwrap(), "普通文本");
+    }
+
     #[test]
     fn test_convert_anthropic_to_openai_chat_response_tool_calls() {
         let anthropic_resp = serde_json::json!({
