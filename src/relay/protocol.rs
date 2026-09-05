@@ -381,21 +381,6 @@ pub fn convert_chat_completions_to_responses(val: &Value) -> Value {
                     }));
                 }
                 _ => {
-                    // assistant 的 tool_calls 剥离为独立 function_call item
-                    if role == "assistant"
-                        && let Some(calls) = msg.get("tool_calls").and_then(Value::as_array)
-                    {
-                        for call in calls {
-                            input.push(serde_json::json!({
-                                "type": "function_call",
-                                "call_id": call.get("id").and_then(Value::as_str).unwrap_or(""),
-                                "name": call.pointer("/function/name").and_then(Value::as_str).unwrap_or(""),
-                                "arguments": call.pointer("/function/arguments").cloned()
-                                    .unwrap_or(Value::String("{}".to_string()))
-                            }));
-                        }
-                    }
-
                     // content 归一：user 方向统一 input_text part；assistant 保留字符串
                     let is_user = role != "assistant";
                     let message_item = match msg.get("content") {
@@ -434,8 +419,23 @@ pub fn convert_chat_completions_to_responses(val: &Value) -> Value {
                         }
                         _ => None,
                     };
+                    // 助手文本在先，tool_calls 剥离为随后的 function_call item，
+                    // 保持 Responses 对话流中文本先于其引发的调用这一时序
                     if let Some(item) = message_item {
                         input.push(item);
+                    }
+                    if role == "assistant"
+                        && let Some(calls) = msg.get("tool_calls").and_then(Value::as_array)
+                    {
+                        for call in calls {
+                            input.push(serde_json::json!({
+                                "type": "function_call",
+                                "call_id": call.get("id").and_then(Value::as_str).unwrap_or(""),
+                                "name": call.pointer("/function/name").and_then(Value::as_str).unwrap_or(""),
+                                "arguments": call.pointer("/function/arguments").cloned()
+                                    .unwrap_or(Value::String("{}".to_string()))
+                            }));
+                        }
                     }
                 }
             }
@@ -2484,6 +2484,28 @@ mod tests {
         // user content 归一为 input_text part 数组（Responses 规范形态）
         assert_eq!(input[0].pointer("/content/0/type").unwrap(), "input_text");
         assert_eq!(input[0].pointer("/content/0/text").unwrap(), "Hello world");
+    }
+
+    #[test]
+    fn test_convert_chat_to_responses_assistant_text_before_calls() {
+        // 同一条 assistant 消息既有文本又有 tool_calls 时，文本 item 必须先于 function_call item
+        let chat = serde_json::json!({
+            "model": "m",
+            "messages": [
+                { "role": "assistant", "content": "让我查一下", "tool_calls": [
+                    { "id": "call_1", "type": "function",
+                      "function": { "name": "bash", "arguments": "{\"cmd\":\"ls\"}" } }
+                ]}
+            ]
+        });
+        let responses = convert_chat_completions_to_responses(&chat);
+        let input = responses.get("input").unwrap().as_array().unwrap();
+        assert_eq!(input.len(), 2);
+        assert_eq!(input[0].get("type").unwrap(), "message");
+        // assistant 字符串 content 保留原样
+        assert_eq!(input[0].pointer("/content").unwrap(), "让我查一下");
+        assert_eq!(input[1].get("type").unwrap(), "function_call");
+        assert_eq!(input[1].get("name").unwrap(), "bash");
     }
 
     #[test]
