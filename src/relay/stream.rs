@@ -12,7 +12,16 @@ use super::sse_event_end;
 use crate::relay::{protocol::extract_usage_from_json, state::Usage};
 
 /// 将单个供应商原生 SSE 事件转换为 OpenAI Chat Completion SSE chunk 字符串。
-pub type SseChunkConverter = fn(&str, &str, i64, &str) -> Option<String>;
+/// 有状态实现（如 Responses 的 item_id → 工具序号映射）通过 trait 而非函数指针接入。
+pub trait SseChunkConverter {
+    fn convert_event(&mut self, event_str: &str, model: &str, created: i64, chatcmpl_id: &str) -> Option<String>;
+}
+
+impl<F: FnMut(&str, &str, i64, &str) -> Option<String>> SseChunkConverter for F {
+    fn convert_event(&mut self, event_str: &str, model: &str, created: i64, chatcmpl_id: &str) -> Option<String> {
+        self(event_str, model, created, chatcmpl_id)
+    }
+}
 
 /// 将供应商原生 SSE 字节流转换为标准 OpenAI Chat Completion SSE chunk 流。
 pub struct ProviderToOpenaiStream<S> {
@@ -22,11 +31,11 @@ pub struct ProviderToOpenaiStream<S> {
     model:          String,
     chatcmpl_id:    String,
     done_emitted:   bool,
-    convert_event:  SseChunkConverter,
+    convert_event:  Box<dyn SseChunkConverter + Send>,
 }
 
 impl<S> ProviderToOpenaiStream<S> {
-    pub fn new(inner: S, model: String, convert_event: SseChunkConverter) -> Self {
+    pub fn new(inner: S, model: String, convert_event: impl SseChunkConverter + Send + 'static) -> Self {
         Self {
             inner,
             buffer: Vec::new(),
@@ -34,7 +43,7 @@ impl<S> ProviderToOpenaiStream<S> {
             model,
             chatcmpl_id: format!("chatcmpl-{}", nanoid::nanoid!(24)),
             done_emitted: false,
-            convert_event,
+            convert_event: Box::new(convert_event),
         }
     }
 }
@@ -61,7 +70,10 @@ where
                 let created = chrono::Utc::now().timestamp();
                 while let Some(end) = sse_event_end(&this.buffer) {
                     let event_str = String::from_utf8_lossy(&this.buffer[..end]).to_string();
-                    if let Some(chunk) = (this.convert_event)(&event_str, &this.model, created, &this.chatcmpl_id) {
+                    if let Some(chunk) =
+                        this.convert_event
+                            .convert_event(&event_str, &this.model, created, &this.chatcmpl_id)
+                    {
                         this.pending_chunks.push_back(Bytes::from(chunk));
                     }
                     this.buffer.drain(..end);

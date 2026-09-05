@@ -1,7 +1,10 @@
 use serde::Deserialize;
 use serde_json::Value;
 
-use crate::{model::ModelPrice, relay::state::Usage};
+use crate::{
+    model::ModelPrice,
+    relay::{state::Usage, stream::SseChunkConverter},
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ApiFormat {
@@ -520,48 +523,60 @@ pub fn convert_responses_result_to_chat_response(val: &Value, model_name: &str) 
     })
 }
 
-/// 将 OpenAI Responses SSE 事件字符串转换为 OpenAI Chat Completion SSE chunk 行。
-pub fn responses_sse_event_to_openai_chunk(
-    event_str: &str,
-    model_name: &str,
-    created: i64,
-    chatcmpl_id: &str,
-) -> Option<String> {
-    let mut event_type = "";
-    let mut data_str = "";
-    for line in event_str.lines() {
-        let trimmed = line.trim();
-        if let Some(et) = trimmed.strip_prefix("event:") {
-            event_type = et.trim();
-        } else if let Some(d) = trimmed.strip_prefix("data:") {
-            data_str = d.trim();
-        }
-    }
-    if data_str.is_empty() {
-        return None;
-    }
-    let val: Value = serde_json::from_str(data_str).ok()?;
+/// Responses → Chat 有状态转换器：维护 item_id → Chat 工具序号的映射，
+/// 保证 `tool_calls[].index` 严格从 0 递增（OpenAI SDK 流式解析的前提），
+/// 而非直接透传可能跳变的 Responses `output_index`。
+#[derive(Default)]
+pub struct ResponsesToChatChunkConverter {
+    tool_indexes: std::collections::HashMap<String, u64>,
+    next_index:   u64,
+}
 
-    let chunk_with = |delta: Value, finish: Value| -> String {
-        let chunk = serde_json::json!({
-            "id": chatcmpl_id,
-            "object": "chat.completion.chunk",
-            "created": created,
-            "model": model_name,
-            "choices": [{ "index": 0, "delta": delta, "finish_reason": finish }]
-        });
-        format!("data: {}\n\n", serde_json::to_string(&chunk).unwrap_or_default())
-    };
-
-    match event_type {
-        "response.output_text.delta" => {
-            let text = val.get("delta").and_then(Value::as_str).unwrap_or("");
-            (!text.is_empty()).then(|| chunk_with(serde_json::json!({ "content": text }), Value::Null))
+impl SseChunkConverter for ResponsesToChatChunkConverter {
+    fn convert_event(&mut self, event_str: &str, model_name: &str, created: i64, chatcmpl_id: &str) -> Option<String> {
+        let mut event_type = "";
+        let mut data_str = "";
+        for line in event_str.lines() {
+            let trimmed = line.trim();
+            if let Some(et) = trimmed.strip_prefix("event:") {
+                event_type = et.trim();
+            } else if let Some(d) = trimmed.strip_prefix("data:") {
+                data_str = d.trim();
+            }
         }
-        // function_call 项的元信息一次性下发（Responses 的 arguments 非分片起始）
-        "response.output_item.added" => {
-            if val.pointer("/item/type").and_then(Value::as_str) == Some("function_call") {
-                let index = val.get("output_index").and_then(Value::as_u64).unwrap_or(0);
+        if data_str.is_empty() {
+            return None;
+        }
+        let val: Value = serde_json::from_str(data_str).ok()?;
+
+        let chunk_with = |delta: Value, finish: Value| -> String {
+            let chunk = serde_json::json!({
+                "id": chatcmpl_id,
+                "object": "chat.completion.chunk",
+                "created": created,
+                "model": model_name,
+                "choices": [{ "index": 0, "delta": delta, "finish_reason": finish }]
+            });
+            format!("data: {}\n\n", serde_json::to_string(&chunk).unwrap_or_default())
+        };
+
+        match event_type {
+            "response.output_text.delta" => {
+                let text = val.get("delta").and_then(Value::as_str).unwrap_or("");
+                (!text.is_empty()).then(|| chunk_with(serde_json::json!({ "content": text }), Value::Null))
+            }
+            // function_call 项的元信息一次性下发（Responses 的 arguments 非分片起始）
+            "response.output_item.added" => {
+                if val.pointer("/item/type").and_then(Value::as_str) != Some("function_call") {
+                    return None;
+                }
+                let item_id = val
+                    .pointer("/item/id")
+                    .and_then(Value::as_str)
+                    .unwrap_or("");
+                let index = self.next_index;
+                self.next_index += 1;
+                self.tool_indexes.insert(item_id.to_string(), index);
                 let call_id = val
                     .pointer("/item/call_id")
                     .and_then(Value::as_str)
@@ -583,54 +598,53 @@ pub fn responses_sse_event_to_openai_chunk(
                         Value::Null,
                     )
                 })
-            } else {
-                None
             }
-        }
-        "response.function_call_arguments.delta" => {
-            let delta = val.get("delta").and_then(Value::as_str).unwrap_or("");
-            let index = val.get("output_index").and_then(Value::as_u64).unwrap_or(0);
-            (!delta.is_empty()).then(|| {
-                chunk_with(
-                    serde_json::json!({ "tool_calls": [{
-                        "index": index, "function": { "arguments": delta }
-                    }]}),
-                    Value::Null,
-                )
-            })
-        }
-        "response.completed" => {
-            let has_function_call = val
-                .pointer("/output")
-                .and_then(Value::as_array)
-                .map(|items| {
-                    items
-                        .iter()
-                        .any(|item| item.get("type").and_then(Value::as_str) == Some("function_call"))
+            "response.function_call_arguments.delta" => {
+                let delta = val.get("delta").and_then(Value::as_str).unwrap_or("");
+                let item_id = val.get("item_id").and_then(Value::as_str).unwrap_or("");
+                let index = self.tool_indexes.get(item_id).copied().unwrap_or(0);
+                (!delta.is_empty()).then(|| {
+                    chunk_with(
+                        serde_json::json!({ "tool_calls": [{
+                            "index": index, "function": { "arguments": delta }
+                        }]}),
+                        Value::Null,
+                    )
                 })
-                .unwrap_or(false);
-            let finish = if has_function_call { "tool_calls" } else { "stop" };
-            let mut chunk = serde_json::json!({
-                "id": chatcmpl_id,
-                "object": "chat.completion.chunk",
-                "created": created,
-                "model": model_name,
-                "choices": [{ "index": 0, "delta": {}, "finish_reason": finish }]
-            });
-            // 保留真实 usage，让 StreamFinalizer 捕获
-            if let Some(usage) = extract_usage_from_json(&val) {
-                chunk["usage"] = serde_json::json!({
-                    "prompt_tokens": usage.prompt_tokens,
-                    "completion_tokens": usage.completion_tokens,
-                    "total_tokens": usage.total_tokens
-                });
             }
-            Some(format!(
-                "data: {}\n\n",
-                serde_json::to_string(&chunk).unwrap_or_default()
-            ))
+            "response.completed" => {
+                let has_function_call = val
+                    .pointer("/output")
+                    .and_then(Value::as_array)
+                    .map(|items| {
+                        items
+                            .iter()
+                            .any(|item| item.get("type").and_then(Value::as_str) == Some("function_call"))
+                    })
+                    .unwrap_or(false);
+                let finish = if has_function_call { "tool_calls" } else { "stop" };
+                let mut chunk = serde_json::json!({
+                    "id": chatcmpl_id,
+                    "object": "chat.completion.chunk",
+                    "created": created,
+                    "model": model_name,
+                    "choices": [{ "index": 0, "delta": {}, "finish_reason": finish }]
+                });
+                // 保留真实 usage，让 StreamFinalizer 捕获
+                if let Some(usage) = extract_usage_from_json(&val) {
+                    chunk["usage"] = serde_json::json!({
+                        "prompt_tokens": usage.prompt_tokens,
+                        "completion_tokens": usage.completion_tokens,
+                        "total_tokens": usage.total_tokens
+                    });
+                }
+                Some(format!(
+                    "data: {}\n\n",
+                    serde_json::to_string(&chunk).unwrap_or_default()
+                ))
+            }
+            _ => None,
         }
-        _ => None,
     }
 }
 
@@ -1871,28 +1885,38 @@ pub fn gemini_sse_event_to_openai_chunk(
                 .collect::<String>()
         })
         .unwrap_or_default();
-    let tool_calls: Vec<Value> = parts
-        .into_iter()
-        .flatten()
-        .filter_map(|part| {
-            let call = part.get("functionCall")?;
-            let name = call.get("name").and_then(Value::as_str)?;
+    // 多个 functionCall 在同一 chunk 内按出现顺序分配从 0 递增的 index；
+    // id 由 (name, args) 哈希确定性生成，同一调用跨 chunk 内容一致则 id 稳定
+    let mut tool_calls: Vec<Value> = Vec::new();
+    if let Some(parts) = parts {
+        for part in parts {
+            let Some(call) = part.get("functionCall") else {
+                continue;
+            };
+            let Some(name) = call.get("name").and_then(Value::as_str) else {
+                continue;
+            };
             let arguments = call
                 .get("args")
                 .cloned()
                 .unwrap_or_else(|| serde_json::json!({}));
-            Some(serde_json::json!({
-                "index": 0,
-                "id": format!("call_{}", nanoid::nanoid!(20)),
+            let arguments_json = serde_json::to_string(&arguments).unwrap_or_else(|_| "{}".to_string());
+            let index = tool_calls.len() as u64;
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            use std::hash::{Hash, Hasher};
+            name.hash(&mut hasher);
+            arguments_json.hash(&mut hasher);
+            tool_calls.push(serde_json::json!({
+                "index": index,
+                "id": format!("call_{:016x}", hasher.finish()),
                 "type": "function",
                 "function": {
                     "name": name,
-                    "arguments": serde_json::to_string(&arguments).unwrap_or_else(|_| "{}".to_string())
+                    "arguments": arguments_json
                 }
-            }))
-        })
-        .collect();
-
+            }));
+        }
+    }
     let mut finish_reason = candidate
         .get("finishReason")
         .and_then(Value::as_str)
@@ -2613,16 +2637,34 @@ mod tests {
     }
 
     #[test]
-    fn test_responses_sse_event_to_openai_chunk_text() {
+    fn test_responses_to_chat_chunk_converter() {
+        let mut converter = ResponsesToChatChunkConverter::default();
         let event =
             "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"你好\"}\n\n";
-        let chunk = responses_sse_event_to_openai_chunk(event, "m", 1, "cc").unwrap();
+        let chunk = converter.convert_event(event, "m", 1, "cc").unwrap();
         assert!(chunk.contains("\"content\":\"你好\""));
 
         let completed = "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"output\":[],\"usage\":{\"input_tokens\":9,\"output_tokens\":3,\"total_tokens\":12}}}\n\n";
-        let chunk = responses_sse_event_to_openai_chunk(completed, "m", 1, "cc").unwrap();
+        let chunk = converter.convert_event(completed, "m", 1, "cc").unwrap();
         assert!(chunk.contains("\"finish_reason\":\"stop\""));
         assert!(chunk.contains("\"prompt_tokens\":9"));
+    }
+
+    #[test]
+    fn test_responses_to_chat_chunk_tool_indexes_sequential() {
+        // 两个并行 function_call 的 output_index 为 1、2（文本占 0），
+        // 转 Chat 后 tool_calls.index 必须归一为 0、1
+        let mut converter = ResponsesToChatChunkConverter::default();
+        let added = "event: response.output_item.added\ndata: {\"type\":\"response.output_item.added\",\"output_index\":1,\"item\":{\"id\":\"fc_a\",\"type\":\"function_call\",\"call_id\":\"call_a\",\"name\":\"a\",\"arguments\":\"{}\"}}\n\n";
+        let chunk = converter.convert_event(added, "m", 1, "cc").unwrap();
+        assert!(chunk.contains("\"index\":0"));
+        let delta = "event: response.function_call_arguments.delta\ndata: {\"type\":\"response.function_call_arguments.delta\",\"item_id\":\"fc_a\",\"delta\":\"{\\\"x\\\":1}\"}\n\n";
+        let chunk = converter.convert_event(delta, "m", 1, "cc").unwrap();
+        assert!(chunk.contains("\"index\":0"));
+
+        let added = "event: response.output_item.added\ndata: {\"type\":\"response.output_item.added\",\"output_index\":2,\"item\":{\"id\":\"fc_b\",\"type\":\"function_call\",\"call_id\":\"call_b\",\"name\":\"b\",\"arguments\":\"{}\"}}\n\n";
+        let chunk = converter.convert_event(added, "m", 1, "cc").unwrap();
+        assert!(chunk.contains("\"index\":1"));
     }
 
     #[test]
@@ -2733,6 +2775,17 @@ mod tests {
             gemini_sse_event_to_openai_chunk(gemini_event, "gemini-1.5-flash", 1700000000, "chatcmpl-gemini").unwrap();
         assert!(chunk.contains("calc"));
         assert!(chunk.contains("tool_calls"));
+    }
+
+    #[test]
+    fn test_gemini_sse_tool_calls_sequential_index_and_stable_id() {
+        let gemini_event = "data: {\"candidates\":[{\"content\":{\"parts\":[{\"functionCall\":{\"name\":\"a\",\"args\":{\"x\":1}}},{\"functionCall\":{\"name\":\"b\",\"args\":{\"y\":2}}}],\"role\":\"model\"},\"finishReason\":\"STOP\"}]}\n\n";
+        let chunk =
+            gemini_sse_event_to_openai_chunk(gemini_event, "gemini-1.5-flash", 1700000000, "chatcmpl-gemini").unwrap();
+        // 两个调用 index 分别为 0、1，且 id 确定性生成（不等于彼此）
+        assert!(chunk.contains("\"index\":0"));
+        assert!(chunk.contains("\"index\":1"));
+        assert!(!chunk.contains("\"index\":2"));
     }
 
     #[test]

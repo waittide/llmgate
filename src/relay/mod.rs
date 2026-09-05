@@ -627,7 +627,7 @@ fn handle_successful_stream(state: &AppState, upstream_resp: reqwest::Response, 
                 ProviderToOpenaiStream::new(
                     mapped_stream,
                     ctx.log_base.model.clone(),
-                    protocol::responses_sse_event_to_openai_chunk,
+                    protocol::ResponsesToChatChunkConverter::default(),
                 )
                 .boxed()
             } else {
