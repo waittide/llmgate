@@ -1,4 +1,5 @@
 pub mod anthropic_stream;
+pub mod gemini_stream;
 pub mod protocol;
 pub mod route;
 pub mod state;
@@ -27,6 +28,7 @@ use crate::{
     op::{AppState, channel, group, log, model, stats},
     relay::{
         anthropic_stream::{OpenaiStreamFormat, OpenaiToAnthropicStream},
+        gemini_stream::OpenaiToGeminiStream,
         protocol::{
             ApiFormat, calculate_cost, calculate_input_cost, extract_usage_from_json, parse_request_metadata,
             rewrite_request_body_in_json,
@@ -385,16 +387,20 @@ fn validate_relay_request(
     state: &AppState,
     auth_ctx: &AuthContext,
     body_bytes: &Bytes,
+    path_model: Option<&str>,
 ) -> Result<(protocol::ChatRequestMetadata, Group), Box<Response>> {
-    let metadata = match parse_request_metadata(body_bytes) {
-        Some(m) if !m.model.trim().is_empty() => m,
-        Some(_) | None => {
-            return Err(Box::new(error(
-                StatusCode::BAD_REQUEST,
-                "Invalid request: missing model",
-            )));
-        }
-    };
+    let mut metadata = parse_request_metadata(body_bytes).unwrap_or_default();
+    // Gemini 客户端把模型放在 URL path（models/{model}:generateContent），
+    // 请求体本身没有 model 字段；其余格式以请求体为准，path 模型兜底
+    if metadata.model.trim().is_empty() {
+        metadata.model = path_model.unwrap_or_default().trim_matches('/').to_string();
+    }
+    if metadata.model.trim().is_empty() {
+        return Err(Box::new(error(
+            StatusCode::BAD_REQUEST,
+            "Invalid request: missing model",
+        )));
+    }
 
     if !auth_ctx.supported_models.is_empty() && !auth_ctx.supported_models.contains(&metadata.model) {
         return Err(Box::new(error(
@@ -493,6 +499,30 @@ fn prepare_upstream_payload(
         (ApiFormat::OpenaiCompletion, ChannelProvider::OpenaiCompletion) => ("/chat/completions".to_string(), None),
         (ApiFormat::OpenaiResponse, ChannelProvider::OpenaiResponses) => ("/responses".to_string(), None),
         (ApiFormat::AnthropicMessage, ChannelProvider::Anthropic) => ("/messages".to_string(), None),
+        // Gemini 客户端：Gemini 上游直通；其余渠道经 Chat 中介转换
+        (ApiFormat::GeminiGenerate, ChannelProvider::Gemini) => {
+            (gemini_endpoint(ch, &channel_model.name, stream), None)
+        }
+        (ApiFormat::GeminiGenerate, ChannelProvider::OpenaiCompletion) => (
+            "/chat/completions".to_string(),
+            parsed
+                .as_ref()
+                .map(protocol::convert_gemini_to_openai_chat_request),
+        ),
+        (ApiFormat::GeminiGenerate, ChannelProvider::Anthropic) => {
+            let val = parsed.as_ref().map(|v| {
+                let chat = protocol::convert_gemini_to_openai_chat_request(v);
+                protocol::convert_openai_to_anthropic(&chat)
+            });
+            ("/messages".to_string(), val)
+        }
+        (ApiFormat::GeminiGenerate, ChannelProvider::OpenaiResponses) => {
+            let val = parsed.as_ref().map(|v| {
+                let chat = protocol::convert_gemini_to_openai_chat_request(v);
+                protocol::convert_chat_completions_to_responses(&chat)
+            });
+            ("/responses".to_string(), val)
+        }
     };
 
     let body = converted_val
@@ -616,12 +646,18 @@ fn handle_successful_stream(state: &AppState, upstream_resp: reqwest::Response, 
                 mapped_stream.boxed()
             }
         }
-        ChannelProvider::Gemini => ProviderToOpenaiStream::new(
-            mapped_stream,
-            ctx.log_base.model.clone(),
-            protocol::gemini_sse_event_to_openai_chunk,
-        )
-        .boxed(),
+        ChannelProvider::Gemini => {
+            if ctx.format == ApiFormat::GeminiGenerate {
+                mapped_stream.boxed()
+            } else {
+                ProviderToOpenaiStream::new(
+                    mapped_stream,
+                    ctx.log_base.model.clone(),
+                    protocol::gemini_sse_event_to_openai_chunk,
+                )
+                .boxed()
+            }
+        }
         ChannelProvider::OpenaiResponses => {
             if ctx.format == ApiFormat::OpenaiCompletion {
                 ProviderToOpenaiStream::new(
@@ -647,6 +683,8 @@ fn handle_successful_stream(state: &AppState, upstream_resp: reqwest::Response, 
         OpenaiToAnthropicStream::new(output_stream, ctx.log_base.model.clone(), source_format).boxed()
     } else if ctx.format == ApiFormat::OpenaiResponse && ctx.channel.channel_type != ChannelProvider::OpenaiResponses {
         ChatCompletionsToResponsesStream::new(output_stream, ctx.log_base.model.clone()).boxed()
+    } else if ctx.format == ApiFormat::GeminiGenerate && ctx.channel.channel_type != ChannelProvider::Gemini {
+        OpenaiToGeminiStream::new(output_stream, ctx.log_base.model.clone()).boxed()
     } else {
         output_stream
     };
@@ -742,6 +780,11 @@ async fn handle_successful_json(
             .as_ref()
             .or(parsed.as_ref())
             .map(|val| protocol::convert_openai_chat_to_responses_response(val, &ctx.log_base.model))
+    } else if ctx.format == ApiFormat::GeminiGenerate && ctx.channel.channel_type != ChannelProvider::Gemini {
+        converted_to_chat
+            .as_ref()
+            .or(parsed.as_ref())
+            .map(|val| protocol::convert_openai_chat_to_gemini_response(val, &ctx.log_base.model))
     } else {
         converted_to_chat
     };
@@ -946,14 +989,20 @@ pub async fn forward_relay(
     state: AppState,
     auth_ctx: Arc<AuthContext>,
     format: ApiFormat,
+    path_model: Option<String>,
     uri: Uri,
     headers: HeaderMap,
     body_bytes: Bytes,
 ) -> Response {
-    let (metadata, group_obj) = match validate_relay_request(&state, &auth_ctx, &body_bytes) {
+    let (mut metadata, group_obj) = match validate_relay_request(&state, &auth_ctx, &body_bytes, path_model.as_deref())
+    {
         Ok(v) => v,
         Err(err_resp) => return *err_resp,
     };
+    // Gemini 客户端的流式标志在 URL path（:streamGenerateContent），请求体没有 stream 字段
+    if format == ApiFormat::GeminiGenerate {
+        metadata.stream = uri.path().contains(":streamGenerateContent");
+    }
 
     let body_str = String::from_utf8_lossy(&body_bytes).to_string();
     let request_url = uri.path().to_string();

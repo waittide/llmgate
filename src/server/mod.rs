@@ -103,6 +103,11 @@ pub fn build_router(state: AppState) -> Router {
         .route("/chat/completions", post(relay::chat_completions))
         .route("/responses", post(relay::responses))
         .route("/messages", post(relay::messages))
+        .route("/v1beta/models/{model}:generateContent", post(relay::generate_content))
+        .route(
+            "/v1beta/models/{model}:streamGenerateContent",
+            post(relay::generate_content),
+        )
         .layer(from_fn_with_state(state.clone(), api_key_auth_middleware));
 
     // 6. CORS 跨域配置

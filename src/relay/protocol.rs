@@ -5,15 +5,15 @@ use crate::{
     model::ModelPrice,
     relay::{state::Usage, stream::SseChunkConverter},
 };
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ApiFormat {
     OpenaiCompletion,
     OpenaiResponse,
     AnthropicMessage,
+    GeminiGenerate,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Default, Deserialize)]
 pub struct ChatRequestMetadata {
     #[serde(default)]
     pub model:  String,
@@ -1654,6 +1654,237 @@ fn openai_content_to_gemini_parts(content: &Value) -> Vec<Value> {
     parts
 }
 
+/// 将 Gemini generateContent 请求载荷转换为 OpenAI Chat Completions 请求载荷。
+pub fn convert_gemini_to_openai_chat_request(val: &Value) -> Value {
+    let mut obj = serde_json::Map::new();
+    if let Some(model) = val.get("model") {
+        obj.insert("model".to_string(), model.clone());
+    }
+
+    let mut messages: Vec<Value> = Vec::new();
+    // systemInstruction → system 消息
+    if let Some(sys) = val
+        .get("system_instruction")
+        .or_else(|| val.get("systemInstruction"))
+    {
+        let text: String = sys
+            .pointer("/parts")
+            .and_then(Value::as_array)
+            .map(|parts| {
+                parts
+                    .iter()
+                    .filter_map(|part| part.get("text").and_then(Value::as_str))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            })
+            .unwrap_or_default();
+        if !text.is_empty() {
+            messages.push(serde_json::json!({ "role": "system", "content": text }));
+        }
+    }
+
+    if let Some(contents) = val.get("contents").and_then(Value::as_array) {
+        for content in contents {
+            let role = content
+                .get("role")
+                .and_then(Value::as_str)
+                .unwrap_or("user");
+            let parts = content.get("parts").and_then(Value::as_array);
+            let mut text_parts: Vec<Value> = Vec::new();
+            let mut tool_calls: Vec<Value> = Vec::new();
+            for part in parts.into_iter().flatten() {
+                if let Some(text) = part.get("text").and_then(Value::as_str) {
+                    text_parts.push(serde_json::json!({ "type": "text", "text": text }));
+                } else if let Some(call) = part.get("functionCall") {
+                    let name = call.get("name").and_then(Value::as_str).unwrap_or("");
+                    let args = call
+                        .get("args")
+                        .cloned()
+                        .unwrap_or_else(|| serde_json::json!({}));
+                    tool_calls.push(serde_json::json!({
+                        "id": format!("call_{}", nanoid::nanoid!(20)),
+                        "type": "function",
+                        "function": {
+                            "name": name,
+                            "arguments": serde_json::to_string(&args).unwrap_or_else(|_| "{}".to_string())
+                        }
+                    }));
+                } else if let Some(resp) = part.get("functionResponse") {
+                    let call_id = format!("call_{}", nanoid::nanoid!(20));
+                    let output = resp.get("response").cloned().unwrap_or(Value::Null);
+                    messages.push(serde_json::json!({
+                        "role": "tool",
+                        "tool_call_id": call_id,
+                        "content": serde_json::to_string(&output).unwrap_or_default()
+                    }));
+                }
+            }
+            let chat_role = if role == "model" { "assistant" } else { role };
+            if !text_parts.is_empty() || !tool_calls.is_empty() {
+                let content =
+                    if text_parts.len() == 1 && text_parts[0].get("type").and_then(Value::as_str) == Some("text") {
+                        text_parts[0].get("text").cloned().unwrap_or(Value::Null)
+                    } else if text_parts.is_empty() && !tool_calls.is_empty() {
+                        Value::Null
+                    } else {
+                        Value::Array(text_parts)
+                    };
+                let mut message = serde_json::json!({ "role": chat_role, "content": content });
+                if !tool_calls.is_empty() {
+                    message["tool_calls"] = Value::Array(tool_calls);
+                }
+                messages.push(message);
+            }
+        }
+    }
+    obj.insert("messages".to_string(), Value::Array(messages));
+
+    // generationConfig → temperature/top_p/max_tokens
+    if let Some(config) = val
+        .get("generation_config")
+        .or_else(|| val.get("generationConfig"))
+    {
+        if let Some(temp) = config.get("temperature") {
+            obj.insert("temperature".to_string(), temp.clone());
+        }
+        if let Some(top_p) = config.get("topP").or_else(|| config.get("top_p")) {
+            obj.insert("top_p".to_string(), top_p.clone());
+        }
+        if let Some(max) = config
+            .get("maxOutputTokens")
+            .or_else(|| config.get("max_output_tokens"))
+        {
+            obj.insert("max_tokens".to_string(), max.clone());
+        }
+    }
+
+    // tools.functionDeclarations → Chat 嵌套 function 结构
+    if let Some(tools) = val.get("tools").and_then(Value::as_array) {
+        let mut chat_tools = Vec::new();
+        for tool in tools {
+            if let Some(decls) = tool.get("functionDeclarations").and_then(Value::as_array) {
+                for decl in decls {
+                    let mut function = serde_json::Map::new();
+                    if let Some(name) = decl.get("name") {
+                        function.insert("name".to_string(), name.clone());
+                    }
+                    if let Some(desc) = decl.get("description") {
+                        function.insert("description".to_string(), desc.clone());
+                    }
+                    if let Some(params) = decl.get("parameters") {
+                        function.insert("parameters".to_string(), params.clone());
+                    }
+                    chat_tools.push(serde_json::json!({ "type": "function", "function": function }));
+                }
+            }
+        }
+        if !chat_tools.is_empty() {
+            obj.insert("tools".to_string(), Value::Array(chat_tools));
+        }
+    }
+
+    // toolConfig.functionCallingConfig → tool_choice
+    if let Some(config) = val
+        .pointer("/toolConfig/functionCallingConfig")
+        .or_else(|| val.pointer("/tool_config/functionCallingConfig"))
+    {
+        let mode = config.get("mode").and_then(Value::as_str).unwrap_or("AUTO");
+        let choice = match mode {
+            "NONE" => serde_json::json!("none"),
+            "ANY" => match config
+                .get("allowedFunctionNames")
+                .and_then(Value::as_array)
+                .and_then(|names| names.first())
+            {
+                Some(name) => serde_json::json!({
+                    "type": "function",
+                    "function": { "name": name }
+                }),
+                None => serde_json::json!("required"),
+            },
+            _ => serde_json::json!("auto"),
+        };
+        obj.insert("tool_choice".to_string(), choice);
+    }
+
+    Value::Object(obj)
+}
+
+fn openai_chat_finish_to_gemini(reason: Option<&str>) -> &str {
+    match reason {
+        Some("length") => "MAX_TOKENS",
+        Some("content_filter") => "SAFETY",
+        _ => "STOP",
+    }
+}
+
+/// 将非流式 Chat Completion 响应转换为 Gemini generateContent 响应。
+pub fn convert_openai_chat_to_gemini_response(val: &Value, model_name: &str) -> Value {
+    let choice = val.pointer("/choices/0");
+    let message = choice.and_then(|choice| choice.get("message"));
+    let mut parts = Vec::new();
+    if let Some(reasoning) = message
+        .and_then(|message| message.get("reasoning_content"))
+        .and_then(Value::as_str)
+        .filter(|reasoning| !reasoning.is_empty())
+    {
+        parts.push(serde_json::json!({ "text": reasoning }));
+    }
+    if let Some(text) = message
+        .and_then(|message| message.get("content"))
+        .and_then(Value::as_str)
+        .filter(|text| !text.is_empty())
+    {
+        parts.push(serde_json::json!({ "text": text }));
+    }
+    if let Some(tool_calls) = message
+        .and_then(|message| message.get("tool_calls"))
+        .and_then(Value::as_array)
+    {
+        for call in tool_calls {
+            let args = call
+                .pointer("/function/arguments")
+                .and_then(Value::as_str)
+                .and_then(|arguments| serde_json::from_str::<Value>(arguments).ok())
+                .unwrap_or_else(|| serde_json::json!({}));
+            parts.push(serde_json::json!({
+                "functionCall": {
+                    "name": call.pointer("/function/name").and_then(Value::as_str).unwrap_or(""),
+                    "args": args
+                }
+            }));
+        }
+    }
+    if parts.is_empty() {
+        parts.push(serde_json::json!({ "text": "" }));
+    }
+    let prompt_tokens = val
+        .pointer("/usage/prompt_tokens")
+        .and_then(Value::as_i64)
+        .unwrap_or(0);
+    let completion_tokens = val
+        .pointer("/usage/completion_tokens")
+        .and_then(Value::as_i64)
+        .unwrap_or(0);
+    serde_json::json!({
+        "candidates": [{
+            "content": { "role": "model", "parts": parts },
+            "finishReason": openai_chat_finish_to_gemini(
+                choice.and_then(|choice| choice.get("finish_reason")).and_then(Value::as_str),
+            )
+        }],
+        "usageMetadata": {
+            "promptTokenCount": prompt_tokens,
+            "candidatesTokenCount": completion_tokens,
+            "totalTokenCount": val
+                .pointer("/usage/total_tokens")
+                .and_then(Value::as_i64)
+                .unwrap_or(prompt_tokens + completion_tokens)
+        },
+        "modelVersion": model_name
+    })
+}
+
 /// 将 OpenAI /chat/completions 请求载荷转换为 Google Gemini generateContent 请求载荷。
 pub fn convert_openai_to_gemini(val: &Value) -> Value {
     let mut contents = Vec::new();
@@ -2737,6 +2968,57 @@ mod tests {
         let added = "event: response.output_item.added\ndata: {\"type\":\"response.output_item.added\",\"output_index\":2,\"item\":{\"id\":\"fc_b\",\"type\":\"function_call\",\"call_id\":\"call_b\",\"name\":\"b\",\"arguments\":\"{}\"}}\n\n";
         let chunk = converter.convert_event(added, "m", 1, "cc").unwrap();
         assert!(chunk.contains("\"index\":1"));
+    }
+
+    #[test]
+    fn test_convert_gemini_to_openai_chat_request() {
+        let gemini = serde_json::json!({
+            "contents": [
+                { "role": "user", "parts": [{ "text": "Check weather" }] },
+                { "role": "model", "parts": [{ "functionCall": { "name": "get_weather", "args": { "city": "Paris" } } }] },
+                { "role": "user", "parts": [{ "functionResponse": { "name": "get_weather", "response": { "temp": 24 } } }] }
+            ],
+            "systemInstruction": { "parts": [{ "text": "You are helpful" }] },
+            "tools": [{ "functionDeclarations": [{ "name": "get_weather", "description": "Get weather", "parameters": { "type": "object" } }] }],
+            "generationConfig": { "temperature": 0.5, "maxOutputTokens": 128 }
+        });
+        let chat = convert_gemini_to_openai_chat_request(&gemini);
+        let messages = chat.get("messages").unwrap().as_array().unwrap();
+        assert_eq!(messages[0].get("role").unwrap(), "system");
+        assert_eq!(messages[1].pointer("/content").unwrap(), "Check weather");
+        assert_eq!(
+            messages[2].pointer("/tool_calls/0/function/name").unwrap(),
+            "get_weather"
+        );
+        assert_eq!(messages[3].get("role").unwrap(), "tool");
+        assert_eq!(chat.pointer("/tools/0/function/name").unwrap(), "get_weather");
+        assert_eq!(chat.get("max_tokens").unwrap(), 128);
+    }
+
+    #[test]
+    fn test_convert_openai_chat_to_gemini_response() {
+        let chat = serde_json::json!({
+            "choices": [{
+                "index": 0,
+                "message": { "role": "assistant", "content": "Answer", "tool_calls": [{
+                    "id": "call_1", "type": "function",
+                    "function": { "name": "calc", "arguments": "{\"x\":1}" }
+                }] },
+                "finish_reason": "tool_calls"
+            }],
+            "usage": { "prompt_tokens": 3, "completion_tokens": 4, "total_tokens": 7 }
+        });
+        let gemini = convert_openai_chat_to_gemini_response(&chat, "gemini-2.5-pro");
+        let parts = gemini
+            .pointer("/candidates/0/content/parts")
+            .unwrap()
+            .as_array()
+            .unwrap();
+        assert_eq!(parts[0].get("text").unwrap(), "Answer");
+        assert_eq!(parts[1].pointer("/functionCall/name").unwrap(), "calc");
+        assert_eq!(parts[1].pointer("/functionCall/args/x").unwrap(), 1);
+        assert_eq!(gemini.pointer("/candidates/0/finishReason").unwrap(), "STOP");
+        assert_eq!(gemini.pointer("/usageMetadata/promptTokenCount").unwrap(), 3);
     }
 
     #[test]
