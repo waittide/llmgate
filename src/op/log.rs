@@ -59,6 +59,7 @@ pub async fn update_completed_log(state: &AppState, log: &RequestLog) -> Result<
             total_tokens = ?,
             cache_read_tokens = ?,
             cache_write_tokens = ?,
+            cost = ?,
             wait_time = ?,
             round = ?,
             error = ?,
@@ -217,4 +218,41 @@ pub async fn list_request_logs(state: &AppState, query: &LogListQuery<'_>) -> Re
         .await?;
 
     Ok((total.0, items))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{model::request_status, test_support::setup_test_state};
+
+    /// 完成回写必须成功且占位符/绑定数量一致（回归：cost 占位符曾漏写导致全部日志卡在 running）。
+    #[tokio::test]
+    async fn test_update_completed_log_persists_final_state() {
+        let (state, _path) = setup_test_state("log_update").await;
+        let id = create_initial_log(&state, "gpt-4o", "/v1/chat/completions", "{}", "{}", 1700000000000)
+            .await
+            .unwrap();
+
+        let log = RequestLog {
+            id,
+            status: request_status::SUCCESS.to_string(),
+            target_channel: "ch-1".to_string(),
+            prompt_tokens: 115,
+            completion_tokens: 7,
+            total_tokens: 122,
+            cache_read_tokens: 100,
+            cache_write_tokens: 5,
+            cost: 0.5,
+            wait_time: 123,
+            round: 1,
+            ..Default::default()
+        };
+        update_completed_log(&state, &log).await.unwrap();
+
+        let row = get_request_log(&state, id).await.unwrap().unwrap();
+        assert_eq!(row.status, request_status::SUCCESS);
+        assert_eq!(row.cost, 0.5);
+        assert_eq!((row.cache_read_tokens, row.cache_write_tokens), (100, 5));
+        assert_eq!(row.target_channel, "ch-1");
+    }
 }
