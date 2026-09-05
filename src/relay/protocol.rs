@@ -1592,10 +1592,21 @@ pub fn convert_openai_to_gemini(val: &Value) -> Value {
                         .get(tool_call_id)
                         .cloned()
                         .unwrap_or_default();
-                    let response = msg
+                    // Gemini 规定 functionResponse.response 必须是 JSON Object：
+                    // 字符串或非对象内容统一包装为 {"result": ...}，避免上游 400 校验失败
+                    let raw = msg
                         .get("content")
                         .cloned()
                         .unwrap_or_else(|| Value::String(String::new()));
+                    let response = match raw {
+                        response @ Value::Object(_) => response,
+                        Value::String(text) => match serde_json::from_str::<Value>(&text) {
+                            Ok(parsed @ Value::Object(_)) => parsed,
+                            Ok(parsed) => serde_json::json!({ "result": parsed }),
+                            Err(_) => serde_json::json!({ "result": text }),
+                        },
+                        other => serde_json::json!({ "result": other }),
+                    };
                     contents.push(serde_json::json!({
                         "role": "user",
                         "parts": [{
@@ -2208,6 +2219,51 @@ mod tests {
         // tool 消息映射为 functionResponse，函数名取自解析出的映射
         let user_parts = contents[2].get("parts").unwrap().as_array().unwrap();
         assert_eq!(user_parts[0].pointer("/functionResponse/name").unwrap(), "get_weather");
+    }
+
+    #[test]
+    fn test_convert_gemini_function_response_object() {
+        let openai_req = serde_json::json!({
+            "model": "gemini-2.5-pro",
+            "messages": [
+                { "role": "user", "content": "Check weather" },
+                { "role": "assistant", "content": null, "tool_calls": [{
+                    "id": "call_1", "type": "function",
+                    "function": { "name": "get_weather", "arguments": "{\"city\":\"Paris\"}" }
+                }] },
+                { "role": "tool", "tool_call_id": "call_1", "content": "24°C, sunny" }
+            ]
+        });
+        let gemini = convert_openai_to_gemini(&openai_req);
+        let contents = gemini.get("contents").unwrap().as_array().unwrap();
+        let resp = contents[2]
+            .pointer("/parts/0/functionResponse/response")
+            .unwrap();
+        // 字符串工具结果必须包装为 JSON Object，否则 Gemini 报 400
+        assert!(resp.is_object());
+        assert_eq!(resp.get("result").unwrap(), "24°C, sunny");
+    }
+
+    #[test]
+    fn test_convert_gemini_function_response_json_passthrough() {
+        let openai_req = serde_json::json!({
+            "model": "gemini-2.5-pro",
+            "messages": [
+                { "role": "user", "content": "Check weather" },
+                { "role": "assistant", "content": null, "tool_calls": [{
+                    "id": "call_1", "type": "function",
+                    "function": { "name": "get_weather", "arguments": "{\"city\":\"Paris\"}" }
+                }] },
+                { "role": "tool", "tool_call_id": "call_1", "content": "{\"temperature_c\": 24, \"condition\": \"sunny\"}" }
+            ]
+        });
+        let gemini = convert_openai_to_gemini(&openai_req);
+        let contents = gemini.get("contents").unwrap().as_array().unwrap();
+        let resp = contents[2]
+            .pointer("/parts/0/functionResponse/response")
+            .unwrap();
+        assert_eq!(resp.get("temperature_c").unwrap(), 24);
+        assert_eq!(resp.get("condition").unwrap(), "sunny");
     }
 
     #[test]
