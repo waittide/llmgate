@@ -74,9 +74,9 @@ pub async fn batch_create_model_infos(state: &AppState, infos: Vec<ModelInfo>) -
         .bind(info.price.cache_write)
         .execute(&state.db)
         .await?;
-
-        state.model_prices.insert(name_lower, info.price);
     }
+
+    refresh_model_cache(state).await?;
     Ok(())
 }
 
@@ -96,8 +96,7 @@ pub async fn update_model_info(state: &AppState, info: &ModelInfo) -> Result<()>
     .bind(&name_lower)
     .execute(&state.db)
     .await?;
-
-    state.model_prices.insert(name_lower, info.price.clone());
+    refresh_model_cache(state).await?;
     Ok(())
 }
 
@@ -115,7 +114,7 @@ pub async fn delete_model_info(state: &AppState, name: &str) -> Result<()> {
         .execute(&state.db)
         .await?;
 
-    state.model_prices.remove(&name_lower);
+    refresh_model_cache(state).await?;
     Ok(())
 }
 

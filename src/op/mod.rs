@@ -38,7 +38,10 @@ pub struct ApiKeyCache {
     pub by_id:  HashMap<i64, APIKey>,
     pub by_key: HashMap<String, i64>,
 }
-
+/// 缓存同步约定：op 层所有变异（INSERT/UPDATE/DELETE）完成后必须调用对应的
+/// `refresh_*_cache` 从数据库全量重载——数据库是唯一事实源，内存缓存只是它的
+/// 只读投影。禁止在变异函数里散落逐键缓存修补（model_prices 除外：单键
+/// upsert 与 DB 语句一一对应，且操作原子）。
 #[derive(Clone)]
 pub struct AppState {
     pub db:             DbPool,
