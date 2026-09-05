@@ -18,7 +18,10 @@ pub fn get_last_sync_time() -> i64 {
 
 pub async fn fetch_upstream_models(channel: &Channel) -> Result<Vec<String>> {
     let client = get_client();
-    let resp = build_upstream_request(client, channel, "/models", None, Some(15), None)?
+    // 同步仅用首个 key：无失败反馈回路，轮询由转发路径负责
+    let key_pool = channel.key_pool();
+    let api_key = key_pool.first().map(String::as_str).unwrap_or("");
+    let resp = build_upstream_request(client, channel, api_key, "/models", None, Some(15), None)?
         .send()
         .await?;
 

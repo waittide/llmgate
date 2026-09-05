@@ -189,6 +189,7 @@ pub struct Channel {
     #[serde(default = "default_true")]
     pub enabled:        bool,
     pub base_url:       String,
+    /// 支持多 key：换行或逗号分隔多个，请求时轮询使用，429/401/403 时键级冷却切换
     pub key:            String,
     #[serde(default)]
     pub models:         Vec<ChannelModel>,
@@ -199,6 +200,25 @@ pub struct Channel {
     pub param_override: Option<String>,
     #[serde(flatten, default)]
     pub metrics:        StatsMetrics,
+}
+
+impl Channel {
+    /// 渠道可用 key 池；仅一个 key 时池大小为 1，行为与单 key 完全一致。
+    /// key 全为空白时回退为原始 trim 值，保证池永不为空（空 key 会在构建鉴权头时报错）。
+    pub fn key_pool(&self) -> Vec<String> {
+        let pool: Vec<String> = self
+            .key
+            .split(['\n', ','])
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+            .collect();
+        if pool.is_empty() {
+            vec![self.key.trim().to_string()]
+        } else {
+            pool
+        }
+    }
 }
 
 fn default_true() -> bool {

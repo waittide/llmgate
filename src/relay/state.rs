@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{broadcast, watch};
@@ -118,6 +120,66 @@ impl InFlightRegistry {
         }
     }
 }
+/// 渠道多 key 的运行态：请求级轮询游标 + 各 key 的冷却截止（毫秒）。
+/// 冷却仅存内存，重启即清空。
+pub struct KeyPool {
+    states: DashMap<i64, KeyState>,
+}
+
+#[derive(Default)]
+struct KeyState {
+    cursor:    usize,
+    cooldowns: HashMap<usize, i64>,
+}
+
+impl Default for KeyPool {
+    fn default() -> Self {
+        Self { states: DashMap::new() }
+    }
+}
+
+impl KeyPool {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// 轮询选取下一个未冷却的 key 下标；全部冷却时返回最早解冻的下标（探活）。
+    pub fn pick(&self, channel_id: i64, key_count: usize) -> usize {
+        if key_count == 0 {
+            return 0;
+        }
+        let mut entry = self.states.entry(channel_id).or_default();
+        let state = entry.value_mut();
+        let now = chrono::Utc::now().timestamp_millis();
+        for offset in 0..key_count {
+            let idx = (state.cursor + offset) % key_count;
+            if state.cooldowns.get(&idx).copied().unwrap_or(0) <= now {
+                state.cursor = (idx + 1) % key_count;
+                return idx;
+            }
+        }
+        (0..key_count)
+            .min_by_key(|idx| state.cooldowns.get(idx).copied().unwrap_or(0))
+            .unwrap_or(0)
+    }
+
+    /// 标记 key 失败进入冷却。
+    pub fn report_failure(&self, channel_id: i64, key_idx: usize, cooldown_seconds: i64) {
+        let mut entry = self.states.entry(channel_id).or_default();
+        let now = chrono::Utc::now().timestamp_millis();
+        entry
+            .value_mut()
+            .cooldowns
+            .insert(key_idx, now + cooldown_seconds * 1000);
+    }
+
+    /// key 请求成功后解除冷却。
+    pub fn report_success(&self, channel_id: i64, key_idx: usize) {
+        if let Some(mut entry) = self.states.get_mut(&channel_id) {
+            entry.value_mut().cooldowns.remove(&key_idx);
+        }
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -133,5 +195,25 @@ mod tests {
 
         registry.unregister(42);
         assert!(!registry.interrupt(42));
+    }
+
+    #[test]
+    fn test_key_pool_rotation_and_cooldown() {
+        let pool = KeyPool::new();
+        assert_eq!(pool.pick(1, 3), 0);
+        assert_eq!(pool.pick(1, 3), 1);
+
+        // 失败的 key 进入冷却，轮询跳过
+        pool.report_failure(1, 1, 60);
+        assert_eq!(pool.pick(1, 3), 2);
+
+        // 全部冷却时返回最早解冻的下标探活
+        pool.report_failure(1, 2, 60);
+        pool.report_failure(1, 0, 60);
+        assert_eq!(pool.pick(1, 3), 0);
+
+        // 成功后解除冷却
+        pool.report_success(1, 0);
+        assert_eq!(pool.pick(1, 3), 0);
     }
 }

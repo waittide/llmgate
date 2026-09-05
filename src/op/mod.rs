@@ -21,7 +21,10 @@ use crate::{
         APIKey, Channel, ChannelModel, Group, ModelPrice, StatsAPIKey, StatsDaily, StatsHourly, StatsMetrics,
         StatsTotal, SystemStats,
     },
-    relay::{route::RouteManager, state::InFlightRegistry},
+    relay::{
+        route::RouteManager,
+        state::{InFlightRegistry, KeyPool},
+    },
 };
 
 #[derive(Default)]
@@ -51,6 +54,7 @@ pub struct AppState {
     pub stats:          Arc<RwLock<SystemStats>>,
     pub stats_api_keys: Arc<DashMap<i64, StatsAPIKey>>,
     pub route_manager:  Arc<RouteManager>,
+    pub key_pool:       Arc<KeyPool>,
     pub in_flight:      Arc<InFlightRegistry>,
     /// JWT 签名密钥：初始为内置默认值，用户缓存刷新后派生为 `username_password`
     /// （见 op::user::refresh_user_cache）。因此修改密码会使所有已签发 token 失效
@@ -89,6 +93,7 @@ impl AppState {
             stats_api_keys: Arc::new(DashMap::new()),
             route_manager:  Arc::new(RouteManager::new()),
             in_flight:      Arc::new(InFlightRegistry::new()),
+            key_pool:       Arc::new(KeyPool::new()),
             jwt_secret:     Arc::new(RwLock::new("octopus-jwt-secret-default".to_string())),
         };
 

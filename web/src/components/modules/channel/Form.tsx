@@ -242,14 +242,13 @@ export function ChannelForm({ channel }: { channel?: Channel }) {
                 <label htmlFor={`${idPrefix}-key`} className="text-sm font-medium text-card-foreground">
                     {t('apiKey')}
                 </label>
-                <Input
+                <textarea
                     id={`${idPrefix}-key`}
-                    type="text"
                     value={formData.key}
                     onChange={(event) => setFormData({ ...formData, key: event.target.value })}
-                    placeholder={t('apiKey')}
+                    placeholder={t('apiKeyPlaceholder')}
                     required
-                    className="rounded-xl"
+                    className="min-h-16 w-full rounded-xl border border-border bg-background px-3 py-2 text-sm text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                 />
             </div>
 

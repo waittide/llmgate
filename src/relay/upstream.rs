@@ -1,6 +1,7 @@
 use std::{sync::LazyLock, time::Duration};
 
 use anyhow::{Result, anyhow};
+use bytes::Bytes;
 use reqwest::{Client, RequestBuilder, header::HeaderMap};
 
 use crate::model::{Channel, ChannelProvider};
@@ -26,15 +27,16 @@ pub fn get_client() -> &'static Client {
 pub fn build_upstream_request(
     client: &Client,
     channel: &Channel,
+    api_key: &str,
     endpoint: &str, // 例如 "/chat/completions", "/messages", "/models"
-    body: Option<Vec<u8>>,
+    body: Option<Bytes>,
     timeout_secs: Option<u64>,
     client_headers: Option<&HeaderMap>,
 ) -> Result<RequestBuilder> {
     let base_url = normalize_base_url(&channel.base_url);
     let target_url = format!("{}{}", base_url, endpoint);
 
-    let headers = build_upstream_headers(channel, client_headers)?;
+    let headers = build_upstream_headers(channel, api_key, client_headers)?;
     let mut req_builder = if body.is_some() {
         client.post(&target_url)
     } else {
@@ -54,14 +56,17 @@ pub fn build_upstream_request(
     Ok(req_builder)
 }
 
-pub fn build_upstream_headers(channel: &Channel, client_headers: Option<&HeaderMap>) -> Result<HeaderMap> {
+pub fn build_upstream_headers(
+    channel: &Channel,
+    api_key: &str,
+    client_headers: Option<&HeaderMap>,
+) -> Result<HeaderMap> {
     let mut headers = HeaderMap::new();
     match channel.channel_type {
         ChannelProvider::Anthropic => {
             headers.insert(
                 "x-api-key",
-                channel
-                    .key
+                api_key
                     .parse()
                     .map_err(|_| anyhow!("无效的 api key 请求头"))?,
             );
@@ -75,8 +80,7 @@ pub fn build_upstream_headers(channel: &Channel, client_headers: Option<&HeaderM
         ChannelProvider::Gemini => {
             headers.insert(
                 "x-goog-api-key",
-                channel
-                    .key
+                api_key
                     .parse()
                     .map_err(|_| anyhow!("无效的 gemini key 请求头"))?,
             );
@@ -84,7 +88,7 @@ pub fn build_upstream_headers(channel: &Channel, client_headers: Option<&HeaderM
         _ => {
             headers.insert(
                 "Authorization",
-                format!("Bearer {}", channel.key)
+                format!("Bearer {}", api_key)
                     .parse()
                     .map_err(|_| anyhow!("无效的鉴权请求头"))?,
             );
@@ -162,10 +166,10 @@ mod tests {
         client_headers.insert("anthropic-beta", HeaderValue::from_static("prompt-caching-2024-07-31"));
         client_headers.insert("authorization", HeaderValue::from_static("Bearer client-key"));
 
-        let headers = build_upstream_headers(&channel, Some(&client_headers)).unwrap();
+        let headers = build_upstream_headers(&channel, "sk-ant-test", Some(&client_headers)).unwrap();
         // 客户端传入的 anthropic-beta 应被正常透传
         assert_eq!(headers.get("anthropic-beta").unwrap(), "prompt-caching-2024-07-31");
-        // x-api-key 鉴权头必须强制使用渠道的 channel.key，不能被客户端覆盖
+        // x-api-key 鉴权头必须强制使用渠道 key（此处为显式传入的 api_key 参数），不能被客户端覆盖
         assert_eq!(headers.get("x-api-key").unwrap(), "sk-ant-test");
     }
 }

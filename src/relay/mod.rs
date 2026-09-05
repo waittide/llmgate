@@ -987,7 +987,8 @@ pub async fn forward_relay(
         let (target_endpoint, final_body) =
             prepare_upstream_payload(format, metadata.stream, &body_bytes, &ch, &channel_model);
         let target_req_url = format!("{}{}", normalize_base_url(&ch.base_url), target_endpoint);
-        let channel_req_headers = upstream::build_upstream_headers(&ch, Some(&headers))
+        let key_pool = ch.key_pool();
+        let channel_req_headers = upstream::build_upstream_headers(&ch, key_pool[0].as_str(), Some(&headers))
             .map(|h| serialize_headers(&h))
             .unwrap_or_else(|_| request_headers.clone());
         let rewritten_body_str = String::from_utf8_lossy(&final_body).to_string();
@@ -1028,68 +1029,55 @@ pub async fn forward_relay(
         };
 
         let client = get_client();
-        let req_builder = match build_upstream_request(
-            client,
-            &ch,
-            &target_endpoint,
-            Some(final_body),
-            timeout_secs,
-            Some(&headers),
-        ) {
-            Ok(rb) => rb,
-            Err(e) => {
-                let err_msg = format!("构建渠道 {} 请求失败: {}", ch.name, e);
-                last_target_channel = ch.name.clone();
-                last_target_model = channel_model.name.clone();
-                last_error_body = err_msg.clone();
-
-                record_round_failure(
-                    &state,
-                    current_group.id,
-                    item.id,
-                    60,
-                    request_id,
-                    &mut rounds,
-                    RoundFailure {
-                        round,
-                        model: &metadata.model,
-                        started_at: &started_at_rfc3339,
-                        channel_name: &ch.name,
-                        model_name: &channel_model.name,
-                        target_req_url: &target_req_url,
-                        channel_req_headers: &channel_req_headers,
-                        rewritten_body_str: &rewritten_body_str,
-                        response_headers: "",
-                        status: 500,
-                        duration_ms: round_start_time.elapsed().as_millis() as i64,
-                        err_body: &err_msg,
-                        should_cooldown: true,
-                    },
-                );
-                if round < max_attempts && current_group.relay_config.retry_interval_seconds > 0 {
-                    tokio::time::sleep(tokio::time::Duration::from_secs(
-                        current_group.relay_config.retry_interval_seconds as u64,
-                    ))
-                    .await;
+        let body_bytes = Bytes::from(final_body);
+        let mut key_idx = state.key_pool.pick(ch.id, key_pool.len());
+        let mut tried_keys = std::collections::HashSet::new();
+        let first_event_timeout_secs = current_group
+            .relay_config
+            .stream_first_event_timeout_seconds
+            .max(5) as u64;
+        let send_res = loop {
+            let req_builder = match build_upstream_request(
+                client,
+                &ch,
+                &key_pool[key_idx],
+                &target_endpoint,
+                Some(body_bytes.clone()),
+                timeout_secs,
+                Some(&headers),
+            ) {
+                Ok(rb) => rb,
+                Err(e) => break Err(format!("构建渠道 {} 请求失败: {}", ch.name, e)),
+            };
+            let fut = req_builder.send();
+            let res = if metadata.stream {
+                match tokio::time::timeout(std::time::Duration::from_secs(first_event_timeout_secs), fut).await {
+                    Ok(r) => r.map_err(|e| e.to_string()),
+                    Err(_) => Err(format!(
+                        "上游流式响应在 {}s 内未返回初始响应头",
+                        first_event_timeout_secs
+                    )),
                 }
-                continue;
+            } else {
+                fut.await.map_err(|e| e.to_string())
+            };
+            match res {
+                // key 级可重试错误：冷却当前 key，换未试过的 key 重试（不消耗轮次）
+                Ok(resp) if matches!(resp.status().as_u16(), 401 | 403 | 429) && key_pool.len() > 1 => {
+                    state
+                        .key_pool
+                        .report_failure(ch.id, key_idx, current_group.relay_config.cooldown_seconds);
+                    tried_keys.insert(key_idx);
+                    match (0..key_pool.len()).find(|idx| !tried_keys.contains(idx)) {
+                        Some(next) => {
+                            key_idx = next;
+                            continue;
+                        }
+                        None => break Ok(resp),
+                    }
+                }
+                other => break other,
             }
-        };
-        let send_future = req_builder.send();
-        let send_res = if metadata.stream {
-            let first_event_timeout_secs = current_group
-                .relay_config
-                .stream_first_event_timeout_seconds
-                .max(5) as u64;
-            match tokio::time::timeout(std::time::Duration::from_secs(first_event_timeout_secs), send_future).await {
-                Ok(res) => res.map_err(|e| e.to_string()),
-                Err(_) => Err(format!(
-                    "上游流式响应在 {}s 内未返回初始响应头",
-                    first_event_timeout_secs
-                )),
-            }
-        } else {
-            send_future.await.map_err(|e| e.to_string())
         };
 
         match send_res {
@@ -1099,6 +1087,7 @@ pub async fn forward_relay(
                     state
                         .route_manager
                         .report_success(current_group.id, item.id);
+                    state.key_pool.report_success(ch.id, key_idx);
                     let price_opt = model::get_model_price(&state, &channel_model.name);
 
                     let ctx = SuccessContext {
