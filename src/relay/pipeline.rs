@@ -1,6 +1,10 @@
 //! 转发管线：请求校验、载荷准备、key 轮换发送、故障转移与结果处理。
 
-use std::{collections::HashSet, sync::Arc, time::Instant};
+use std::{
+    collections::HashSet,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use axum::{
     body::Body,
@@ -258,6 +262,14 @@ fn handle_successful_stream(state: &AppState, upstream_resp: reqwest::Response, 
         cancel_rx: state.in_flight.get_cancel_receiver(ctx.log_base.id as u64),
         interrupted: false,
         stall_timer: None,
+        stall_timeout: Duration::from_secs(
+            state
+                .settings
+                .get("stream_stall_timeout_seconds")
+                .and_then(|e| e.value().parse::<u64>().ok())
+                .filter(|v| *v > 0)
+                .unwrap_or(300),
+        ),
         error_override: None,
     };
     let body = Body::from_stream(finalizer);

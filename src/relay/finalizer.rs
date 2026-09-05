@@ -24,8 +24,6 @@ use crate::{
 pub(crate) const RESPONSE_CAPTURE_LIMIT: usize = 64 * 1024;
 
 /// 流式传输停滞超时：超过该时长没有任何新字节则判定上游挂死，主动断开并记为失败。
-const STREAM_STALL_TIMEOUT: Duration = Duration::from_secs(300);
-
 /// 包装上游流式响应体，在传输过程中实时解析累加 Token 用量，
 /// 并在流结束或客户端提前断开连接时，且仅在此时完成指标统计与日志持久化。
 pub(crate) struct StreamFinalizer<S> {
@@ -48,6 +46,8 @@ pub(crate) struct StreamFinalizer<S> {
     pub(crate) cancel_rx:        Option<tokio::sync::watch::Receiver<bool>>,
     pub(crate) interrupted:      bool,
     pub(crate) stall_timer:      Option<Pin<Box<tokio::time::Sleep>>>,
+    /// 流式停滞超时（可经 settings.stream_stall_timeout_seconds 配置）
+    pub(crate) stall_timeout:    Duration,
     pub(crate) error_override:   Option<String>,
 }
 
@@ -243,9 +243,9 @@ where
                 // 停滞检测：上游长时间无新字节时自唤醒并强制终结，避免连接永久挂起
                 let timer = this
                     .stall_timer
-                    .get_or_insert_with(|| Box::pin(tokio::time::sleep(STREAM_STALL_TIMEOUT)));
+                    .get_or_insert_with(|| Box::pin(tokio::time::sleep(this.stall_timeout)));
                 if timer.as_mut().poll(cx).is_ready() {
-                    let msg = format!("上游流停滞超过 {}s，连接已中止", STREAM_STALL_TIMEOUT.as_secs());
+                    let msg = format!("上游流停滞超过 {}s，连接已中止", this.stall_timeout.as_secs());
                     this.error_override = Some(msg.clone());
                     this.finalize(false);
                     let err = std::io::Error::new(ErrorKind::TimedOut, msg);
@@ -288,6 +288,7 @@ mod tests {
             channel_id:       1,
             channel_model_id: 1,
             price:            None,
+            stall_timeout:    Duration::from_secs(300),
             prompt_tokens:    10,
             buffer:           Vec::new(),
             output_bytes:     0,
