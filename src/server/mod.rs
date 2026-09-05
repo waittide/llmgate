@@ -103,11 +103,13 @@ pub fn build_router(state: AppState) -> Router {
         .route("/chat/completions", post(relay::chat_completions))
         .route("/responses", post(relay::responses))
         .route("/messages", post(relay::messages))
-        .route("/v1beta/models/{model}:generateContent", post(relay::generate_content))
-        .route(
-            "/v1beta/models/{model}:streamGenerateContent",
-            post(relay::generate_content),
-        )
+        .route("/v1beta/models/{model_action}", post(relay::generate_content))
+        .layer(from_fn_with_state(state.clone(), api_key_auth_middleware));
+
+    // 5.1 Gemini 原生客户端入口同时暴露在根路径 /v1beta（客户端以 host 为 base_url 直连），
+    //     /v1/v1beta 供 base_url 以 /v1 结尾的客户端使用；模型与动作由 handler 从 path 解析
+    let client_v1beta = Router::new()
+        .route("/v1beta/models/{model_action}", post(relay::generate_content))
         .layer(from_fn_with_state(state.clone(), api_key_auth_middleware));
 
     // 6. CORS 跨域配置
@@ -148,9 +150,44 @@ pub fn build_router(state: AppState) -> Router {
     Router::new()
         .nest("/api/v1", api_v1)
         .nest("/v1", client_v1)
+        .merge(client_v1beta)
         .fallback(static_files::serve_static)
         .layer(DefaultBodyLimit::max(64 * 1024 * 1024))
         .layer(cors)
         .layer(CompressionLayer::new())
         .with_state(state)
+}
+
+#[cfg(test)]
+mod tests {
+    use axum::{
+        body::Body,
+        http::{Request, StatusCode},
+    };
+    use tower::ServiceExt;
+
+    use super::*;
+    use crate::test_support::setup_test_state;
+
+    /// 回归：Gemini 入口 `{model}:generateContent` 在参数段带字面量后缀，
+    /// 曾在 build_router 时触发 matchit "Only one parameter is allowed per path segment" panic。
+    /// 路由必须可构建，且请求命中 api_key_auth_middleware（无密钥返回 401 而非落入静态回退）。
+    #[tokio::test]
+    async fn test_gemini_relay_routes_build_and_reach_auth() {
+        let (state, _db_path) = setup_test_state("server_routes").await;
+        let app = build_router(state);
+        for uri in [
+            "/v1beta/models/gemini-2.5-pro:generateContent",
+            "/v1beta/models/gemini-2.5-pro:streamGenerateContent?alt=sse",
+            "/v1/v1beta/models/gemini-2.5-pro:generateContent",
+        ] {
+            let req = Request::builder()
+                .method("POST")
+                .uri(uri)
+                .body(Body::empty())
+                .unwrap();
+            let res = app.clone().oneshot(req).await.unwrap();
+            assert_eq!(res.status(), StatusCode::UNAUTHORIZED, "路由未命中鉴权中间件: {uri}");
+        }
+    }
 }
