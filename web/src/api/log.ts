@@ -1,4 +1,4 @@
-import { useMutation, useQuery } from '@tanstack/react-query';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useEffect, useState } from 'react';
 import { apiRequest } from './client';
 
@@ -182,4 +182,28 @@ export function useLogDetail(id: number, enabled: boolean) {
         queryFn: () => apiRequest<PersistentLogDetail>(`/api/v1/log/${id}`),
         enabled,
     });
+}
+
+// useLogListLiveSync 订阅概览 SSE: 任一请求日志被创建/更新(每次广播即一条日志的
+// 创建或状态变更)时, 防抖失效 logs 相关查询, 使日志页无需手动刷新即可看到
+// 实时条目与完成后的最终数据; 防抖把同轮的多次运行态广播合并为一次刷新。
+export function useLogListLiveSync() {
+    const queryClient = useQueryClient();
+    useEffect(() => {
+        const source = new EventSource('/api/v1/log/overview/stream', { withCredentials: true });
+        let timer: number | undefined;
+        source.addEventListener('overview', () => {
+            window.clearTimeout(timer);
+            timer = window.setTimeout(() => {
+                void queryClient.invalidateQueries({ queryKey: ['logs'] });
+            }, 500);
+        });
+        source.onerror = () => {
+            // 断线时 EventSource 自动重连, 无需额外处理
+        };
+        return () => {
+            window.clearTimeout(timer);
+            source.close();
+        };
+    }, [queryClient]);
 }

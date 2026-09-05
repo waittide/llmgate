@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { Loader2, Logs, RefreshCw, Search } from 'lucide-react';
 import { useTranslations } from 'use-intl';
-import { usePersistentLogs } from '@/api/log';
+import { usePersistentLogs, useLogListLiveSync } from '@/api/log';
 import { LogCard } from './Item';
 import { Input } from '@/components/ui/input';
 import { Button } from '@/components/ui/button';
@@ -19,6 +19,7 @@ interface LogFilters {
 // Log 展示数据库中的持久化请求日志, 支持关键词/状态/模型过滤、刷新与分页。
 export function Log() {
     const t = useTranslations('log');
+    useLogListLiveSync();
     const [page, setPage] = useState(1);
     const [keyword, setKeyword] = useState('');
     const [status, setStatus] = useState('all');
