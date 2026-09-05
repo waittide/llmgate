@@ -1,11 +1,11 @@
 pub mod anthropic_stream;
 pub mod gemini_stream;
+pub mod ir;
 pub mod protocol;
 pub mod route;
 pub mod state;
 pub mod stream;
 pub mod upstream;
-
 use std::{
     collections::HashSet,
     io::ErrorKind,
@@ -474,96 +474,26 @@ fn prepare_upstream_payload(
     channel_model: &ChannelModel,
 ) -> (String, Vec<u8>) {
     let rewritten_body = rewrite_request_body_in_json(body_bytes, &channel_model.name, ch.param_override.as_deref());
-    let parsed: Option<serde_json::Value> = serde_json::from_slice(&rewritten_body).ok();
-
-    let (endpoint, converted_val) = match (format, &ch.channel_type) {
-        (ApiFormat::OpenaiCompletion, ChannelProvider::Anthropic) => (
-            "/messages".to_string(),
-            parsed.as_ref().map(protocol::convert_openai_to_anthropic),
-        ),
-        (ApiFormat::OpenaiResponse, ChannelProvider::Anthropic) => {
-            let val = parsed.as_ref().map(|v| {
-                let completions = protocol::convert_responses_to_chat_completions(v);
-                protocol::convert_openai_to_anthropic(&completions)
-            });
-            ("/messages".to_string(), val)
-        }
-        (ApiFormat::OpenaiCompletion, ChannelProvider::Gemini) => (
-            gemini_endpoint(ch, &channel_model.name, stream),
-            parsed.as_ref().map(protocol::convert_openai_to_gemini),
-        ),
-        (ApiFormat::OpenaiResponse, ChannelProvider::Gemini) => {
-            let val = parsed.as_ref().map(|v| {
-                let completions = protocol::convert_responses_to_chat_completions(v);
-                protocol::convert_openai_to_gemini(&completions)
-            });
-            (gemini_endpoint(ch, &channel_model.name, stream), val)
-        }
-        (ApiFormat::AnthropicMessage, ChannelProvider::OpenaiCompletion) => (
-            "/chat/completions".to_string(),
-            parsed
-                .as_ref()
-                .map(protocol::convert_anthropic_to_openai_chat_request),
-        ),
-        (ApiFormat::AnthropicMessage, ChannelProvider::OpenaiResponses) => {
-            let val = parsed.as_ref().map(|v| {
-                let chat = protocol::convert_anthropic_to_openai_chat_request(v);
-                protocol::convert_chat_completions_to_responses(&chat)
-            });
-            ("/responses".to_string(), val)
-        }
-        (ApiFormat::AnthropicMessage, ChannelProvider::Gemini) => {
-            let val = parsed.as_ref().map(|v| {
-                let chat = protocol::convert_anthropic_to_openai_chat_request(v);
-                protocol::convert_openai_to_gemini(&chat)
-            });
-            (gemini_endpoint(ch, &channel_model.name, stream), val)
-        }
-        (ApiFormat::OpenaiResponse, ChannelProvider::OpenaiCompletion) => (
-            "/chat/completions".to_string(),
-            parsed
-                .as_ref()
-                .map(protocol::convert_responses_to_chat_completions),
-        ),
-        (ApiFormat::OpenaiCompletion, ChannelProvider::OpenaiResponses) => (
-            "/responses".to_string(),
-            parsed
-                .as_ref()
-                .map(protocol::convert_chat_completions_to_responses),
-        ),
-        (ApiFormat::OpenaiCompletion, ChannelProvider::OpenaiCompletion) => ("/chat/completions".to_string(), None),
-        (ApiFormat::OpenaiResponse, ChannelProvider::OpenaiResponses) => ("/responses".to_string(), None),
-        (ApiFormat::AnthropicMessage, ChannelProvider::Anthropic) => ("/messages".to_string(), None),
-        // Gemini 客户端：Gemini 上游直通；其余渠道经 Chat 中介转换
-        (ApiFormat::GeminiGenerate, ChannelProvider::Gemini) => {
-            (gemini_endpoint(ch, &channel_model.name, stream), None)
-        }
-        (ApiFormat::GeminiGenerate, ChannelProvider::OpenaiCompletion) => (
-            "/chat/completions".to_string(),
-            parsed
-                .as_ref()
-                .map(protocol::convert_gemini_to_openai_chat_request),
-        ),
-        (ApiFormat::GeminiGenerate, ChannelProvider::Anthropic) => {
-            let val = parsed.as_ref().map(|v| {
-                let chat = protocol::convert_gemini_to_openai_chat_request(v);
-                protocol::convert_openai_to_anthropic(&chat)
-            });
-            ("/messages".to_string(), val)
-        }
-        (ApiFormat::GeminiGenerate, ChannelProvider::OpenaiResponses) => {
-            let val = parsed.as_ref().map(|v| {
-                let chat = protocol::convert_gemini_to_openai_chat_request(v);
-                protocol::convert_chat_completions_to_responses(&chat)
-            });
-            ("/responses".to_string(), val)
-        }
+    let target_format = ir::channel_format(&ch.channel_type);
+    let endpoint = match &ch.channel_type {
+        ChannelProvider::Anthropic => "/messages".to_string(),
+        ChannelProvider::Gemini => gemini_endpoint(ch, &channel_model.name, stream),
+        ChannelProvider::OpenaiCompletion => "/chat/completions".to_string(),
+        ChannelProvider::OpenaiResponses => "/responses".to_string(),
     };
 
-    let body = converted_val
-        .and_then(|val| serde_json::to_vec(&val).ok())
-        .unwrap_or(rewritten_body);
+    // 同格式直通：仅重写 model/param_override 后原样转发
+    if format == target_format {
+        return (endpoint, rewritten_body);
+    }
 
+    // 跨格式：原始格式 → IR → 目标格式
+    let body = serde_json::from_slice::<serde_json::Value>(&rewritten_body)
+        .ok()
+        .and_then(|val| ir::parse_request(format, &val))
+        .map(|req| ir::emit_request(&req, target_format))
+        .and_then(|out| serde_json::to_vec(&out).ok())
+        .unwrap_or(rewritten_body);
     (endpoint, body)
 }
 
