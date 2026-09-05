@@ -72,7 +72,7 @@ pub async fn api_key_auth_middleware(State(state): State<AppState>, mut req: Req
 
     let api_key_str = match api_key_str_opt {
         Some(k) if !k.is_empty() => k,
-        _ => return error(StatusCode::UNAUTHORIZED, "鉴权失败"),
+        Some(_) | None => return error(StatusCode::UNAUTHORIZED, "鉴权失败"),
     };
 
     let api_key_obj = match get_api_key_by_key(&state, &api_key_str) {

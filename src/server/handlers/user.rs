@@ -24,7 +24,7 @@ pub async fn login(State(state): State<AppState>, Json(payload): Json<UserLogin>
                 Err(e) => internal_error(e),
             }
         }
-        _ => error(StatusCode::UNAUTHORIZED, "鉴权失败"),
+        Ok(false) | Err(_) => error(StatusCode::UNAUTHORIZED, "鉴权失败"),
     }
 }
 
