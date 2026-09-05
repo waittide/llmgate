@@ -125,10 +125,8 @@ impl InFlightRegistry {
 pub struct KeyPool {
     states: DashMap<i64, KeyState>,
 }
-
 #[derive(Default)]
 struct KeyState {
-    cursor:    usize,
     cooldowns: HashMap<usize, i64>,
 }
 
@@ -143,7 +141,8 @@ impl KeyPool {
         Self::default()
     }
 
-    /// 轮询选取下一个未冷却的 key 下标；全部冷却时返回最早解冻的下标（探活）。
+    /// 粘性优先级选取：固定顺序使用第一个未冷却的 key，多轮对话稳定命中同一
+    /// key 以最大化上游 prompt 缓存命中；全部冷却时返回最早解冻的下标（探活）。
     pub fn pick(&self, channel_id: i64, key_count: usize) -> usize {
         if key_count == 0 {
             return 0;
@@ -151,10 +150,8 @@ impl KeyPool {
         let mut entry = self.states.entry(channel_id).or_default();
         let state = entry.value_mut();
         let now = chrono::Utc::now().timestamp_millis();
-        for offset in 0..key_count {
-            let idx = (state.cursor + offset) % key_count;
+        for idx in 0..key_count {
             if state.cooldowns.get(&idx).copied().unwrap_or(0) <= now {
-                state.cursor = (idx + 1) % key_count;
                 return idx;
             }
         }
@@ -198,21 +195,23 @@ mod tests {
     }
 
     #[test]
-    fn test_key_pool_rotation_and_cooldown() {
+    fn test_key_pool_sticky_and_cooldown() {
         let pool = KeyPool::new();
+
+        // 粘性：固定优先级顺序，连续选取同一 key（利于上游 prompt 缓存命中）
         assert_eq!(pool.pick(1, 3), 0);
+        assert_eq!(pool.pick(1, 3), 0);
+
+        // 失败的 key 进入冷却，顺延到下一个
+        pool.report_failure(1, 0, 60);
         assert_eq!(pool.pick(1, 3), 1);
 
-        // 失败的 key 进入冷却，轮询跳过
-        pool.report_failure(1, 1, 60);
-        assert_eq!(pool.pick(1, 3), 2);
-
         // 全部冷却时返回最早解冻的下标探活
+        pool.report_failure(1, 1, 60);
         pool.report_failure(1, 2, 60);
-        pool.report_failure(1, 0, 60);
         assert_eq!(pool.pick(1, 3), 0);
 
-        // 成功后解除冷却
+        // 成功后解除冷却，回到首序 key
         pool.report_success(1, 0);
         assert_eq!(pool.pick(1, 3), 0);
     }

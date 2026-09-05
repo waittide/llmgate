@@ -511,7 +511,7 @@
             "save": "保存",
             "saving": "保存中...",
             "cancel": "取消",
-            "apiKeyPlaceholder": "支持多个 Key：每行一个，请求时自动轮询，失败自动切换"
+            "apiKeyPlaceholder": "支持多个 Key：每行一个，粘性使用（利于缓存命中），失败自动切换"
         }
     }
 }

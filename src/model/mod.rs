@@ -189,7 +189,8 @@ pub struct Channel {
     #[serde(default = "default_true")]
     pub enabled:        bool,
     pub base_url:       String,
-    /// 支持多 key：换行或逗号分隔多个，请求时轮询使用，429/401/403 时键级冷却切换
+    /// 支持多 key：换行或逗号分隔多个；粘性优先级使用（利于缓存命中），
+    /// 429/401/403 时键级冷却顺延，全部失效才走渠道级失败
     pub key:            String,
     #[serde(default)]
     pub models:         Vec<ChannelModel>,

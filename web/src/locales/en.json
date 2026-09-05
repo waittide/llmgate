@@ -511,7 +511,7 @@
             "save": "Save",
             "saving": "Saving...",
             "cancel": "Cancel",
-            "apiKeyPlaceholder": "Supports multiple keys: one per line, rotated per request with automatic failover"
+            "apiKeyPlaceholder": "Supports multiple keys: one per line, used stickily for cache hits, with automatic failover"
         }
     }
 }
