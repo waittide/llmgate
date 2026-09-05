@@ -28,7 +28,8 @@ use crate::{
     relay::{
         anthropic_stream::{OpenaiStreamFormat, OpenaiToAnthropicStream},
         protocol::{
-            ApiFormat, calculate_cost, extract_usage_from_json, parse_request_metadata, rewrite_request_body_in_json,
+            ApiFormat, calculate_cost, calculate_input_cost, extract_usage_from_json, parse_request_metadata,
+            rewrite_request_body_in_json,
         },
         state::{RequestOverview, Usage, millis_to_rfc3339},
         stream::{ChatCompletionsToResponsesStream, ProviderToOpenaiStream},
@@ -117,20 +118,30 @@ fn extract_usage_from_sse_buffer(buffer: &mut Vec<u8>, usage: &mut Option<Usage>
                         // 而 message_delta 提供 output_tokens）。
                         let merged = match usage {
                             Some(existing) => Usage {
-                                prompt_tokens:     if existing.prompt_tokens > 0 {
+                                prompt_tokens:      if existing.prompt_tokens > 0 {
                                     existing.prompt_tokens
                                 } else {
                                     u.prompt_tokens
                                 },
-                                completion_tokens: if existing.completion_tokens > 0 {
+                                completion_tokens:  if existing.completion_tokens > 0 {
                                     existing.completion_tokens
                                 } else {
                                     u.completion_tokens
                                 },
-                                total_tokens:      if existing.total_tokens > 0 {
+                                total_tokens:       if existing.total_tokens > 0 {
                                     existing.total_tokens
                                 } else {
                                     u.total_tokens
+                                },
+                                cache_read_tokens:  if existing.cache_read_tokens > 0 {
+                                    existing.cache_read_tokens
+                                } else {
+                                    u.cache_read_tokens
+                                },
+                                cache_write_tokens: if existing.cache_write_tokens > 0 {
+                                    existing.cache_write_tokens
+                                } else {
+                                    u.cache_write_tokens
                                 },
                             },
                             None => u,
@@ -185,17 +196,40 @@ impl<S> StreamFinalizer<S> {
             None => (self.prompt_tokens, est_completion),
         };
 
-        let cost = calculate_cost(prompt_tokens, completion_tokens, self.price.as_ref());
+        let cache_read_tokens = self
+            .usage
+            .as_ref()
+            .map(|u| u.cache_read_tokens)
+            .unwrap_or(0);
+        let cache_write_tokens = self
+            .usage
+            .as_ref()
+            .map(|u| u.cache_write_tokens)
+            .unwrap_or(0);
+        let cost = calculate_cost(
+            prompt_tokens,
+            completion_tokens,
+            cache_read_tokens,
+            cache_write_tokens,
+            self.price.as_ref(),
+        );
         let elapsed_ms = self.start_time.elapsed().as_millis() as i64;
+        let output_cost =
+            (completion_tokens as f64 / 1_000_000.0) * self.price.as_ref().map(|p| p.output).unwrap_or(0.0);
+        let input_cost = calculate_input_cost(
+            prompt_tokens,
+            cache_read_tokens,
+            cache_write_tokens,
+            self.price.as_ref(),
+        );
         let delta = StatsMetrics {
-            input_token:     prompt_tokens,
-            output_token:    completion_tokens,
-            input_cost:      (prompt_tokens as f64 / 1_000_000.0) * self.price.as_ref().map(|p| p.input).unwrap_or(0.0),
-            output_cost:     (completion_tokens as f64 / 1_000_000.0)
-                * self.price.as_ref().map(|p| p.output).unwrap_or(0.0),
-            wait_time:       elapsed_ms,
+            input_token: prompt_tokens,
+            output_token: completion_tokens,
+            input_cost,
+            output_cost,
+            wait_time: elapsed_ms,
             request_success: if completed { 1 } else { 0 },
-            request_failed:  if completed { 0 } else { 1 },
+            request_failed: if completed { 0 } else { 1 },
         };
         stats::record_metrics(
             &self.state,
@@ -247,6 +281,8 @@ impl<S> StreamFinalizer<S> {
         req_log.prompt_tokens = prompt_tokens;
         req_log.completion_tokens = completion_tokens;
         req_log.total_tokens = prompt_tokens + completion_tokens;
+        req_log.cache_read_tokens = cache_read_tokens;
+        req_log.cache_write_tokens = cache_write_tokens;
         req_log.cost = cost;
         req_log.wait_time = elapsed_ms;
         req_log.error = error_opt;
@@ -693,12 +729,19 @@ async fn handle_successful_json(
         .or(parsed.as_ref())
         .and_then(extract_usage_from_json)
         .unwrap_or_else(|| Usage {
-            prompt_tokens:     estimate_tokens(ctx.body_str),
+            prompt_tokens: estimate_tokens(ctx.body_str),
             completion_tokens: estimate_tokens(&resp_str),
-            total_tokens:      estimate_tokens(ctx.body_str) + estimate_tokens(&resp_str),
+            total_tokens: estimate_tokens(ctx.body_str) + estimate_tokens(&resp_str),
+            ..Default::default()
         });
 
-    let cost = calculate_cost(usage.prompt_tokens, usage.completion_tokens, ctx.price_opt.as_ref());
+    let cost = calculate_cost(
+        usage.prompt_tokens,
+        usage.completion_tokens,
+        usage.cache_read_tokens,
+        usage.cache_write_tokens,
+        ctx.price_opt.as_ref(),
+    );
     let elapsed_ms = ctx.start_time.elapsed().as_millis() as i64;
     let round_duration_ms = ctx.round_start_time.elapsed().as_millis() as i64;
 
@@ -724,6 +767,8 @@ async fn handle_successful_json(
     req_log.prompt_tokens = usage.prompt_tokens;
     req_log.completion_tokens = usage.completion_tokens;
     req_log.total_tokens = usage.total_tokens;
+    req_log.cache_read_tokens = usage.cache_read_tokens;
+    req_log.cache_write_tokens = usage.cache_write_tokens;
     req_log.cost = cost;
     req_log.wait_time = elapsed_ms;
     req_log.error = None;
@@ -739,16 +784,22 @@ async fn handle_successful_json(
         }
     });
 
+    let output_cost =
+        (usage.completion_tokens as f64 / 1_000_000.0) * ctx.price_opt.as_ref().map(|p| p.output).unwrap_or(0.0);
+    let input_cost = calculate_input_cost(
+        usage.prompt_tokens,
+        usage.cache_read_tokens,
+        usage.cache_write_tokens,
+        ctx.price_opt.as_ref(),
+    );
     let delta = StatsMetrics {
-        input_token:     usage.prompt_tokens,
-        output_token:    usage.completion_tokens,
-        input_cost:      (usage.prompt_tokens as f64 / 1_000_000.0)
-            * ctx.price_opt.as_ref().map(|p| p.input).unwrap_or(0.0),
-        output_cost:     (usage.completion_tokens as f64 / 1_000_000.0)
-            * ctx.price_opt.as_ref().map(|p| p.output).unwrap_or(0.0),
-        wait_time:       elapsed_ms,
+        input_token: usage.prompt_tokens,
+        output_token: usage.completion_tokens,
+        input_cost,
+        output_cost,
+        wait_time: elapsed_ms,
         request_success: 1,
-        request_failed:  0,
+        request_failed: 0,
     };
 
     stats::record_metrics(state, ctx.api_key_id, ctx.channel.id, ctx.channel_model.id, &delta);

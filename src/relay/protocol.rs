@@ -1579,16 +1579,35 @@ pub fn gemini_sse_event_to_openai_chunk(
     ))
 }
 
-pub fn calculate_cost(prompt_tokens: i64, completion_tokens: i64, price: Option<&ModelPrice>) -> f64 {
-    match price {
-        Some(p) => {
-            // 价格按每 1M token 计算
-            let input_cost = (prompt_tokens as f64 / 1_000_000.0) * p.input;
-            let output_cost = (completion_tokens as f64 / 1_000_000.0) * p.output;
-            input_cost + output_cost
-        }
-        None => 0.0,
-    }
+/// 按缓存拆分计算输入侧费用：未命中部分按输入价，缓存读/写按各自价目（每 1M token）。
+/// prompt_tokens 为总输入口径（含缓存命中与写入，OpenAI 语义），缓存部分从中扣除。
+pub fn calculate_input_cost(
+    prompt_tokens: i64,
+    cache_read_tokens: i64,
+    cache_write_tokens: i64,
+    price: Option<&ModelPrice>,
+) -> f64 {
+    let Some(p) = price else {
+        return 0.0;
+    };
+    let cache_read = cache_read_tokens.max(0).min(prompt_tokens.max(0)) as f64;
+    let cache_write = cache_write_tokens.max(0).min(prompt_tokens.max(0)) as f64;
+    let fresh_prompt = (prompt_tokens.max(0) - cache_read as i64 - cache_write as i64).max(0) as f64;
+    fresh_prompt / 1_000_000.0 * p.input
+        + cache_read / 1_000_000.0 * p.cache_read
+        + cache_write / 1_000_000.0 * p.cache_write
+}
+
+/// 按缓存拆分计算请求总费用（输入侧 + 输出侧）。
+pub fn calculate_cost(
+    prompt_tokens: i64,
+    completion_tokens: i64,
+    cache_read_tokens: i64,
+    cache_write_tokens: i64,
+    price: Option<&ModelPrice>,
+) -> f64 {
+    let output_cost = completion_tokens as f64 / 1_000_000.0 * price.map(|p| p.output).unwrap_or(0.0);
+    calculate_input_cost(prompt_tokens, cache_read_tokens, cache_write_tokens, price) + output_cost
 }
 
 pub fn extract_usage_from_json(val: &Value) -> Option<Usage> {
@@ -1613,6 +1632,26 @@ pub fn extract_usage_from_json(val: &Value) -> Option<Usage> {
             .and_then(|v| v.as_i64())
             .unwrap_or(0);
 
+        // 缓存读/写：OpenAI/Gemini 的缓存 token 是 prompt 子集；Anthropic 的
+        // cache_*_input_tokens 不含在 input_tokens 内，需并入以统一“总输入”口径。
+        let cache_read_tokens = usage_obj
+            .get("cache_read_input_tokens")
+            .or_else(|| usage_obj.pointer("/prompt_tokens_details/cached_tokens"))
+            .or_else(|| usage_obj.get("cachedContentTokenCount"))
+            .and_then(|v| v.as_i64())
+            .unwrap_or(0);
+        let cache_write_tokens = usage_obj
+            .get("cache_creation_input_tokens")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(0);
+        let is_anthropic_usage = usage_obj.get("cache_read_input_tokens").is_some()
+            || usage_obj.get("cache_creation_input_tokens").is_some();
+        let prompt_tokens = if is_anthropic_usage {
+            prompt_tokens + cache_read_tokens + cache_write_tokens
+        } else {
+            prompt_tokens
+        };
+
         let total_tokens = usage_obj
             .get("total_tokens")
             .or_else(|| usage_obj.get("totalTokenCount"))
@@ -1623,6 +1662,8 @@ pub fn extract_usage_from_json(val: &Value) -> Option<Usage> {
             prompt_tokens,
             completion_tokens,
             total_tokens,
+            cache_read_tokens,
+            cache_write_tokens,
         });
     }
 
@@ -1636,6 +1677,10 @@ pub fn extract_usage_from_json(val: &Value) -> Option<Usage> {
             .get("candidatesTokenCount")
             .and_then(|v| v.as_i64())
             .unwrap_or(0);
+        let cache_read_tokens = usage_obj
+            .get("cachedContentTokenCount")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(0);
         let total_tokens = usage_obj
             .get("totalTokenCount")
             .and_then(|v| v.as_i64())
@@ -1644,6 +1689,8 @@ pub fn extract_usage_from_json(val: &Value) -> Option<Usage> {
             prompt_tokens,
             completion_tokens,
             total_tokens,
+            cache_read_tokens,
+            cache_write_tokens: 0,
         });
     }
 
@@ -2197,5 +2244,58 @@ mod tests {
         assert_eq!(response.get("type").unwrap(), "message");
         assert_eq!(response.pointer("/content/0/text").unwrap(), "Hello");
         assert_eq!(response.get("stop_reason").unwrap(), "end_turn");
+    }
+
+    #[test]
+    fn test_extract_usage_anthropic_cache_normalization() {
+        // Anthropic 的 input_tokens 不含缓存部分：归一化后 prompt_tokens 应为总输入
+        let start = serde_json::json!({
+            "type": "message_start",
+            "message": { "usage": {
+                "input_tokens": 10,
+                "cache_read_input_tokens": 100,
+                "cache_creation_input_tokens": 5,
+                "output_tokens": 0
+            }}
+        });
+        let usage = extract_usage_from_json(&start).unwrap();
+        assert_eq!(usage.prompt_tokens, 115);
+        assert_eq!(usage.cache_read_tokens, 100);
+        assert_eq!(usage.cache_write_tokens, 5);
+        assert_eq!(usage.total_tokens, 115);
+    }
+
+    #[test]
+    fn test_extract_usage_openai_cached_tokens() {
+        // OpenAI 的 cached_tokens 是 prompt_tokens 的子集，不改变总量口径
+        let chunk = serde_json::json!({
+            "choices": [],
+            "usage": {
+                "prompt_tokens": 100,
+                "completion_tokens": 7,
+                "total_tokens": 107,
+                "prompt_tokens_details": { "cached_tokens": 80 }
+            }
+        });
+        let usage = extract_usage_from_json(&chunk).unwrap();
+        assert_eq!(usage.prompt_tokens, 100);
+        assert_eq!(usage.cache_read_tokens, 80);
+        assert_eq!(usage.cache_write_tokens, 0);
+    }
+
+    #[test]
+    fn test_calculate_cost_cache_split() {
+        let price = ModelPrice {
+            input:       3.0,
+            output:      15.0,
+            cache_read:  0.3,
+            cache_write: 3.75,
+        };
+        // prompt=115（fresh 10 + 缓存读 100 + 缓存写 5），completion=7
+        let cost = calculate_cost(115, 7, 100, 5, Some(&price));
+        let expected = 10.0 / 1e6 * 3.0 + 100.0 / 1e6 * 0.3 + 5.0 / 1e6 * 3.75 + 7.0 / 1e6 * 15.0;
+        assert!((cost - expected).abs() < 1e-12);
+        // 无价目时恒为 0
+        assert_eq!(calculate_cost(115, 7, 100, 5, None), 0.0);
     }
 }

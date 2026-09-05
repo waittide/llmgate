@@ -288,6 +288,8 @@ pub async fn migrate(pool: &DbPool) -> Result<()> {
             prompt_tokens INTEGER NOT NULL DEFAULT 0,
             completion_tokens INTEGER NOT NULL DEFAULT 0,
             total_tokens INTEGER NOT NULL DEFAULT 0,
+            cache_read_tokens INTEGER NOT NULL DEFAULT 0,
+            cache_write_tokens INTEGER NOT NULL DEFAULT 0,
             cost REAL NOT NULL DEFAULT 0,
             wait_time INTEGER NOT NULL DEFAULT 0,
             round INTEGER NOT NULL DEFAULT 1,
@@ -303,6 +305,25 @@ pub async fn migrate(pool: &DbPool) -> Result<()> {
     .execute(pool)
     .await?;
 
+    // request_logs 补列（幂等：pragma 探测后再 ALTER，SQLite 不支持 ADD COLUMN IF NOT EXISTS）
+    let has_cache_read: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM pragma_table_info('request_logs') WHERE name = 'cache_read_tokens'")
+            .fetch_one(pool)
+            .await?;
+    if has_cache_read == 0 {
+        sqlx::query("ALTER TABLE request_logs ADD COLUMN cache_read_tokens INTEGER NOT NULL DEFAULT 0")
+            .execute(pool)
+            .await?;
+    }
+    let has_cache_write: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM pragma_table_info('request_logs') WHERE name = 'cache_write_tokens'")
+            .fetch_one(pool)
+            .await?;
+    if has_cache_write == 0 {
+        sqlx::query("ALTER TABLE request_logs ADD COLUMN cache_write_tokens INTEGER NOT NULL DEFAULT 0")
+            .execute(pool)
+            .await?;
+    }
     Ok(())
 }
 

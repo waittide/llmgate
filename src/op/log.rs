@@ -57,7 +57,8 @@ pub async fn update_completed_log(state: &AppState, log: &RequestLog) -> Result<
             prompt_tokens = ?,
             completion_tokens = ?,
             total_tokens = ?,
-            cost = ?,
+            cache_read_tokens = ?,
+            cache_write_tokens = ?,
             wait_time = ?,
             round = ?,
             error = ?,
@@ -74,6 +75,8 @@ pub async fn update_completed_log(state: &AppState, log: &RequestLog) -> Result<
     .bind(log.prompt_tokens)
     .bind(log.completion_tokens)
     .bind(log.total_tokens)
+    .bind(log.cache_read_tokens)
+    .bind(log.cache_write_tokens)
     .bind(log.cost)
     .bind(log.wait_time)
     .bind(log.round)

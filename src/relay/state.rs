@@ -9,11 +9,17 @@ use crate::model::RequestLog;
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Usage {
     #[serde(default)]
-    pub prompt_tokens:     i64,
+    pub prompt_tokens:      i64,
     #[serde(default)]
-    pub completion_tokens: i64,
+    pub completion_tokens:  i64,
     #[serde(default)]
-    pub total_tokens:      i64,
+    pub total_tokens:       i64,
+    /// 命中上游 prompt 缓存的输入 token（prompt_tokens 的子集）
+    #[serde(default)]
+    pub cache_read_tokens:  i64,
+    /// 写入上游 prompt 缓存的输入 token（prompt_tokens 的子集）
+    #[serde(default)]
+    pub cache_write_tokens: i64,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -51,9 +57,11 @@ impl From<&RequestLog> for RequestOverview {
             duration:       log.wait_time,
             model:          log.model.clone(),
             usage:          Usage {
-                prompt_tokens:     log.prompt_tokens,
-                completion_tokens: log.completion_tokens,
-                total_tokens:      log.total_tokens,
+                prompt_tokens:      log.prompt_tokens,
+                completion_tokens:  log.completion_tokens,
+                total_tokens:       log.total_tokens,
+                cache_read_tokens:  log.cache_read_tokens,
+                cache_write_tokens: log.cache_write_tokens,
             },
             cost:           log.cost,
             round:          log.round,

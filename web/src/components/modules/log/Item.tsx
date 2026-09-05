@@ -56,7 +56,7 @@ function formatMilliseconds(value: number) {
 
 // LogMetrics 渲染耗时, 费用和 Token 指标; card 变体用于卡片栅格, footer 变体用于弹窗底部。
 function LogMetrics({ log, now, brandColor, variant }: { log: RelayLogOverview; now: number; brandColor: string; variant: 'card' | 'footer' }) {
-    const cachedTokens = log.usage.prompt_tokens_details?.cached_tokens ?? 0;
+    const cachedTokens = log.usage.cache_read_tokens ?? 0;
     // 进行中的请求按共享时钟推算耗时, 结束后改用后端记录的最终耗时。
     const duration = log.status === 'running' || log.status === 'committed'
         ? formatMilliseconds(now - new Date(log.started_at).getTime())
@@ -68,7 +68,7 @@ function LogMetrics({ log, now, brandColor, variant }: { log: RelayLogOverview; 
         { key: 'prompt', Icon: ArrowDownToLine, iconClassName: 'size-3.5 shrink-0 text-green-500', value: (log.usage.prompt_tokens - cachedTokens).toLocaleString(), cellClassName: 'col-span-3 md:col-span-1' },
         { key: 'cached', Icon: Database, iconClassName: 'size-3.5 shrink-0 text-cyan-500', value: cachedTokens.toLocaleString(), cellClassName: 'col-span-3 md:col-span-1' },
         { key: 'completion', Icon: ArrowUpFromLine, iconClassName: 'size-3.5 shrink-0 text-purple-500', value: log.usage.completion_tokens.toLocaleString(), cellClassName: 'col-span-3 md:col-span-1' },
-        { key: 'cacheWrite', Icon: Database, iconClassName: 'size-3.5 shrink-0 text-orange-500', value: (log.usage.prompt_tokens_details?.write_cached_tokens ?? 0).toLocaleString(), cellClassName: 'col-span-3 md:col-span-1' },
+        { key: 'cacheWrite', Icon: Database, iconClassName: 'size-3.5 shrink-0 text-orange-500', value: (log.usage.cache_write_tokens ?? 0).toLocaleString(), cellClassName: 'col-span-3 md:col-span-1' },
     ];
 
     return metrics.map((metric) => (
@@ -318,7 +318,7 @@ function LogDetail({ log, now }: { log: RelayLogOverview; now: number }) {
                             </Tabs>
                             {leftTab === 'request' && (
                                 <Badge variant="secondary" className="ml-auto text-xs">
-                                    {(log.usage.prompt_tokens - (log.usage.prompt_tokens_details?.cached_tokens ?? 0)).toLocaleString()} {t('tokens')}
+                                    {(log.usage.prompt_tokens - (log.usage.cache_read_tokens ?? 0)).toLocaleString()} {t('tokens')}
                                 </Badge>
                             )}
                         </div>

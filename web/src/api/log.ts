@@ -10,10 +10,8 @@ export interface RelayUsage {
     prompt_tokens: number;
     completion_tokens: number;
     total_tokens: number;
-    prompt_tokens_details: {
-        cached_tokens: number;
-        write_cached_tokens?: number;
-    } | null;
+    cache_read_tokens: number;
+    cache_write_tokens: number;
 }
 // RoundLog 表示一轮上游渠道尝试的完整上下文与结果。
 export interface RoundLog {
