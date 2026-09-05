@@ -31,8 +31,6 @@ export interface RoundLog {
     error?: string;
 }
 
-// 实时日志滑动窗口上限: 超过后在内存中丢弃最旧的条目, 防止长时间运行导致内存膨胀。
-const MAX_RT_LOGS = 200;
 
 // RelayLogOverview 是请求状态流发送的完整进程内请求状态。
 export interface RelayLogOverview {
@@ -64,64 +62,6 @@ export function useStopRound() {
             apiRequest<null>(`/api/v1/log/${requestId}/${round}/stop`, { method: 'POST' }),
     });
 }
-
-// useLogs 订阅进程内日志概览，并按 RequestID 更新同一条记录。
-export function useLogs() {
-    const [logs, setLogs] = useState<RelayLogOverview[]>([]);
-    const [isLoading, setIsLoading] = useState(true);
-    const [error, setError] = useState<Error | null>(null);
-
-    useEffect(() => {
-        const source = new EventSource('/api/v1/log/overview/stream', { withCredentials: true });
-
-        source.onopen = () => {
-            setError(null);
-            setIsLoading(false);
-        };
-        source.addEventListener('overview', (event) => {
-            let next: RelayLogOverview;
-            try {
-                next = JSON.parse((event as MessageEvent<string>).data) as RelayLogOverview;
-            } catch {
-                setError(new Error('Invalid log update'));
-                return;
-            }
-            setIsLoading(false);
-            setError(null);
-            // 列表始终按 ID 倒序: 命中已有记录时原地替换, 新记录插入到首个更小 ID 之前,
-            // 由此避免每条更新重排整个列表, 并保留未变更记录的引用以跳过卡片重渲染。
-            setLogs((current) => {
-                const index = current.findIndex((item) => item.id === next.id);
-                if (index >= 0) {
-                    const updated = current.slice();
-                    updated[index] = next;
-                    return updated;
-                }
-                const position = current.findIndex((item) => item.id < next.id);
-                const nextList =
-                    position < 0
-                        ? [...current, next]
-                        : [...current.slice(0, position), next, ...current.slice(position)];
-                // 只保留最近 MAX_RT_LOGS 条, 丢弃最旧 (列表尾部, ID 最小)。
-                if (nextList.length > MAX_RT_LOGS) {
-                    return nextList.slice(0, MAX_RT_LOGS);
-                }
-                return nextList;
-            });
-        });
-        source.onerror = () => {
-            setIsLoading(false);
-            setError(new Error('Log stream disconnected'));
-        };
-
-        return () => {
-            source.close();
-        };
-    }, []);
-
-    return { logs, isLoading, error };
-}
-
 // useLogRequestBody 在调用方启用时按需获取指定日志的请求体。
 export function useLogRequestBody(id: number, startedAt: string, enabled: boolean) {
     return useQuery({
