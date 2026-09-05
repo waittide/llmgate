@@ -85,7 +85,7 @@ pub fn build_upstream_headers(
                     .map_err(|_| anyhow!("无效的 gemini key 请求头"))?,
             );
         }
-        _ => {
+        ChannelProvider::OpenaiCompletion | ChannelProvider::OpenaiResponses => {
             headers.insert(
                 "Authorization",
                 format!("Bearer {}", api_key)
