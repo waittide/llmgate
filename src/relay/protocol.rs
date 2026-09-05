@@ -1266,6 +1266,21 @@ pub fn convert_openai_to_anthropic(val: &Value) -> Value {
     if let Some(top_p) = val.get("top_p") {
         anthropic_obj.insert("top_p".to_string(), top_p.clone());
     }
+    // OpenAI `stop`（字符串或数组）→ Anthropic `stop_sequences`（数组）
+    if let Some(stop) = val.get("stop") {
+        let sequences: Vec<Value> = match stop {
+            Value::String(s) => vec![Value::String(s.clone())],
+            Value::Array(items) => items
+                .iter()
+                .filter(|item| item.is_string())
+                .cloned()
+                .collect(),
+            _ => Vec::new(),
+        };
+        if !sequences.is_empty() {
+            anthropic_obj.insert("stop_sequences".to_string(), Value::Array(sequences));
+        }
+    }
 
     // `tools`：OpenAI 将每个工具包装为 `{type, function:{...}}`；Anthropic 使用扁平的
     // `{name, description, input_schema}` 对象。
@@ -2186,6 +2201,30 @@ pub fn convert_openai_to_gemini(val: &Value) -> Value {
     {
         gen_config.insert("maxOutputTokens".to_string(), max_tokens.clone());
     }
+    // OpenAI `stop`（字符串或数组）→ Gemini `stopSequences`（数组）
+    if let Some(stop) = val.get("stop") {
+        let sequences: Vec<Value> = match stop {
+            Value::String(s) => vec![Value::String(s.clone())],
+            Value::Array(items) => items
+                .iter()
+                .filter(|item| item.is_string())
+                .cloned()
+                .collect(),
+            _ => Vec::new(),
+        };
+        if !sequences.is_empty() {
+            gen_config.insert("stopSequences".to_string(), Value::Array(sequences));
+        }
+    }
+    if let Some(freq) = val.get("frequency_penalty") {
+        gen_config.insert("frequencyPenalty".to_string(), freq.clone());
+    }
+    if let Some(pres) = val.get("presence_penalty") {
+        gen_config.insert("presencePenalty".to_string(), pres.clone());
+    }
+    if let Some(seed) = val.get("seed") {
+        gen_config.insert("seed".to_string(), seed.clone());
+    }
     if !gen_config.is_empty() {
         gemini_obj.insert("generationConfig".to_string(), Value::Object(gen_config));
     }
@@ -2541,13 +2580,15 @@ mod tests {
                 { "role": "user", "content": "Hello world" }
             ],
             "temperature": 0.7,
-            "max_tokens": 2048
+            "max_tokens": 2048,
+            "stop": ["END"]
         });
 
         let anthropic_req = convert_openai_to_anthropic(&openai_req);
         assert_eq!(anthropic_req.get("model").unwrap(), "claude-3-5-sonnet");
         assert_eq!(anthropic_req.get("system").unwrap(), "You are a helpful assistant");
         assert_eq!(anthropic_req.get("max_tokens").unwrap(), 2048);
+        assert_eq!(anthropic_req.pointer("/stop_sequences/0").unwrap(), "END");
 
         let messages = anthropic_req.get("messages").unwrap().as_array().unwrap();
         assert_eq!(messages.len(), 1);
@@ -2563,7 +2604,11 @@ mod tests {
                 { "role": "system", "content": "Think step by step" },
                 { "role": "user", "content": "Hi" }
             ],
-            "temperature": 0.5
+            "temperature": 0.5,
+            "stop": "STOP_STR",
+            "frequency_penalty": 0.1,
+            "presence_penalty": 0.2,
+            "seed": 9
         });
 
         let gemini_req = convert_openai_to_gemini(&openai_req);
@@ -2571,6 +2616,25 @@ mod tests {
         let contents = gemini_req.get("contents").unwrap().as_array().unwrap();
         assert_eq!(contents.len(), 1);
         assert_eq!(contents[0].get("role").unwrap(), "user");
+        assert_eq!(
+            gemini_req
+                .pointer("/generationConfig/stopSequences/0")
+                .unwrap(),
+            "STOP_STR"
+        );
+        assert_eq!(
+            gemini_req
+                .pointer("/generationConfig/frequencyPenalty")
+                .unwrap(),
+            0.1
+        );
+        assert_eq!(
+            gemini_req
+                .pointer("/generationConfig/presencePenalty")
+                .unwrap(),
+            0.2
+        );
+        assert_eq!(gemini_req.pointer("/generationConfig/seed").unwrap(), 9);
     }
 
     #[test]
