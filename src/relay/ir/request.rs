@@ -2185,4 +2185,72 @@ mod tests {
         assert_eq!(messages[2].get("tool_call_id").unwrap(), "toolu_1");
         assert_eq!(messages[2].get("content").unwrap(), "23C sunny");
     }
+
+    /// 同一工具回合经四种源格式互相转换（12 组合），必须保持：
+    /// 一次工具调用 + 一次工具结果，且调用方名称一致（id 形态因格式而异）。
+    #[test]
+    fn all_pairs_preserve_tool_round_trip() {
+        use crate::relay::protocol::ApiFormat as F;
+        let anthropic = json!({
+            "model": "m", "max_tokens": 64,
+            "messages": [
+                { "role": "user", "content": "weather?" },
+                { "role": "assistant", "content": [
+                    { "type": "tool_use", "id": "t1", "name": "get_weather", "input": { "city": "Paris" } }
+                ]},
+                { "role": "user", "content": [
+                    { "type": "tool_result", "tool_use_id": "t1", "content": "23C" }
+                ]}
+            ],
+            "tools": [{ "name": "get_weather", "input_schema": { "type": "object" } }]
+        });
+        let chat = json!({
+            "model": "m",
+            "messages": [
+                { "role": "user", "content": "weather?" },
+                { "role": "assistant", "tool_calls": [
+                    { "id": "c1", "type": "function", "function": { "name": "get_weather", "arguments": "{\"city\":\"Paris\"}" } }
+                ]},
+                { "role": "tool", "tool_call_id": "c1", "content": "23C" }
+            ],
+            "tools": [{ "type": "function", "function": { "name": "get_weather", "parameters": { "type": "object" } } }]
+        });
+        let gemini = json!({
+            "contents": [
+                { "role": "user", "parts": [{ "text": "weather?" }] },
+                { "role": "model", "parts": [{ "functionCall": { "name": "get_weather", "args": { "city": "Paris" } } }] },
+                { "role": "user", "parts": [{ "functionResponse": { "name": "get_weather", "response": { "result": "23C" } } }] }
+            ],
+            "tools": [{ "functionDeclarations": [{ "name": "get_weather" }] }]
+        });
+        let responses = json!({
+            "model": "m",
+            "input": [
+                { "type": "message", "role": "user", "content": [{ "type": "input_text", "text": "weather?" }] },
+                { "type": "function_call", "call_id": "r1", "name": "get_weather", "arguments": "{\"city\":\"Paris\"}" },
+                { "type": "function_call_output", "call_id": "r1", "output": "23C" }
+            ],
+            "tools": [{ "type": "function", "name": "get_weather", "parameters": { "type": "object" } }]
+        });
+        let sources = [
+            (F::OpenaiCompletion, &chat),
+            (F::AnthropicMessage, &anthropic),
+            (F::GeminiGenerate, &gemini),
+            (F::OpenaiResponse, &responses),
+        ];
+        for (src, body) in &sources {
+            for (dst, _) in &sources {
+                if src == dst {
+                    continue;
+                }
+                let out = convert(*src, body, *dst);
+                let out_str = out.to_string();
+                assert!(
+                    out_str.contains("get_weather"),
+                    "{src:?}->{dst:?} 丢失工具名: {out_str}"
+                );
+                assert!(out_str.contains("23C"), "{src:?}->{dst:?} 丢失工具结果: {out_str}");
+            }
+        }
+    }
 }

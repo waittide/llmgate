@@ -13,6 +13,7 @@ use axum::{
 };
 use bytes::Bytes;
 use futures::StreamExt;
+use serde_json::Value;
 
 use crate::{
     model::{Channel, ChannelModel, ChannelProvider, Group, ModelPrice, RequestLog, StatsMetrics, request_status},
@@ -30,6 +31,54 @@ use crate::{
     server::{middleware::AuthContext, resp::error},
     utils::{estimate_tokens, truncate_utf8},
 };
+
+/// 上游为 Chat Completions 时的形状校验：assistant 的每个 tool_call 都必须有
+/// 配对的 tool 消息，且 tool 消息不得早于其 tool_calls。拦截本可在代理侧
+/// 明确表达的 400，避免上游返回语义模糊的错误。
+fn validate_chat_tool_pairing(body: &Value) -> Result<(), String> {
+    let Some(messages) = body.get("messages").and_then(Value::as_array) else {
+        return Ok(());
+    };
+    let mut pending: Vec<String> = Vec::new();
+    for msg in messages {
+        match msg.get("role").and_then(Value::as_str) {
+            Some("assistant") => {
+                if let Some(calls) = msg.get("tool_calls").and_then(Value::as_array) {
+                    for call in calls {
+                        pending.push(
+                            call.get("id")
+                                .and_then(Value::as_str)
+                                .unwrap_or("")
+                                .to_string(),
+                        );
+                    }
+                }
+            }
+            Some("tool") => {
+                let id = msg
+                    .get("tool_call_id")
+                    .and_then(Value::as_str)
+                    .unwrap_or("");
+                match pending.iter().position(|p| p == id) {
+                    Some(pos) => {
+                        pending.remove(pos);
+                    }
+                    None => {
+                        return Err(format!("tool 消息 tool_call_id={id} 没有对应的 assistant tool_calls"));
+                    }
+                }
+            }
+            Some("user") if !pending.is_empty() => {
+                return Err("assistant tool_calls 尚未全部得到 tool 结果就出现了新的 user 消息".to_string());
+            }
+            _ => {}
+        }
+    }
+    if !pending.is_empty() {
+        return Err(format!("assistant tool_calls 缺少配对的 tool 消息: {pending:?}"));
+    }
+    Ok(())
+}
 
 /// 判断上游返回的 HTTP 状态码是否属于客户端语法或格式错误。
 ///
@@ -109,7 +158,7 @@ fn prepare_upstream_payload(
     body_bytes: &Bytes,
     ch: &Channel,
     channel_model: &ChannelModel,
-) -> (String, Vec<u8>) {
+) -> Result<(String, Vec<u8>), String> {
     let rewritten_body = rewrite_request_body_in_json(body_bytes, &channel_model.name, ch.param_override.as_deref());
     let target_format = ir::channel_format(&ch.channel_type);
     let endpoint = match &ch.channel_type {
@@ -121,17 +170,28 @@ fn prepare_upstream_payload(
 
     // 同格式直通：仅重写 model/param_override 后原样转发
     if format == target_format {
-        return (endpoint, rewritten_body);
+        return Ok((endpoint, rewritten_body));
     }
 
     // 跨格式：原始格式 → IR → 目标格式
-    let body = serde_json::from_slice::<serde_json::Value>(&rewritten_body)
+    let converted = serde_json::from_slice::<serde_json::Value>(&rewritten_body)
         .ok()
         .and_then(|val| ir::parse_request(format, &val))
-        .map(|req| ir::emit_request(&req, target_format))
-        .and_then(|out| serde_json::to_vec(&out).ok())
-        .unwrap_or(rewritten_body);
-    (endpoint, body)
+        .map(|req| ir::emit_request(&req, target_format));
+
+    let body = match &converted {
+        Some(out) => {
+            if target_format == ApiFormat::OpenaiCompletion
+                && let Err(msg) = validate_chat_tool_pairing(out)
+            {
+                return Err(msg);
+            }
+            serde_json::to_vec(out).ok()
+        }
+        None => None,
+    }
+    .unwrap_or(rewritten_body);
+    Ok((endpoint, body))
 }
 
 struct RoundFailure<'a> {
@@ -704,7 +764,28 @@ pub async fn forward_relay(
         };
 
         let (target_endpoint, final_body) =
-            prepare_upstream_payload(format, metadata.stream, &body_bytes, &ch, &channel_model);
+            match prepare_upstream_payload(format, metadata.stream, &body_bytes, &ch, &channel_model) {
+                Ok(pair) => pair,
+                Err(msg) => {
+                    // 转换结果未通过目标形状校验：代理侧明确的 400，不透传上游
+                    let resp = error(StatusCode::BAD_REQUEST, &msg);
+                    log::update_completed_log(
+                        &state,
+                        &RequestLog {
+                            id: request_id as i64,
+                            model: metadata.model.clone(),
+                            status: request_status::FAILED.to_string(),
+                            error: Some(msg),
+                            created_at: started_at,
+                            ..log_base.clone()
+                        },
+                    )
+                    .await
+                    .unwrap_or(());
+                    state.in_flight.unregister(request_id);
+                    return resp;
+                }
+            };
         let target_req_url = format!("{}{}", normalize_base_url(&ch.base_url), target_endpoint);
         let key_pool = ch.key_pool();
         let channel_req_headers = super::upstream::build_upstream_headers(&ch, key_pool[0].as_str(), Some(&headers))
@@ -905,4 +986,43 @@ pub async fn forward_relay(
             api_key_id: auth_ctx.api_key.id,
         },
     )
+}
+
+#[cfg(test)]
+mod validate_tests {
+    use serde_json::json;
+
+    use super::validate_chat_tool_pairing;
+
+    #[test]
+    fn accepts_paired_tool_round_trip() {
+        let b = json!({ "messages": [
+            { "role": "user", "content": "q" },
+            { "role": "assistant", "tool_calls": [
+                { "id": "c1", "type": "function", "function": { "name": "f", "arguments": "{}" } }
+            ] },
+            { "role": "tool", "tool_call_id": "c1", "content": "r" }
+        ] });
+        assert!(validate_chat_tool_pairing(&b).is_ok());
+    }
+
+    #[test]
+    fn rejects_tool_message_without_call() {
+        let b = json!({ "messages": [
+            { "role": "user", "content": "q" },
+            { "role": "tool", "tool_call_id": "c9", "content": "r" }
+        ] });
+        assert!(validate_chat_tool_pairing(&b).is_err());
+    }
+
+    #[test]
+    fn rejects_missing_tool_result() {
+        let b = json!({ "messages": [
+            { "role": "assistant", "tool_calls": [
+                { "id": "c1", "type": "function", "function": { "name": "f", "arguments": "{}" } }
+            ] },
+            { "role": "user", "content": "next" }
+        ] });
+        assert!(validate_chat_tool_pairing(&b).is_err());
+    }
 }

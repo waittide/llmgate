@@ -406,6 +406,57 @@ mod tests {
     };
 
     #[tokio::test]
+    async fn export_import_round_trip_preserves_entities() {
+        use crate::{
+            model::{Channel, ChannelModel, Group, GroupItem, GroupMode},
+            test_support::setup_test_state,
+        };
+
+        let (src, p1) = setup_test_state("backup_rt_src").await;
+        let mut ch = Channel {
+            name: "c1".into(),
+            base_url: "https://example.com".into(),
+            key: "k1".into(),
+            models: vec![ChannelModel {
+                name: "m1".into(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        crate::op::channel::create_channel(&src, &mut ch)
+            .await
+            .unwrap();
+        let mut group = Group {
+            name: "m1".into(),
+            mode: GroupMode::Failover,
+            items: vec![GroupItem {
+                channel_model_id: ch.models[0].id,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        crate::op::group::create_group(&src, &mut group)
+            .await
+            .unwrap();
+        let backup = export_backup(&src).await.unwrap();
+
+        let (dst, p2) = setup_test_state("backup_rt_dst").await;
+        import_backup(&dst, backup).await.unwrap();
+
+        let re = export_backup(&dst).await.unwrap();
+        let src_channels: Vec<String> = re.channels.iter().map(|c| c.name.clone()).collect();
+        assert!(src_channels.contains(&"c1".to_string()));
+        let src_groups: Vec<String> = re.groups.iter().map(|g| g.name.clone()).collect();
+        assert!(src_groups.contains(&"m1".to_string()));
+        let group = re.groups.iter().find(|g| g.name == "m1").unwrap();
+        assert_eq!(group.items.len(), 1);
+        assert_eq!(group.mode, GroupMode::Failover);
+
+        let _ = std::fs::remove_file(p1);
+        let _ = std::fs::remove_file(p2);
+    }
+
+    #[tokio::test]
     async fn test_import_backup_channels_and_groups_with_zero_id() {
         let (state, db_path) = setup_test_state("backup").await;
 
