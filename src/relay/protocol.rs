@@ -497,12 +497,48 @@ pub fn convert_chat_completions_to_responses(val: &Value) -> Value {
         }
     }
 
+    // 字段卫生：Chat 专有字段不能透传给 Responses 上游（会 400 Unrecognized
+    // request argument），能映射的先映射再剥离。
+    if let Some(max_tokens) = obj
+        .remove("max_tokens")
+        .or_else(|| obj.remove("max_completion_tokens"))
+    {
+        obj.insert("max_output_tokens".to_string(), max_tokens);
+    }
+    for key in [
+        "stream_options",
+        "frequency_penalty",
+        "presence_penalty",
+        "logit_bias",
+        "logprobs",
+        "top_logprobs",
+        "n",
+        "prediction",
+        "response_format",
+        "seed",
+        "stop",
+        "user",
+        "verbosity",
+        "functions",
+        "function_call",
+    ] {
+        obj.remove(key);
+    }
+
     // Chat 嵌套 tools/function 结构扁平化为 Responses 形态，否则 Responses 上游 400 校验失败
     if let Some(tools) = obj.get_mut("tools").and_then(Value::as_array_mut) {
         *tools = tools
             .iter()
             .filter_map(convert_chat_tool_to_responses)
             .collect();
+    }
+    // 全部为不可转换的非 function 工具时移除，避免空数组上游校验失败
+    if obj
+        .get("tools")
+        .and_then(Value::as_array)
+        .is_some_and(|tools| tools.is_empty())
+    {
+        obj.remove("tools");
     }
     if let Some(choice) = obj.get_mut("tool_choice")
         && let Some(name) = choice.pointer("/function/name").and_then(Value::as_str)
@@ -2921,6 +2957,40 @@ mod tests {
         let messages = chat.get("messages").unwrap().as_array().unwrap();
         assert_eq!(messages.len(), 2);
         assert_eq!(messages[1].pointer("/content").unwrap(), "回答");
+    }
+
+    #[test]
+    fn test_convert_chat_to_responses_field_hygiene() {
+        let chat_req = serde_json::json!({
+            "model": "m",
+            "messages": [{ "role": "user", "content": "Hi" }],
+            "max_tokens": 1024,
+            "stream_options": { "include_usage": true },
+            "frequency_penalty": 0.5,
+            "presence_penalty": 0.2,
+            "seed": 42,
+            "stop": ["END"],
+            "n": 1,
+            "user": "u1",
+            "store": true,
+            "temperature": 0.6
+        });
+        let responses = convert_chat_completions_to_responses(&chat_req);
+        assert_eq!(responses.get("max_output_tokens").unwrap(), 1024);
+        assert_eq!(responses.get("temperature").unwrap(), 0.6);
+        assert_eq!(responses.get("store").unwrap(), true);
+        for key in [
+            "max_tokens",
+            "stream_options",
+            "frequency_penalty",
+            "presence_penalty",
+            "seed",
+            "stop",
+            "n",
+            "user",
+        ] {
+            assert!(responses.get(key).is_none(), "{key} 应被剥离");
+        }
     }
 
     #[test]
