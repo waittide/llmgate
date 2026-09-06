@@ -33,7 +33,13 @@ pub fn rewrite_request_body_in_json(body: &[u8], new_model: &str, param_override
             && let Some(override_obj) = override_val.as_object()
         {
             for (k, v) in override_obj {
-                obj.insert(k.clone(), v.clone());
+                if v.is_null() {
+                    // 值为 null 约定为删除该字段：用于剥离上游不接受的客户端专有字段
+                    // （如 GLM 等严格校验上游拒绝的 OpenAI prompt_cache_key/store/include）
+                    obj.remove(k);
+                } else {
+                    obj.insert(k.clone(), v.clone());
+                }
             }
         }
 
@@ -343,5 +349,22 @@ mod tests {
         assert!((cost - expected).abs() < 1e-12);
         // 无价目时恒为 0
         assert_eq!(calculate_cost(115, 7, 100, 5, None), 0.0);
+    }
+
+    #[test]
+    fn param_override_null_deletes_field() {
+        let body = br#"{"model":"gpt-x","prompt_cache_key":"abc","store":false,"messages":[]}"#;
+
+        // null 值 → 删除字段（剥离严格上游拒绝的客户端专有字段）
+        let out = rewrite_request_body_in_json(body, "glm-5.3-flash", Some(r#"{"prompt_cache_key": null}"#));
+        let val: Value = serde_json::from_slice(&out).unwrap();
+        assert_eq!(val.get("model").and_then(Value::as_str), Some("glm-5.3-flash"));
+        assert!(val.get("prompt_cache_key").is_none());
+        assert_eq!(val.get("store").and_then(Value::as_bool), Some(false));
+
+        // 非 null 值 → 保持原有合并语义
+        let out2 = rewrite_request_body_in_json(body, "m", Some(r#"{"temperature": 0.5}"#));
+        let val2: Value = serde_json::from_slice(&out2).unwrap();
+        assert_eq!(val2.get("temperature").and_then(Value::as_f64), Some(0.5));
     }
 }
