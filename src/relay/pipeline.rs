@@ -173,24 +173,19 @@ fn prepare_upstream_payload(
         return Ok((endpoint, rewritten_body));
     }
 
-    // 跨格式：原始格式 → IR → 目标格式
-    let converted = serde_json::from_slice::<serde_json::Value>(&rewritten_body)
-        .ok()
-        .and_then(|val| ir::parse_request(format, &val))
-        .map(|req| ir::emit_request(&req, target_format));
-
-    let body = match &converted {
-        Some(out) => {
-            if target_format == ApiFormat::OpenaiCompletion
-                && let Err(msg) = validate_chat_tool_pairing(out)
-            {
-                return Err(msg);
-            }
-            serde_json::to_vec(out).ok()
-        }
-        None => None,
+    // 跨格式：原始格式 → IR → 目标格式。解析/序列化失败显式返回 400，
+    // 禁止把错误格式的载荷静默转发给异构上游（会被记为渠道故障并触发冷却）。
+    let source = serde_json::from_slice::<serde_json::Value>(&rewritten_body)
+        .map_err(|e| format!("跨格式转换失败：请求体不是合法 JSON: {e}"))?;
+    let parsed =
+        ir::parse_request(format, &source).ok_or_else(|| "跨格式转换失败：请求体无法按源格式解析".to_string())?;
+    let emitted = ir::emit_request(&parsed, target_format);
+    if target_format == ApiFormat::OpenaiCompletion
+        && let Err(msg) = validate_chat_tool_pairing(&emitted)
+    {
+        return Err(msg);
     }
-    .unwrap_or(rewritten_body);
+    let body = serde_json::to_vec(&emitted).map_err(|e| format!("跨格式转换序列化失败: {e}"))?;
     Ok((endpoint, body))
 }
 
@@ -355,7 +350,30 @@ async fn handle_successful_json(
     mut ctx: SuccessContext<'_>,
 ) -> Response {
     let response_headers = serialize_headers(upstream_resp.headers());
-    let raw_bytes = upstream_resp.bytes().await.unwrap_or_default();
+    let raw_bytes = match upstream_resp.bytes().await {
+        Ok(b) => b,
+        Err(e) => {
+            // 上游 200 但响应体读取失败：按网关失败处理，绝不返回空 body 的 200
+            let response_url = ctx.log_base.response_url.clone();
+            let round = ctx.log_base.round;
+            return build_failed_relay_response(
+                state,
+                FailedRelayContext {
+                    log_base: ctx.log_base,
+                    last_target_channel: ctx.channel.name.clone(),
+                    last_target_model: ctx.channel_model.name.clone(),
+                    last_response_url: response_url,
+                    last_response_headers: response_headers,
+                    last_status: StatusCode::BAD_GATEWAY,
+                    last_error_body: format!("读取上游响应体失败: {e}"),
+                    rounds: ctx.rounds,
+                    wait_time_ms: ctx.start_time.elapsed().as_millis() as i64,
+                    round,
+                    api_key_id: ctx.api_key_id,
+                },
+            );
+        }
+    };
     let parsed = serde_json::from_slice::<serde_json::Value>(&raw_bytes).ok();
     // 跨格式：上游格式 → IR → 客户端格式；同格式直通
     let upstream_format = ir::channel_format(&ctx.channel.channel_type);
@@ -367,11 +385,41 @@ async fn handle_successful_json(
             Some(ir::emit_response(&resp, ctx.format))
         })
     };
-    let resp_bytes = converted
-        .as_ref()
-        .and_then(|val| serde_json::to_vec(val).ok())
-        .map(Bytes::from)
-        .unwrap_or(raw_bytes);
+    let resp_bytes = if ctx.format == upstream_format {
+        converted
+            .as_ref()
+            .and_then(|val| serde_json::to_vec(val).ok())
+            .map(Bytes::from)
+            .unwrap_or(raw_bytes)
+    } else {
+        match converted
+            .as_ref()
+            .and_then(|val| serde_json::to_vec(val).ok())
+        {
+            Some(bytes) => Bytes::from(bytes),
+            None => {
+                // 跨格式转换失败：透传会给客户端错误格式，按网关失败处理
+                let response_url = ctx.log_base.response_url.clone();
+                let round = ctx.log_base.round;
+                return build_failed_relay_response(
+                    state,
+                    FailedRelayContext {
+                        log_base: ctx.log_base,
+                        last_target_channel: ctx.channel.name.clone(),
+                        last_target_model: ctx.channel_model.name.clone(),
+                        last_response_url: response_url,
+                        last_response_headers: response_headers,
+                        last_status: StatusCode::BAD_GATEWAY,
+                        last_error_body: "跨格式转换失败：上游响应无法解析为目标格式".to_string(),
+                        rounds: ctx.rounds,
+                        wait_time_ms: ctx.start_time.elapsed().as_millis() as i64,
+                        round,
+                        api_key_id: ctx.api_key_id,
+                    },
+                );
+            }
+        }
+    };
     // 入库用截断版本，避免大响应撑爆 request_logs；返回给客户端的 resp_bytes 不受影响
     let resp_str = truncate_utf8(&String::from_utf8_lossy(&resp_bytes), RESPONSE_CAPTURE_LIMIT).to_string();
 
@@ -641,6 +689,46 @@ async fn send_with_key_rotation(plan: SendPlan<'_>) -> Result<(reqwest::Response
     }
 }
 
+/// 转发期兜底注销：`forward_relay` 的 future 在 await 点被 drop（客户端断连、
+/// 运行时关闭）时，in_flight 注册表条目会永久泄漏、初始日志行停留在 RUNNING。
+/// 本 guard 的 Drop 统一收尾：注销注册、广播并落盘一条 INTERRUPTED 日志。
+/// 正常完成路径必须先调用 `defuse()`，把收尾交给各自的完成逻辑。
+struct RelayGuard {
+    state:      AppState,
+    req_id:     u64,
+    log_base:   RequestLog,
+    started_at: i64,
+    defused:    bool,
+}
+
+impl RelayGuard {
+    fn defuse(mut self) {
+        self.defused = true;
+    }
+}
+
+impl Drop for RelayGuard {
+    fn drop(&mut self) {
+        if self.defused {
+            return;
+        }
+        self.state.in_flight.unregister(self.req_id);
+        let mut req_log = self.log_base.clone();
+        req_log.status = request_status::INTERRUPTED.to_string();
+        req_log.wait_time = chrono::Utc::now().timestamp_millis() - self.started_at;
+        req_log.error = Some("客户端连接中断，转发提前终止".to_string());
+        self.state
+            .in_flight
+            .broadcast(RequestOverview::from(&req_log));
+        let state = self.state.clone();
+        tokio::spawn(async move {
+            if let Err(e) = log::update_completed_log(&state, &req_log).await {
+                tracing::error!("写入中断请求日志失败: {}", e);
+            }
+        });
+    }
+}
+
 pub async fn forward_relay(
     state: AppState,
     auth_ctx: Arc<AuthContext>,
@@ -695,6 +783,13 @@ pub async fn forward_relay(
         request_body: request_body.clone(),
         created_at: started_at,
         ..Default::default()
+    };
+    let relay_guard = RelayGuard {
+        state: state.clone(),
+        req_id: request_id,
+        log_base: log_base.clone(),
+        started_at,
+        defused: false,
     };
     let started_at_rfc3339 = millis_to_rfc3339(started_at);
     state.in_flight.broadcast(RequestOverview {
@@ -783,6 +878,7 @@ pub async fn forward_relay(
                     .await
                     .unwrap_or(());
                     state.in_flight.unregister(request_id);
+                    relay_guard.defuse();
                     return resp;
                 }
             };
@@ -868,8 +964,10 @@ pub async fn forward_relay(
                         rounds,
                     };
                     if metadata.stream {
+                        relay_guard.defuse();
                         return handle_successful_stream(&state, upstream_resp, ctx);
                     }
+                    relay_guard.defuse();
                     return handle_successful_json(&state, upstream_resp, ctx).await;
                 } else {
                     let resp_headers = serialize_headers(upstream_resp.headers());
@@ -969,6 +1067,7 @@ pub async fn forward_relay(
             }
         }
     }
+    relay_guard.defuse();
 
     build_failed_relay_response(
         &state,
@@ -1024,5 +1123,56 @@ mod validate_tests {
             { "role": "user", "content": "next" }
         ] });
         assert!(validate_chat_tool_pairing(&b).is_err());
+    }
+}
+
+#[cfg(test)]
+mod relay_guard_tests {
+    use super::RelayGuard;
+    use crate::test_support::setup_test_state;
+
+    /// 客户端断连等场景下 forward_relay future 被 drop：guard 的 Drop 必须
+    /// 注销 in_flight 条目（H2 修复），defuse 后则不得重复注销。
+    #[tokio::test]
+    async fn guard_drop_unregisters_but_defuse_preserves() {
+        let (state, db_path) = setup_test_state("relay_guard").await;
+
+        // 1. 未 defuse 的 guard：Drop 兜底注销
+        let id = 4242u64;
+        let rx = state.in_flight.register(id);
+        {
+            let guard = RelayGuard {
+                state:      state.clone(),
+                req_id:     id,
+                log_base:   crate::model::RequestLog {
+                    id: id as i64,
+                    ..Default::default()
+                },
+                started_at: 0,
+                defused:    false,
+            };
+            assert!(state.in_flight.interrupt(id)); // 条目存在且可中断
+            drop(guard);
+        }
+        assert!(!state.in_flight.interrupt(id)); // 已被 Drop 注销
+        assert!(*rx.borrow()); // 取消标志仍可由 watch 读到
+
+        // 2. defuse 的 guard：条目保留，交给正常完成路径处理
+        let id2 = 777u64;
+        state.in_flight.register(id2);
+        RelayGuard {
+            state:      state.clone(),
+            req_id:     id2,
+            log_base:   crate::model::RequestLog {
+                id: id2 as i64,
+                ..Default::default()
+            },
+            started_at: 0,
+            defused:    false,
+        }
+        .defuse();
+        assert!(state.in_flight.interrupt(id2)); // 未被注销
+
+        let _ = std::fs::remove_file(db_path);
     }
 }
