@@ -89,7 +89,7 @@ mod tests {
         let (state, db_path) = setup_test_state("user_jwt").await;
         let secret = state.jwt_secret.read().clone();
         assert!(!secret.is_empty());
-        assert_ne!(secret, "octopus-jwt-secret-default");
+        assert_ne!(secret, "llmgate-jwt-secret-default");
         // 密钥持久化在 settings 中，与内存缓存一致
         assert_eq!(
             state.settings.get("jwt_secret").map(|e| e.value().clone()),

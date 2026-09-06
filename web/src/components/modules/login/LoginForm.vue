@@ -62,7 +62,7 @@ const handleModeChange = (value: string | number) => {
     <div class="w-full max-w-sm space-y-8">
       <header class="flex flex-col items-center gap-3">
         <Logo :size="48" />
-        <h1 class="text-2xl font-bold">Octopus</h1>
+        <h1 class="text-2xl font-bold">LLMGate</h1>
       </header>
 
       <Tabs v-model="mode" @value-change="handleModeChange">

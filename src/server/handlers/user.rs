@@ -55,7 +55,7 @@ mod tests {
     #[tokio::test]
     async fn test_login_headers() {
         let rnd = nanoid::nanoid!(12);
-        let db_path = std::env::temp_dir().join(format!("octopus_login_test_{}.db", rnd));
+        let db_path = std::env::temp_dir().join(format!("llmgate_login_test_{}.db", rnd));
         let pool = init_db(&db_path).await.unwrap();
         let state = AppState::init(pool).await.unwrap();
 

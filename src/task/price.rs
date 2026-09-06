@@ -35,7 +35,7 @@ pub async fn fetch_catalog_from_models_dev() -> Result<()> {
 
     let resp = client
         .get("https://models.dev/api.json")
-        .header("User-Agent", "Octopus-Rust/0.1.0")
+        .header("User-Agent", "LLMGate/0.1.0")
         .timeout(Duration::from_secs(30))
         .send()
         .await?;

@@ -6,7 +6,7 @@
         "passwordPlaceholder": "Enter your password",
         "trustDevice": "Trust this device",
         "apikey": "API Key",
-        "apikeyPlaceholder": "Enter your API Key (sk-octopus-...)",
+        "apikeyPlaceholder": "Enter your API Key (sk-lg-...)",
         "mode": {
             "user": "Account",
             "apikey": "API Key"

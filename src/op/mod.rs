@@ -96,7 +96,7 @@ impl AppState {
             route_manager:  Arc::new(RouteManager::new()),
             in_flight:      Arc::new(InFlightRegistry::new()),
             key_pool:       Arc::new(KeyPool::new()),
-            jwt_secret:     Arc::new(RwLock::new("octopus-jwt-secret-default".to_string())),
+            jwt_secret:     Arc::new(RwLock::new("llmgate-jwt-secret-default".to_string())),
         };
 
         state.refresh_all_caches().await?;

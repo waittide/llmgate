@@ -24,7 +24,7 @@ pub fn generate_jwt(username: &str, secret: &str, expires_sec: i64) -> Result<(S
 
     let claims = Claims {
         sub: username.to_string(),
-        iss: "octopus".to_string(),
+        iss: "llmgate".to_string(),
         iat: now,
         exp: now + max_age,
     };
@@ -39,7 +39,7 @@ pub fn generate_jwt(username: &str, secret: &str, expires_sec: i64) -> Result<(S
 
 pub fn verify_jwt(token: &str, secret: &str) -> Result<Claims> {
     let mut validation = Validation::default();
-    validation.set_issuer(&["octopus"]);
+    validation.set_issuer(&["llmgate"]);
     let token_data = decode::<Claims>(token, &DecodingKey::from_secret(secret.as_bytes()), &validation)?;
     Ok(token_data.claims)
 }

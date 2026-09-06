@@ -101,7 +101,7 @@ pub async fn get_model_list(
                 id:       m,
                 object:   "model".to_string(),
                 created:  now_sec,
-                owned_by: "octopus".to_string(),
+                owned_by: "llmgate".to_string(),
             })
             .collect();
 

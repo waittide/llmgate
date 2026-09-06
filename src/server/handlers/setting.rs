@@ -27,7 +27,7 @@ pub async fn export_db(State(state): State<AppState>) -> Response {
     match backup::export_backup(&state).await {
         Ok(data) => {
             let filename = format!(
-                "attachment; filename=\"octopus-export-{}.json\"",
+                "attachment; filename=\"llmgate-export-{}.json\"",
                 chrono::Local::now().format("%Y%m%d%H%M%S")
             );
 

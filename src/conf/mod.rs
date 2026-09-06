@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use clap::Parser;
 
-pub const APP_NAME: &str = "octopus";
+pub const APP_NAME: &str = "LLMGate";
 pub const APP_DESC: &str = "全能 AI 服务网关 (Rust 版)";
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 

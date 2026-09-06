@@ -78,7 +78,7 @@ const handleDownloadImage = () => {
     if (!preview.value) return;
     const link = document.createElement('a');
     link.href = preview.value.url;
-    link.download = `octopus-${dayjs().format('YYYYMMDD')}.png`;
+    link.download = `llmgate-${dayjs().format('YYYYMMDD')}.png`;
     link.click();
 };
 </script>
@@ -125,7 +125,7 @@ const handleDownloadImage = () => {
             <!-- 分享图抬头, 与应用顶栏一致的标识和名称。 -->
             <div class="mb-4 flex items-center gap-x-2 px-2">
                 <Logo :size="48" />
-                <span class="text-3xl font-bold">Octopus</span>
+                <span class="text-3xl font-bold">LLMGate</span>
             </div>
             <HomeSections />
         </div>

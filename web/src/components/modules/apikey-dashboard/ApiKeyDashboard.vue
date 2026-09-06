@@ -111,7 +111,7 @@ const toggleLanguage = () => {
         <!-- Header - Consistent with app.tsx -->
         <header class="my-6 flex items-center gap-2 px-2">
             <Logo :size="48" />
-            <h1 class="ml-2 flex-1 truncate text-2xl font-bold tracking-tight">octopus</h1>
+            <h1 class="ml-2 flex-1 truncate text-2xl font-bold tracking-tight">LLMGate</h1>
             <div class="flex items-center gap-2">
                 <Button variant="ghost" size="icon" @click="toggleTheme" class="rounded-xl hover:bg-accent">
                     <LuSun class="size-4 rotate-0 scale-100 transition-all dark:-rotate-90 dark:scale-0" />

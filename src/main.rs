@@ -23,11 +23,11 @@ async fn main() -> Result<()> {
     let config = Config::parse_args();
 
     let env_filter = if config.debug {
-        EnvFilter::new("debug,tower_http=debug,axum=debug,octopus=debug")
+        EnvFilter::new("debug,tower_http=debug,axum=debug,llmgate=debug")
     } else {
         EnvFilter::try_from_default_env()
-            .map(|filter| filter.add_directive("octopus=info".parse().unwrap()))
-            .unwrap_or_else(|_| EnvFilter::new("info,tower_http=info,octopus=info"))
+            .map(|filter| filter.add_directive("llmgate=info".parse().unwrap()))
+            .unwrap_or_else(|_| EnvFilter::new("info,tower_http=info,llmgate=info"))
     };
 
     let fmt_layer = tracing_subscriber::fmt::layer().with_target(false);
