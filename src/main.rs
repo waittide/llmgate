@@ -49,6 +49,18 @@ async fn main() -> Result<()> {
 
     // 3. 启动后台定时任务（携带停机信号；句柄用于停机时限时等待）
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+    // 优雅停机进行中再次 Ctrl+C:立即强制退出(否则信号被 tokio 吞掉,无法用 Ctrl+C 杀死)
+    tokio::spawn(async {
+        let mut first = false;
+        loop {
+            wait_signal().await;
+            if first {
+                eprintln!("再次收到停机信号,强制退出");
+                std::process::exit(130);
+            }
+            first = true;
+        }
+    });
     let task_handles = task::start_background_tasks(state.clone(), shutdown_rx);
 
     // 4. 构建 Axum 路由
@@ -76,12 +88,16 @@ async fn main() -> Result<()> {
     if let Err(e) = op::stats::flush_stats_to_db(&state).await {
         tracing::error!("停机时落盘统计失败: {}", e);
     }
-
-    // 通知后台任务退出并限时等待，防止停机瞬间丢失统计结转
+    // 通知后台任务退出
     let _ = shutdown_tx.send(true);
-    for handle in task_handles {
-        let _ = tokio::time::timeout(Duration::from_secs(10), handle).await;
-    }
+
+    // 限时等待后台任务退出(总体 10s 上限,而非每任务 10s 串行)
+    let _ = tokio::time::timeout(Duration::from_secs(10), async {
+        for handle in task_handles {
+            let _ = handle.await;
+        }
+    })
+    .await;
     info!("服务已优雅退出");
     Ok(())
 }
