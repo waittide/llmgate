@@ -441,8 +441,23 @@ async function handleStopRound() {
                                 :headers="activeRound.response_headers || detail.data.value?.response_headers"
                                 :loading="detail.isLoading.value"
                             />
-                            <JsonContent
-                                :content="activeRound.response_body || activeRound.error || errorText"
+                            <div
+                            v-if="activeRound.key_attempts?.length"
+                            class="mb-2 rounded-xl border border-orange-500/30 bg-orange-500/5 p-2.5 text-xs space-y-1"
+                        >
+                            <div class="font-medium text-orange-600 dark:text-orange-400">{{ t('keyAttempts') }}</div>
+                            <div
+                                v-for="(attempt, attemptIndex) in activeRound.key_attempts"
+                                :key="attemptIndex"
+                                class="flex items-center gap-2 text-muted-foreground"
+                            >
+                                <span class="font-medium text-foreground">Key #{{ attempt.key_index + 1 }}</span>
+                                <Badge variant="destructive" class="px-1 py-0 text-[10px]">{{ attempt.status }}</Badge>
+                                <span class="truncate" :title="attempt.error">{{ attempt.error }}</span>
+                            </div>
+                        </div>
+                        <JsonContent
+                            :content="activeRound.response_body || activeRound.error || errorText"
                                 :fallback-text="t('noResponseContent')"
                             />
                         </template>

@@ -369,6 +369,15 @@ pub struct Setting {
 }
 
 // ---------------- 请求日志 (Request Log) ----------------
+
+/// 单次 key 轮换失败记录。仅记 key 序号与上游返回(截断),密钥内容绝不入日志。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct KeyAttempt {
+    pub key_index: usize,
+    pub status:    u16,
+    pub error:     String,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct RoundLog {
@@ -384,6 +393,7 @@ pub struct RoundLog {
     pub status:           u16,
     pub duration_ms:      i64,
     pub error:            Option<String>,
+    pub key_attempts:     Vec<KeyAttempt>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, sqlx::FromRow)]

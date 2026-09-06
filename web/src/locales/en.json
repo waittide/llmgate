@@ -426,7 +426,8 @@
       "headers": "Headers",
       "round": "Round",
       "roundIndex": "Round {index}",
-      "allRounds": "All Rounds"
+      "allRounds": "All Rounds",
+      "keyAttempts": "Key rotation attempts"
     },
     "filter": {
       "keyword": "Keyword",

@@ -203,6 +203,7 @@ struct RoundFailure<'a> {
     duration_ms:         i64,
     err_body:            &'a str,
     should_cooldown:     bool,
+    key_attempts:        Vec<crate::model::KeyAttempt>,
 }
 fn record_round_failure(
     state: &AppState,
@@ -226,6 +227,7 @@ fn record_round_failure(
         status:           fail.status,
         duration_ms:      fail.duration_ms,
         error:            Some(fail.err_body.to_string()),
+        key_attempts:     fail.key_attempts,
     };
     rounds.push(round_log.clone());
     // 客户端错误不触发冷却；该轮连同错误详情已记录在请求日志中，不再输出到终端
@@ -262,6 +264,7 @@ struct SuccessContext<'a> {
     start_time:       Instant,
     price_opt:        Option<ModelPrice>,
     rounds:           Vec<crate::model::RoundLog>,
+    key_attempts:     Vec<crate::model::KeyAttempt>,
 }
 
 fn handle_successful_stream(state: &AppState, upstream_resp: reqwest::Response, ctx: SuccessContext<'_>) -> Response {
@@ -313,6 +316,7 @@ fn handle_successful_stream(state: &AppState, upstream_resp: reqwest::Response, 
         done: false,
         log_template,
         previous_rounds: ctx.rounds,
+        key_attempts: ctx.key_attempts.clone(),
         response_capture: Vec::new(),
         cancel_rx: state.in_flight.get_cancel_receiver(ctx.log_base.id as u64),
         interrupted: false,
@@ -457,6 +461,7 @@ async fn handle_successful_json(
         status:           200,
         duration_ms:      round_duration_ms,
         error:            None,
+        key_attempts:     ctx.key_attempts.clone(),
     };
     ctx.rounds.push(round_log.clone());
     let mut req_log = ctx.log_base.clone();
@@ -628,7 +633,10 @@ struct SendPlan<'a> {
     cooldown_seconds:         i64,
 }
 
-async fn send_with_key_rotation(plan: SendPlan<'_>) -> Result<(reqwest::Response, usize), String> {
+async fn send_with_key_rotation(
+    plan: SendPlan<'_>,
+    key_attempts: &mut Vec<crate::model::KeyAttempt>,
+) -> Result<(reqwest::Response, usize), String> {
     let SendPlan {
         state,
         channel: ch,
@@ -672,12 +680,22 @@ async fn send_with_key_rotation(plan: SendPlan<'_>) -> Result<(reqwest::Response
         match res {
             // key 级可重试错误：冷却当前 key，换未试过的 key 重试（不消耗轮次）
             Ok(resp) if matches!(resp.status().as_u16(), 401 | 403 | 429) && key_pool.len() > 1 => {
-                state
-                    .key_pool
-                    .report_failure(ch.id, key_idx, cooldown_seconds);
-                tried_keys.insert(key_idx);
-                match (0..key_pool.len()).find(|idx| !tried_keys.contains(idx)) {
+                // 先确认还有未试 key 再消费响应体;穷尽时保留 resp 交由上层记录
+                match (0..key_pool.len()).find(|idx| *idx != key_idx && !tried_keys.contains(idx)) {
                     Some(next) => {
+                        // 记录被轮换掉的 key 的失败原因(响应体截断);只记序号,密钥内容绝不入日志
+                        let failed_status = resp.status().as_u16();
+                        let err_body =
+                            crate::utils::truncate_utf8(&resp.text().await.unwrap_or_default(), 512).to_string();
+                        key_attempts.push(crate::model::KeyAttempt {
+                            key_index: key_idx,
+                            status:    failed_status,
+                            error:     err_body,
+                        });
+                        state
+                            .key_pool
+                            .report_failure(ch.id, key_idx, cooldown_seconds);
+                        tried_keys.insert(key_idx);
                         key_idx = next;
                         continue;
                     }
@@ -933,21 +951,25 @@ pub async fn forward_relay(
             )
         };
 
-        let send_res = send_with_key_rotation(SendPlan {
-            state: &state,
-            channel: &ch,
-            key_pool: &key_pool,
-            endpoint: &target_endpoint,
-            body: Bytes::from(final_body),
-            client_headers: &headers,
-            stream: metadata.stream,
-            timeout_secs,
-            first_event_timeout_secs: current_group
-                .relay_config
-                .stream_first_event_timeout_seconds
-                .max(5) as u64,
-            cooldown_seconds: current_group.relay_config.cooldown_seconds,
-        })
+        let mut key_attempts: Vec<crate::model::KeyAttempt> = Vec::new();
+        let send_res = send_with_key_rotation(
+            SendPlan {
+                state: &state,
+                channel: &ch,
+                key_pool: &key_pool,
+                endpoint: &target_endpoint,
+                body: Bytes::from(final_body),
+                client_headers: &headers,
+                stream: metadata.stream,
+                timeout_secs,
+                first_event_timeout_secs: current_group
+                    .relay_config
+                    .stream_first_event_timeout_seconds
+                    .max(5) as u64,
+                cooldown_seconds: current_group.relay_config.cooldown_seconds,
+            },
+            &mut key_attempts,
+        )
         .await;
 
         match send_res {
@@ -971,6 +993,7 @@ pub async fn forward_relay(
                         start_time,
                         price_opt,
                         rounds,
+                        key_attempts: key_attempts.clone(),
                     };
                     if metadata.stream {
                         relay_guard.defuse();
@@ -1013,6 +1036,7 @@ pub async fn forward_relay(
                             duration_ms: round_duration_ms,
                             err_body: &err_body,
                             should_cooldown: !is_client,
+                            key_attempts: key_attempts.clone(),
                         },
                     );
 
@@ -1055,6 +1079,7 @@ pub async fn forward_relay(
                         duration_ms: round_duration_ms,
                         err_body: &err_msg,
                         should_cooldown: true,
+                        key_attempts: key_attempts.clone(),
                     },
                 );
             }
@@ -1183,5 +1208,82 @@ mod relay_guard_tests {
         assert!(state.in_flight.interrupt(id2)); // 未被注销
 
         let _ = std::fs::remove_file(db_path);
+    }
+}
+
+#[cfg(test)]
+mod key_rotation_tests {
+    use wiremock::{Mock, ResponseTemplate};
+
+    use super::*;
+    use crate::test_support::setup_test_state;
+
+    /// key 轮换的每一次失败都必须被记录:序号、状态码、截断后的上游原因(密钥本体不入日志)。
+    #[tokio::test]
+    async fn key_rotation_records_per_key_attempts() {
+        let (state, _db) = setup_test_state("key_attempts").await;
+        let server = wiremock::MockServer::start().await;
+
+        Mock::given(wiremock::matchers::header("authorization", "Bearer k1"))
+            .respond_with(ResponseTemplate::new(401).set_body_string("bad key 1"))
+            .mount(&server)
+            .await;
+        Mock::given(wiremock::matchers::header("authorization", "Bearer k2"))
+            .respond_with(ResponseTemplate::new(401).set_body_string("bad key 2"))
+            .mount(&server)
+            .await;
+        Mock::given(wiremock::matchers::header("authorization", "Bearer k3"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_string(r#"{"choices":[{"message":{"role":"assistant","content":"ok"}}]}"#),
+            )
+            .mount(&server)
+            .await;
+
+        let ch = crate::model::Channel {
+            name: "multi-key".into(),
+            channel_type: crate::model::ChannelProvider::OpenaiCompletion,
+            enabled: true,
+            base_url: server.uri(),
+            key: "k1\nk2\nk3".into(),
+            models: vec![crate::model::ChannelModel {
+                name: "m".into(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let key_pool = ch.key_pool();
+        let headers = HeaderMap::new();
+        let mut key_attempts = Vec::new();
+
+        let plan = SendPlan {
+            state:                    &state,
+            channel:                  &ch,
+            key_pool:                 &key_pool,
+            endpoint:                 "/chat/completions",
+            body:                     Bytes::from(r#"{"model":"m","messages":[{"role":"user","content":"hi"}]}"#),
+            client_headers:           &headers,
+            stream:                   false,
+            timeout_secs:             Some(5),
+            first_event_timeout_secs: 5,
+            cooldown_seconds:         60,
+        };
+        let (resp, key_idx) = send_with_key_rotation(plan, &mut key_attempts)
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), 200);
+        assert_eq!(key_idx, 2, "最终应由第 3 个 key 成功");
+        assert_eq!(key_attempts.len(), 2);
+        assert_eq!(key_attempts[0].key_index, 0);
+        assert_eq!(key_attempts[0].status, 401);
+        assert!(key_attempts[0].error.contains("bad key 1"));
+        assert_eq!(key_attempts[1].key_index, 1);
+        assert_eq!(key_attempts[1].status, 401);
+        assert!(key_attempts[1].error.contains("bad key 2"));
+        // 密钥本体绝不入日志
+        for attempt in &key_attempts {
+            assert!(!attempt.error.contains("k1") || !attempt.error.contains("Bearer"));
+        }
     }
 }

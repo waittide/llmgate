@@ -426,7 +426,8 @@
       "headers": "Header",
       "round": "輪次",
       "roundIndex": "第 {index} 輪",
-      "allRounds": "所有輪次"
+      "allRounds": "所有輪次",
+      "keyAttempts": "密鑰輪換嘗試"
     },
     "filter": {
       "keyword": "關鍵詞",

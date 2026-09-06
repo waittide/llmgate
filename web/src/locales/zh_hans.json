@@ -426,7 +426,8 @@
       "headers": "Header",
       "round": "轮次",
       "roundIndex": "第 {index} 轮",
-      "allRounds": "所有轮次"
+      "allRounds": "所有轮次",
+      "keyAttempts": "密钥轮换尝试"
     },
     "filter": {
       "keyword": "关键词",

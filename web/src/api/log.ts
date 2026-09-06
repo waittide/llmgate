@@ -15,6 +15,12 @@ export interface RelayUsage {
 }
 
 // RoundLog 表示一轮上游渠道尝试的完整上下文与结果。
+export interface KeyAttempt {
+    key_index: number;
+    status: number;
+    error: string;
+}
+
 export interface RoundLog {
     round: number;
     channel_name: string;
@@ -28,6 +34,7 @@ export interface RoundLog {
     status: number;
     duration_ms: number;
     error?: string;
+    key_attempts?: KeyAttempt[];
 }
 
 // RelayLogOverview 是请求状态流发送的完整进程内请求状态。
