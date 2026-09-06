@@ -110,17 +110,17 @@ const responseCommitted = computed(() => props.log.status === 'committed');
 const showRounds = computed(() => props.log.status === 'running' && rounds.value.length > 0);
 const roundSuccess = (r: RoundLog) => r.status >= 200 && r.status < 300;
 
+type ChipState = 'success' | 'failed' | 'unused';
 interface KeyChip {
     keyIndex: number;          // 渠道内 key 序号(0 基)
+    state: ChipState;          // success=该 key 轮次成功; failed=轮换失败; unused=未使用
     round: RoundLog | null;    // 使用该 key 的轮次; null = 未使用
-    channelName: string;
 }
 interface ChannelChip {
     name: string;
-    used: boolean;
-    success: boolean;
+    state: ChipState;          // 渠道任一轮成功=success; 有尝试但全失败=failed; 未尝试=unused
     keys: KeyChip[];
-    selectRound: number | null; // 点击色块选中的轮次(该渠道首次使用)
+    selectRound: number | null; // 点击色块选中的轮次(成功轮优先, 否则首次尝试)
 }
 
 // 渠道内 key 总数: 与后端 key_pool 同规则(换行/逗号分隔, 去空白)
@@ -160,10 +160,21 @@ const channelSequence = computed<ChannelChip[]>(() => {
         const keys: KeyChip[] = [];
         for (let idx = 0; idx < keyCount; idx++) {
             const round = rounds?.find((r) => r.key_index === idx) ?? null;
-            keys.push({ keyIndex: idx, round, channelName: name });
+            keys.push({
+                keyIndex: idx,
+                state: round ? (roundSuccess(round) ? 'success' : 'failed') : 'unused',
+                round,
+            });
         }
+        const used = Boolean(rounds?.length);
         const success = (rounds ?? []).some((r) => roundSuccess(r));
-        seq.push({ name, used: Boolean(rounds?.length), success, keys, selectRound: rounds?.[0]?.round ?? null });
+        const successRound = (rounds ?? []).find((r) => roundSuccess(r));
+        seq.push({
+            name,
+            state: success ? 'success' : used ? 'failed' : 'unused',
+            keys,
+            selectRound: success ? (successRound?.round ?? null) : (rounds?.[0]?.round ?? null),
+        });
     };
 
     // 使用过的渠道按轮次出现顺序
@@ -254,47 +265,43 @@ async function handleStopRound() {
 
         <MorphingDialogDescription class="flex-1 min-h-0 flex flex-col gap-2">
             <div class="flex items-center gap-1.5 overflow-x-auto pb-1 shrink-0 text-xs">
-                <span class="text-muted-foreground shrink-0 font-medium">[{{ t('group') }}]:</span>
+                <span class="text-muted-foreground shrink-0 font-medium">{{ t('group') }}:</span>
                 <button
                     v-for="c in channelSequence"
                     :key="`c-${c.name}`"
                     type="button"
-                    :disabled="!c.used"
+                    :disabled="c.state === 'unused'"
                     @click="c.selectRound !== null && (selectedRoundNum = c.selectRound)"
                     :class="cn(
                         'shrink-0 px-2 py-0.5 rounded-md border text-xs font-medium transition-colors inline-flex items-center gap-1',
-                        c.used
-                            ? (c.success
-                                ? 'border-emerald-500/40 bg-emerald-500/5 text-emerald-600 dark:text-emerald-400'
-                                : 'border-border bg-muted/50 text-muted-foreground hover:bg-muted hover:text-foreground')
-                            : 'border-border/60 bg-muted/30 text-muted-foreground/40 cursor-default',
-                        activeRound?.round === c.selectRound && c.used && 'border-primary bg-primary/10 text-primary',
+                        c.state === 'success' ? 'border-emerald-500/40 bg-emerald-500/5 text-emerald-600 dark:text-emerald-400' : '',
+                        c.state === 'failed' ? 'border-destructive/40 bg-destructive/5 text-destructive' : '',
+                        c.state === 'unused' ? 'border-border/60 bg-muted/30 text-muted-foreground/40 cursor-default' : '',
+                        activeRound?.round === c.selectRound && 'border-primary bg-primary/10 text-primary',
                     )"
                 >
-                    <LuCheckCircle2 v-if="c.success" class="size-3.5" />
+                    <LuCheckCircle2 v-if="c.state === 'success'" class="size-3.5" />
                     {{ c.name }}
                 </button>
             </div>
             <div class="flex items-center gap-1.5 overflow-x-auto pb-1 shrink-0 text-xs">
-                <span class="text-muted-foreground shrink-0 font-medium">[{{ t('key') }}]:</span>
+                <span class="text-muted-foreground shrink-0 font-medium">{{ t('key') }}:</span>
                 <template v-for="c in channelSequence" :key="`k-${c.name}`">
                     <button
                         v-for="k in c.keys"
                         :key="`k-${c.name}-${k.keyIndex}`"
                         type="button"
-                        :disabled="!k.round"
+                        :disabled="k.state === 'unused'"
                         @click="k.round && (selectedRoundNum = k.round.round)"
                         :class="cn(
-                            'shrink-0 px-2 py-0.5 rounded-md border text-xs transition-colors inline-flex items-center gap-1',
-                            k.round
-                                ? (roundSuccess(k.round)
-                                    ? 'border-emerald-500/40 bg-emerald-500/5 text-emerald-600 dark:text-emerald-400'
-                                    : 'border-border bg-muted/50 text-muted-foreground hover:bg-muted hover:text-foreground')
-                                : 'border-border/60 bg-muted/30 text-muted-foreground/40 cursor-default',
-                            activeRound?.round === k.round?.round && k.round && 'border-primary bg-primary/10 text-primary',
+                            'shrink-0 px-2 py-0.5 rounded-md border text-xs font-medium transition-colors inline-flex items-center gap-1',
+                            k.state === 'success' ? 'border-emerald-500/40 bg-emerald-500/5 text-emerald-600 dark:text-emerald-400' : '',
+                            k.state === 'failed' ? 'border-destructive/40 bg-destructive/5 text-destructive' : '',
+                            k.state === 'unused' ? 'border-border/60 bg-muted/30 text-muted-foreground/40 cursor-default' : '',
+                            activeRound?.round === k.round?.round && 'border-primary bg-primary/10 text-primary',
                         )"
                     >
-                        <LuCheckCircle2 v-if="k.round && roundSuccess(k.round)" class="size-3" />
+                        <LuCheckCircle2 v-if="k.state === 'success'" class="size-3" />
                         {{ t('key') }}{{ k.keyIndex + 1 }}
                     </button>
                 </template>
@@ -412,9 +419,10 @@ async function handleStopRound() {
                 </div>
             </div>
 
-            <div class="flex flex-wrap items-center gap-x-4 gap-y-1 shrink-0 border-t border-border pt-2 text-xs">
-                <LogMetrics :log="log" :now="now" :brand-color="modelIconInfo.color" variant="footer" />
-            </div>
-        </MorphingDialogDescription>
+            <!-- 底部指标栏: 占满整行 -->
+            <div class="grid grid-cols-7 gap-x-4 shrink-0 border-t border-border pt-2 text-xs min-w-0">
+                    <LogMetrics :log="log" :now="now" :brand-color="modelIconInfo.color" variant="footer" />
+                </div>
+            </MorphingDialogDescription>
     </MorphingDialogContent>
 </template>
