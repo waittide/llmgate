@@ -1,4 +1,4 @@
-import { queryOptions } from '@tanstack/react-query';
+import { queryOptions } from '@tanstack/vue-query';
 import type { APIKey, APIKeyStatsResponse } from './apikey';
 import type { ChannelServer } from './channel';
 import type { Group } from './group';

@@ -1,8 +1,10 @@
-import { queryOptions, useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { type MaybeRefOrGetter, toValue } from 'vue';
+import { queryOptions, useMutation, useQuery, useQueryClient } from '@tanstack/vue-query';
 import { apiRequest } from './client';
 import { channelListQueryOptions, groupListQueryOptions, modelListQueryOptions } from './queries';
 import { formatCount, formatMoney, formatTime } from '@/lib/utils';
 import type { StatsMetrics, StatsMetricsFormatted } from './stats';
+
 /**
  * 渠道类型枚举
  */
@@ -13,7 +15,7 @@ export enum ChannelType {
     Gemini = 'gemini',
 }
 
-type CustomHeader = {
+export type CustomHeader = {
     header_key: string;
     header_value: string;
 };
@@ -54,7 +56,7 @@ export type ChannelServer = Omit<Channel, 'custom_header'> & {
 };
 
 // ChannelListItem 表示页面消费的渠道原始数据及格式化统计。
-type ChannelListItem = {
+export type ChannelListItem = {
     raw: Channel; // raw 保存可编辑和标识渠道的原始字段。
     formatted: StatsMetricsFormatted; // formatted 保存直接用于界面展示的统计字段。
 };
@@ -62,7 +64,7 @@ type ChannelListItem = {
 /**
  * 创建渠道请求：必填字段 + 可选字段
  */
-type CreateChannelRequest = {
+export type CreateChannelRequest = {
     name: string;
     type: ChannelType;
     enabled?: boolean;
@@ -90,7 +92,7 @@ export type UpdateChannelRequest = {
     param_override?: string | null;
 };
 
-type FetchModelRequest = {
+export type FetchModelRequest = {
     type: ChannelType;
     base_url: string;
     key: string;
@@ -132,13 +134,13 @@ const channelListFormattedQueryOptions = queryOptions({
  * @example
  * const { data: channels, isLoading, error } = useChannelList();
  * 
- * if (isLoading) return <Loading />;
- * if (error) return <Error message={error.message} />;
- * 
  * channels?.forEach(channel => console.log(channel.raw.name));
  */
-export function useChannelList(enabled = true) {
-    return useQuery({ ...channelListFormattedQueryOptions, enabled });
+export function useChannelList(enabled: MaybeRefOrGetter<boolean> = true) {
+    return useQuery({
+        ...channelListFormattedQueryOptions,
+        enabled: () => toValue(enabled),
+    });
 }
 
 /**
@@ -182,7 +184,6 @@ export function useCreateChannel() {
  *   base_url: 'https://api.openai.com',
  *   key: 'sk-xxx',
  *   models: [{ name: 'gpt-4-turbo', source: 'manual' }],
- *   proxy: false,
  * });
  */
 export function useUpdateChannel() {
@@ -252,7 +253,6 @@ export function useEnableChannel() {
  *   type: ChannelType.OpenaiCompletion,
  *   base_url: 'https://api.openai.com',
  *   key: 'sk-xxx',
- *   proxy: false,
  * });
  * 
  * // 在 onSuccess 中获取模型列表
@@ -269,7 +269,7 @@ export function useFetchModel() {
  * 获取渠道最后同步时间 Hook
  * 
  * @example
- * const lastSyncTime = useLastSyncTime();
+ * const { data: lastSyncTime } = useLastSyncTime();
  * 
  * if (lastSyncTime) {
  *   console.log('最后同步时间:', new Date(lastSyncTime).toLocaleString());
@@ -282,6 +282,7 @@ export function useLastSyncTime() {
         refetchInterval: 30000,
     });
 }
+
 /**
  * 同步渠道 Hook
  * 

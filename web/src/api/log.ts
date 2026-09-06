@@ -1,5 +1,5 @@
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { useEffect, useState } from 'react';
+import { computed, onMounted, onUnmounted, toValue, type MaybeRefOrGetter } from 'vue';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/vue-query';
 import { apiRequest, openSseStream } from './client';
 
 // RequestState 表示 Relay 请求的实时状态。
@@ -13,6 +13,7 @@ export interface RelayUsage {
     cache_read_tokens: number;
     cache_write_tokens: number;
 }
+
 // RoundLog 表示一轮上游渠道尝试的完整上下文与结果。
 export interface RoundLog {
     round: number;
@@ -28,7 +29,6 @@ export interface RoundLog {
     duration_ms: number;
     error?: string;
 }
-
 
 // RelayLogOverview 是请求状态流发送的完整进程内请求状态。
 export interface RelayLogOverview {
@@ -46,6 +46,7 @@ export interface RelayLogOverview {
     error?: string;
     rounds?: RoundLog[];
 }
+
 // useClearLogs 清空已完成的内存日志。
 export function useClearLogs() {
     return useMutation({
@@ -60,22 +61,31 @@ export function useStopRound() {
             apiRequest<null>(`/api/v1/log/${requestId}/${round}/stop`, { method: 'POST' }),
     });
 }
+
 // useLogRequestBody 在调用方启用时按需获取指定日志的请求体。
-export function useLogRequestBody(id: number, startedAt: string, enabled: boolean) {
+export function useLogRequestBody(
+    id: MaybeRefOrGetter<number>,
+    startedAt: MaybeRefOrGetter<string>,
+    enabled: MaybeRefOrGetter<boolean>,
+) {
     return useQuery({
-        queryKey: ['logs', id, startedAt, 'request-body'],
-        queryFn: () => apiRequest<string>(`/api/v1/log/${id}/request-body`),
-        enabled,
+        queryKey: computed(() => ['logs', toValue(id), toValue(startedAt), 'request-body']),
+        queryFn: () => apiRequest<string>(`/api/v1/log/${toValue(id)}/request-body`),
+        enabled: () => toValue(enabled),
         staleTime: Infinity,
     });
 }
 
 // useLogResponseBody 在调用方启用时获取指定日志的最终响应体。
-export function useLogResponseBody(id: number, startedAt: string, enabled: boolean) {
+export function useLogResponseBody(
+    id: MaybeRefOrGetter<number>,
+    startedAt: MaybeRefOrGetter<string>,
+    enabled: MaybeRefOrGetter<boolean>,
+) {
     return useQuery({
-        queryKey: ['logs', id, startedAt, 'response-body'],
-        queryFn: () => apiRequest<string>(`/api/v1/log/${id}/response-body`),
-        enabled,
+        queryKey: computed(() => ['logs', toValue(id), toValue(startedAt), 'response-body']),
+        queryFn: () => apiRequest<string>(`/api/v1/log/${toValue(id)}/response-body`),
+        enabled: () => toValue(enabled),
         staleTime: Infinity,
     });
 }
@@ -97,28 +107,37 @@ export interface LogListResponse {
     items: RelayLogOverview[];
 }
 
+export interface PersistentLogsParams {
+    page: number;
+    pageSize: number;
+    model: string;
+    status: string;
+    keyword: string;
+}
+
 // usePersistentLogs 按分页与过滤条件查询数据库中的持久化请求日志。
-export function usePersistentLogs(params: { page: number; pageSize: number; model: string; status: string; keyword: string }) {
+export function usePersistentLogs(params: MaybeRefOrGetter<PersistentLogsParams>) {
     return useQuery({
-        queryKey: ['logs', 'list', params],
+        queryKey: computed(() => ['logs', 'list', toValue(params)]),
         queryFn: async () => {
+            const p = toValue(params);
             const q = new URLSearchParams();
-            q.set('page', String(params.page));
-            q.set('page_size', String(params.pageSize));
-            if (params.model) q.set('model', params.model);
-            if (params.status) q.set('status', params.status);
-            if (params.keyword) q.set('keyword', params.keyword);
+            q.set('page', String(p.page));
+            q.set('page_size', String(p.pageSize));
+            if (p.model) q.set('model', p.model);
+            if (p.status) q.set('status', p.status);
+            if (p.keyword) q.set('keyword', p.keyword);
             return apiRequest<LogListResponse>(`/api/v1/log/list?${q.toString()}`);
         },
     });
 }
 
 // useLogDetail 获取指定持久化日志的完整详情(URL/Header/Body)。
-export function useLogDetail(id: number, enabled: boolean) {
+export function useLogDetail(id: MaybeRefOrGetter<number>, enabled: MaybeRefOrGetter<boolean>) {
     return useQuery({
-        queryKey: ['logs', id, 'detail'],
-        queryFn: () => apiRequest<PersistentLogDetail>(`/api/v1/log/${id}`),
-        enabled,
+        queryKey: computed(() => ['logs', toValue(id), 'detail']),
+        queryFn: () => apiRequest<PersistentLogDetail>(`/api/v1/log/${toValue(id)}`),
+        enabled: () => toValue(enabled),
     });
 }
 
@@ -127,9 +146,11 @@ export function useLogDetail(id: number, enabled: boolean) {
 // 实时条目与完成后的最终数据; 防抖把同轮的多次运行态广播合并为一次刷新。
 export function useLogListLiveSync() {
     const queryClient = useQueryClient();
-    useEffect(() => {
-        let timer: number | undefined;
-        const cancel = openSseStream(
+    let timer: number | undefined;
+    let cancel: (() => void) | undefined;
+
+    onMounted(() => {
+        cancel = openSseStream(
             '/api/v1/log/overview/stream',
             () => {
                 window.clearTimeout(timer);
@@ -141,9 +162,10 @@ export function useLogListLiveSync() {
                 // 断线由 openSseStream 自动重连, 无需额外处理
             },
         );
-        return () => {
-            window.clearTimeout(timer);
-            cancel();
-        };
-    }, [queryClient]);
+    });
+
+    onUnmounted(() => {
+        window.clearTimeout(timer);
+        cancel?.();
+    });
 }

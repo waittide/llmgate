@@ -1,10 +1,10 @@
-import { QueryClient } from '@tanstack/react-query';
+import { QueryClient } from '@tanstack/vue-query';
 
 // queryClient 管理整个前端应用共享的查询缓存和请求状态。
 export const queryClient = new QueryClient({
     defaultOptions: {
         queries: {
-            staleTime: 60 * 1000,
+            retry: 1,
             refetchOnWindowFocus: false,
         },
     },
@@ -22,7 +22,6 @@ export class ApiError extends Error {
 
     constructor(status: number, message: string) {
         super(message);
-        this.name = 'ApiError';
         this.status = status;
     }
 }
@@ -40,6 +39,7 @@ export function setAPIKey(value: string | null) {
     apiKey = value;
 }
 
+// 兜底读取持久化会话（auth-storage 保持 zustand persist 的 key/结构）。
 function getActiveBearer(): string | null {
     if (apiKey || authToken) return apiKey || authToken;
     try {
@@ -76,7 +76,7 @@ export async function apiRequest<T>(path: string, options: RequestOptions = {}):
         credentials: 'include',
         signal: options.signal,
     });
-    const data = await response.json().catch(() => null) as { message?: string; data?: T } | null;
+    const data = (await response.json().catch(() => null)) as { message?: string; data?: T } | null;
     if (!response.ok) {
         if (response.status === 401 && options.dispatchUnauthorized !== false && typeof window !== 'undefined') {
             window.dispatchEvent(new Event(apiUnauthorizedEvent));

@@ -1,4 +1,4 @@
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/vue-query';
 import { apiRequest } from './client';
 import { modelListQueryOptions } from './queries';
 
@@ -24,9 +24,6 @@ export interface ModelInfo extends ModelPrice {
  * 
  * @example
  * const { data: models, isLoading, error } = useModelList();
- * 
- * if (isLoading) return <Loading />;
- * if (error) return <Error message={error.message} />;
  * 
  * models?.forEach(model => console.log(model.name, model.input));
  */

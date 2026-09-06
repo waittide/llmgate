@@ -1,4 +1,4 @@
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/vue-query';
 import { ApiError, apiRequest } from './client';
 
 /**
@@ -22,9 +22,6 @@ export const SettingKey = {
  * 
  * @example
  * const { data: settings, isLoading, error } = useSettingList();
- * 
- * if (isLoading) return <Loading />;
- * if (error) return <Error message={error.message} />;
  * 
  * settings?.forEach(setting => console.log(setting.key, setting.value));
  */

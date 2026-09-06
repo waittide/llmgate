@@ -1,22 +1,21 @@
-import { useEffect, useState } from 'react';
-import { useMutation } from '@tanstack/react-query';
-import { create } from 'zustand';
-import { persist } from 'zustand/middleware';
-import { ApiError, apiRequest, apiUnauthorizedEvent, setAPIKey, setAuthToken } from './client';
+import { computed, onMounted, onUnmounted, watch } from 'vue';
+import { useMutation } from '@tanstack/vue-query';
+import { apiRequest, apiUnauthorizedEvent, setAPIKey, setAuthToken } from './client';
+import { authStore, checkAuth, hydrated, logout, setAPIKeyAuth, setAuth } from '@/stores/auth';
 
 /**
  * 用户登录请求
  */
-interface UserLoginRequest {
+export interface UserLoginRequest {
     username: string;
     password: string;
     expire: number; // 登录状态过期时间，正数为秒，-1 表示 30 天。
 }
 
 /**
- * 认证状态 Store
+ * 认证状态 Store 结构
  */
-interface AuthState {
+export interface AuthState {
     isAuthenticated: boolean;
     isLoading: boolean;
     isAPIKeyAuth: boolean;
@@ -29,93 +28,20 @@ interface AuthState {
     logout: () => void;
 }
 
+export { authStore, checkAuth, hydrated, logout, setAPIKeyAuth, setAuth };
+
 /**
- * 认证状态管理 Store（使用 zustand + persist）
+ * 兼容 React 版 useAuthStore 导出的 helper
  */
-export const useAuthStore = create<AuthState>()(
-    persist(
-        (set, get) => ({
-            isAuthenticated: false,
-            isLoading: true,
-            isAPIKeyAuth: false,
-            token: null,
-
-            setAuth: (jwtToken: string) => {
-                setAPIKey(null);
-                setAuthToken(jwtToken);
-                set({
-                    isAuthenticated: true,
-                    isAPIKeyAuth: false,
-                    token: jwtToken,
-                    isLoading: false
-                });
-            },
-
-            setAPIKeyAuth: (apiKey: string) => {
-                setAPIKey(apiKey);
-                setAuthToken(null);
-                set({
-                    isAuthenticated: true,
-                    isAPIKeyAuth: true,
-                    token: apiKey,
-                    isLoading: false
-                });
-            },
-
-            checkAuth: async () => {
-                const { token, isAPIKeyAuth } = get();
-                if (isAPIKeyAuth) {
-                    setAPIKey(token);
-                    setAuthToken(null);
-                } else {
-                    setAPIKey(null);
-                    setAuthToken(token);
-                }
-
-                if (!token) {
-                    set({ isAuthenticated: false, isLoading: false });
-                    return;
-                }
-
-                try {
-                    const endpoint = isAPIKeyAuth ? '/api/v1/apikey/login' : '/api/v1/user/status';
-                    await apiRequest<unknown>(endpoint, { dispatchUnauthorized: false });
-                    set({
-                        isAuthenticated: true,
-                        isLoading: false,
-                        token
-                    });
-                } catch (err) {
-                    // Only a definitive 401 invalidates the session. A transient
-                    // network/server error on refresh must not drop a valid token.
-                    if (err instanceof ApiError && err.status === 401) {
-                        get().logout();
-                    } else {
-                        set({ isLoading: false, isAuthenticated: true });
-                    }
-                }
-            },
-
-            logout: () => {
-                setAPIKey(null);
-                setAuthToken(null);
-                set({
-                    isAuthenticated: false,
-                    isAPIKeyAuth: false,
-                    token: null,
-                    isLoading: false
-                });
-            }
-        }),
-        {
-            name: 'auth-storage',
-            partialize: (state) => ({
-                token: state.token,
-                isAPIKeyAuth: state.isAPIKeyAuth,
-            })
-        }
-    )
-);
+export function useAuthStore() {
+    return {
+        ...authStore,
+        setAuth,
+        setAPIKeyAuth,
+        checkAuth,
+        logout,
+    };
+}
 
 /**
  * 用户登录 Hook
@@ -123,13 +49,8 @@ export const useAuthStore = create<AuthState>()(
  * @example
  * const login = useLogin();
  * login.mutate({ username: 'admin', password: '123456', expire: 86400 });
- * 
- * if (login.isPending) return <Loading />;
- * if (login.isError) return <Error message={login.error.message} />;
  */
 export function useLogin() {
-    const { setAuth } = useAuthStore();
-
     return useMutation({
         mutationFn: async (data: UserLoginRequest) => {
             setAPIKey(null);
@@ -191,47 +112,33 @@ export function useChangeUsername() {
  * @example
  * const auth = useAuth();
  * 
- * if (auth.isAuthenticated) {
+ * if (auth.isAuthenticated.value) {
  *   // 已登录
  * }
  * 
  * auth.logout(); // 登出
  */
 export function useAuth() {
-    const store = useAuthStore();
-    const { checkAuth, isLoading } = store;
-    // hydrated 表示持久化的认证状态是否已经恢复, 恢复前不校验 token。
-    const [hydrated, setHydrated] = useState(false);
-
-    // 全局未授权事件: 任何请求返回 401 都视为会话失效。
-    useEffect(() => {
-        const handleUnauthorized = () => useAuthStore.getState().logout();
+    onMounted(() => {
+        const handleUnauthorized = () => logout();
         window.addEventListener(apiUnauthorizedEvent, handleUnauthorized);
-        return () => window.removeEventListener(apiUnauthorizedEvent, handleUnauthorized);
-        // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, []);
+        onUnmounted(() => window.removeEventListener(apiUnauthorizedEvent, handleUnauthorized));
+    });
 
-    // 等待 persist 水合完成后再校验 token, 避免刷新时读到尚未恢复的空 token
-    // 而误判为未登录/已退出。水合在微任务中完成, 这里先查 hasHydrated 兜底。
-    useEffect(() => {
-        if (useAuthStore.persist.hasHydrated()) {
-            setHydrated(true);
-            return;
-        }
-        const unsubscribe = useAuthStore.persist.onFinishHydration(() => setHydrated(true));
-        return unsubscribe;
-    }, []);
-
-    useEffect(() => {
-        if (hydrated) {
-            void checkAuth();
-        }
-    }, [hydrated, checkAuth]);
+    watch(
+        hydrated,
+        (isHydrated) => {
+            if (isHydrated) {
+                void checkAuth();
+            }
+        },
+        { immediate: true },
+    );
 
     return {
-        isAuthenticated: store.isAuthenticated,
-        isAPIKeyAuth: store.isAPIKeyAuth,
-        isLoading: store.isLoading,
-        logout: store.logout,
+        isAuthenticated: computed(() => authStore.isAuthenticated),
+        isAPIKeyAuth: computed(() => authStore.isAPIKeyAuth),
+        isLoading: computed(() => authStore.isLoading),
+        logout,
     };
 }

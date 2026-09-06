@@ -1,14 +1,12 @@
 import path from 'node:path';
-import babel from '@rolldown/plugin-babel';
-import react, { reactCompilerPreset } from '@vitejs/plugin-react';
+import vue from '@vitejs/plugin-vue';
 import { defineConfig } from 'vite';
 
+// 与 React 版保持一致：base 相对路径、产物输出到 rust-embed 的 static/out、
+// dev 代理 /api 到本地后端。
 export default defineConfig({
   base: './',
-  plugins: [
-    react(),
-    babel({ presets: [reactCompilerPreset()] }),
-  ],
+  plugins: [vue()],
   resolve: {
     alias: {
       '@': path.resolve(import.meta.dirname, './src'),

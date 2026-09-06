@@ -1,0 +1,9 @@
+export { default as Setting } from './Setting.vue';
+export { default as SettingAppearance } from './Appearance.vue';
+export { default as SettingAccount } from './Account.vue';
+export { default as SettingSystem } from './System.vue';
+export { default as SettingLog } from './Log.vue';
+export { default as SettingModelPrice } from './ModelPrice.vue';
+export { default as SettingAPIKey } from './APIKey.vue';
+export { default as SettingModelSync } from './ModelSync.vue';
+export { default as SettingBackup } from './Backup.vue';

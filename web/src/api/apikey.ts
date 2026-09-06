@@ -1,8 +1,8 @@
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/vue-query';
 import { apiRequest } from './client';
 import { apiKeyDashboardStatsQueryOptions, apiKeyListQueryOptions } from './queries';
-import { useAuthStore } from './user';
-import { StatsAPIKey, StatsAPIKeyFormatted } from './stats';
+import { authStore, logout, setAPIKeyAuth } from '@/stores/auth';
+import type { StatsAPIKey, StatsAPIKeyFormatted } from './stats';
 import { formatCount, formatMoney, formatTime } from '@/lib/utils';
 
 /**
@@ -26,7 +26,7 @@ export interface APIKeyStatsResponse {
     info: APIKey;
 }
 
-interface APIKeyStatsResponseFormatted {
+export interface APIKeyStatsResponseFormatted {
     stats: StatsAPIKeyFormatted;
     info: APIKey;
 }
@@ -35,8 +35,6 @@ interface APIKeyStatsResponseFormatted {
  * API Key 登录 Hook（仅校验 key 是否有效）
  */
 export function useAPIKeyLogin() {
-    const { setAPIKeyAuth, logout } = useAuthStore();
-
     return useMutation({
         mutationFn: async (apiKey: string) => {
             setAPIKeyAuth(apiKey);
@@ -53,8 +51,6 @@ export function useAPIKeyLogin() {
  * 获取当前 API Key 的详细统计数据 Hook（仅 API Key 登录用户使用）
  */
 export function useAPIKeyDashboardStats() {
-    const { isAPIKeyAuth, isAuthenticated } = useAuthStore();
-
     return useQuery({
         ...apiKeyDashboardStatsQueryOptions,
         select: (data): APIKeyStatsResponseFormatted => ({
@@ -73,7 +69,7 @@ export function useAPIKeyDashboardStats() {
             },
             info: data.info,
         }),
-        enabled: isAPIKeyAuth && isAuthenticated,
+        enabled: () => authStore.isAPIKeyAuth && authStore.isAuthenticated,
         refetchInterval: 30000,
     });
 }
@@ -86,16 +82,13 @@ type CreateAPIKeyRequest = Omit<APIKey, 'id'> & { enabled?: boolean };
 /**
  * 更新 API Key 请求
  */
-type UpdateAPIKeyRequest = Pick<APIKey, 'id'> & CreateAPIKeyRequest;
+export type UpdateAPIKeyRequest = Pick<APIKey, 'id'> & CreateAPIKeyRequest;
 
 /**
  * 获取 API Key 列表 Hook
  * 
  * @example
  * const { data: apiKeys, isLoading, error } = useAPIKeyList();
- * 
- * if (isLoading) return <Loading />;
- * if (error) return <Error message={error.message} />;
  * 
  * apiKeys?.forEach(key => console.log(key.name));
  */

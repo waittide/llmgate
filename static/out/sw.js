@@ -1,5 +1,5 @@
 // 缓存策略或预缓存结构变化时递增版本，以便激活阶段清理旧缓存。
-const CACHE_VERSION = 'v2';
+const CACHE_VERSION = 'v3';
 const CACHE_NAMES = {
     shell: `octopus-shell-${CACHE_VERSION}`,
     static: `octopus-static-${CACHE_VERSION}`,

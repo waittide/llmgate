@@ -1,7 +1,16 @@
-import { queryOptions, useQuery } from '@tanstack/react-query';
+import { computed } from 'vue';
+import { queryOptions, useQuery } from '@tanstack/vue-query';
 import { apiRequest } from './client';
 import { statsDailyQueryOptions, statsHourlyQueryOptions, statsTotalQueryOptions } from './queries';
 import { formatCount, formatMoney, formatTime } from '@/lib/utils';
+
+export interface FormattedMetric {
+    raw: number;
+    formatted: {
+        value: string;
+        unit: string;
+    };
+}
 
 /**
  * 统计数据
@@ -17,29 +26,32 @@ export interface StatsMetrics {
 }
 
 export interface StatsMetricsFormatted {
-    input_token: ReturnType<typeof formatCount>;
-    output_token: ReturnType<typeof formatCount>;
-    input_cost: ReturnType<typeof formatMoney>;
-    output_cost: ReturnType<typeof formatMoney>;
-    wait_time: ReturnType<typeof formatTime>;
-    request_success: ReturnType<typeof formatCount>;
-    request_failed: ReturnType<typeof formatCount>;
+    input_token: FormattedMetric;
+    output_token: FormattedMetric;
+    input_cost: FormattedMetric;
+    output_cost: FormattedMetric;
+    wait_time: FormattedMetric;
+    request_success: FormattedMetric;
+    request_failed: FormattedMetric;
 
-    request_count: ReturnType<typeof formatCount>;
-    total_token: ReturnType<typeof formatCount>;
-    total_cost: ReturnType<typeof formatMoney>;
+    request_count: FormattedMetric;
+    total_token: FormattedMetric;
+    total_cost: FormattedMetric;
 }
 
 export interface StatsDaily extends StatsMetrics {
     date: string;
 }
+
 export interface StatsDailyResponse {
     max_request_count: number;
     items: StatsDaily[];
 }
+
 export interface StatsDailyFormatted extends StatsMetricsFormatted {
     date: string;
 }
+
 interface StatsDailyFormattedResponse {
     max_request_count: number;
     items: StatsDailyFormatted[];
@@ -48,16 +60,19 @@ interface StatsDailyFormattedResponse {
 export interface StatsTotal extends StatsMetrics {
     id: number;
 }
-type StatsTotalFormatted = StatsMetricsFormatted;
+
+export type StatsTotalFormatted = StatsMetricsFormatted;
 
 export interface StatsHourly extends StatsMetrics {
     hour: number;
     date: string;
 }
-interface StatsHourlyFormatted extends StatsMetricsFormatted {
+
+export interface StatsHourlyFormatted extends StatsMetricsFormatted {
     hour: number;
     date: string;
 }
+
 /**
  * API Key 统计数据
  */
@@ -99,8 +114,8 @@ export function useStatsDaily() {
     const query = useQuery(statsDailyFormattedQueryOptions);
     return {
         ...query,
-        data: query.data?.items,
-        maxRequestCount: query.data?.max_request_count ?? 0,
+        data: computed(() => query.data.value?.items),
+        maxRequestCount: computed(() => query.data.value?.max_request_count ?? 0),
     };
 }
 
@@ -121,7 +136,7 @@ const statsHourlyFormattedQueryOptions = queryOptions({
         request_failed: formatCount(item.request_failed),
         request_count: formatCount(item.request_success + item.request_failed),
     })),
-    refetchInterval: 10000,// 10 秒
+    refetchInterval: 10000, // 10 秒
     refetchOnMount: 'always',
 });
 
@@ -147,7 +162,7 @@ const statsTotalFormattedQueryOptions = queryOptions({
         request_failed: formatCount(data.request_failed),
         request_count: formatCount(data.request_success + data.request_failed),
     }),
-    refetchInterval: 10000,// 10 秒
+    refetchInterval: 10000, // 10 秒
     refetchOnMount: 'always',
 });
 
@@ -157,8 +172,6 @@ const statsTotalFormattedQueryOptions = queryOptions({
 export function useStatsTotal() {
     return useQuery(statsTotalFormattedQueryOptions);
 }
-
-
 
 /**
  * 获取 API Key 统计数据列表 Hook
