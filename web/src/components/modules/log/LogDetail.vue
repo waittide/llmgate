@@ -128,8 +128,9 @@ function keyCountOf(key: string): number {
     return key.replace(',', '\n').split('\n').map((k) => k.trim()).filter((k) => k.length > 0).length || 1;
 }
 
-// channelSequence 按使用顺序排列使用过的渠道, 其后追加未使用的渠道(置灰);
-// 每个渠道展开其全部 key: 使用过的按轮次结果标记, 未使用的置灰。
+
+// channelSequence 按分组中渠道的真实顺序(priority)排列全部渠道;
+// 密钥行只展示当前选中分组的 keys。使用过的标记结果, 未使用的置灰。
 const channelSequence = computed<ChannelChip[]>(() => {
     const group = activeGroup.value;
     if (!group) return [];
@@ -153,9 +154,8 @@ const channelSequence = computed<ChannelChip[]>(() => {
     }
 
     const seq: ChannelChip[] = [];
-    const pushChannel = (channelId: number, rounds: RoundLog[] | undefined) => {
-        const name = nameByChannelId.get(channelId) ?? '';
-        if (!name || seq.some((c) => c.name === name)) return;
+    for (const [channelId, name] of nameByChannelId) {
+        const rounds = roundsByChannel.get(name);
         const keyCount = keyCountByChannel.get(channelId) ?? 0;
         const keys: KeyChip[] = [];
         for (let idx = 0; idx < keyCount; idx++) {
@@ -175,19 +175,21 @@ const channelSequence = computed<ChannelChip[]>(() => {
             keys,
             selectRound: success ? (successRound?.round ?? null) : (rounds?.[0]?.round ?? null),
         });
-    };
-
-    // 使用过的渠道按轮次出现顺序
-    for (const [name, rounds] of roundsByChannel) {
-        const channelId = [...nameByChannelId.entries()].find(([, n]) => n === name)?.[0];
-        if (channelId !== undefined) pushChannel(channelId, rounds);
-    }
-    // 未使用的渠道按优先级顺序追加(置灰)
-    for (const [channelId, name] of nameByChannelId) {
-        if (!roundsByChannel.has(name)) pushChannel(channelId, undefined);
     }
     return seq;
 });
+
+// 当前选中的分组: 未手动选择时跟随最后一轮(默认为成功/最终轮的分组)
+const selectedChannelName = ref<string | null>(null);
+const selectedChannelKeys = computed<KeyChip[]>(() => {
+    const name = selectedChannelName.value ?? activeRound.value?.channel_name ?? null;
+    return channelSequence.value.find((c) => c.name === name)?.keys ?? [];
+});
+
+function selectChannel(c: ChannelChip) {
+    selectedChannelName.value = c.name;
+    if (c.selectRound !== null) selectedRoundNum.value = c.selectRound;
+}
 
 onMounted(() => {
     const timer = window.setTimeout(() => {
@@ -270,14 +272,13 @@ async function handleStopRound() {
                     v-for="c in channelSequence"
                     :key="`c-${c.name}`"
                     type="button"
-                    :disabled="c.state === 'unused'"
-                    @click="c.selectRound !== null && (selectedRoundNum = c.selectRound)"
+                    @click="selectChannel(c)"
                     :class="cn(
                         'shrink-0 px-2 py-0.5 rounded-md border text-xs font-medium transition-colors inline-flex items-center gap-1',
                         c.state === 'success' ? 'border-emerald-500/40 bg-emerald-500/5 text-emerald-600 dark:text-emerald-400' : '',
                         c.state === 'failed' ? 'border-destructive/40 bg-destructive/5 text-destructive' : '',
                         c.state === 'unused' ? 'border-border/60 bg-muted/30 text-muted-foreground/40 cursor-default' : '',
-                        activeRound?.round === c.selectRound && 'border-primary bg-primary/10 text-primary',
+                        selectedChannelName === c.name && 'border-primary bg-primary/10 text-primary',
                     )"
                 >
                     <LuCheckCircle2 v-if="c.state === 'success'" class="size-3.5" />
@@ -286,25 +287,23 @@ async function handleStopRound() {
             </div>
             <div class="flex items-center gap-1.5 overflow-x-auto pb-1 shrink-0 text-xs">
                 <span class="text-muted-foreground shrink-0 font-medium">{{ t('key') }}:</span>
-                <template v-for="c in channelSequence" :key="`k-${c.name}`">
-                    <button
-                        v-for="k in c.keys"
-                        :key="`k-${c.name}-${k.keyIndex}`"
-                        type="button"
-                        :disabled="k.state === 'unused'"
-                        @click="k.round && (selectedRoundNum = k.round.round)"
-                        :class="cn(
-                            'shrink-0 px-2 py-0.5 rounded-md border text-xs font-medium transition-colors inline-flex items-center gap-1',
-                            k.state === 'success' ? 'border-emerald-500/40 bg-emerald-500/5 text-emerald-600 dark:text-emerald-400' : '',
-                            k.state === 'failed' ? 'border-destructive/40 bg-destructive/5 text-destructive' : '',
-                            k.state === 'unused' ? 'border-border/60 bg-muted/30 text-muted-foreground/40 cursor-default' : '',
-                            activeRound?.round === k.round?.round && 'border-primary bg-primary/10 text-primary',
-                        )"
-                    >
-                        <LuCheckCircle2 v-if="k.state === 'success'" class="size-3" />
-                        {{ t('key') }}{{ k.keyIndex + 1 }}
-                    </button>
-                </template>
+                <button
+                    v-for="k in selectedChannelKeys"
+                    :key="`k-${k.keyIndex}`"
+                    type="button"
+                    :disabled="k.state === 'unused'"
+                    @click="k.round && (selectedRoundNum = k.round.round)"
+                    :class="cn(
+                        'shrink-0 px-2 py-0.5 rounded-md border text-xs font-medium transition-colors inline-flex items-center gap-1',
+                        k.state === 'success' ? 'border-emerald-500/40 bg-emerald-500/5 text-emerald-600 dark:text-emerald-400' : '',
+                        k.state === 'failed' ? 'border-destructive/40 bg-destructive/5 text-destructive' : '',
+                        k.state === 'unused' ? 'border-border/60 bg-muted/30 text-muted-foreground/40 cursor-default' : '',
+                        activeRound?.round === k.round?.round && 'border-primary bg-primary/10 text-primary',
+                    )"
+                >
+                    <LuCheckCircle2 v-if="k.state === 'success'" class="size-3" />
+                    {{ t('key') }}{{ k.keyIndex + 1 }}
+                </button>
             </div>
 
             <div class="grid grid-cols-1 md:grid-cols-2 gap-4 flex-1 min-h-0">
