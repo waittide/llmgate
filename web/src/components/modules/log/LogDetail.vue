@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref, watchEffect } from 'vue';
-import { LuAlertCircle, LuArrowRight, LuLoader2, LuSquare } from 'vue-icons-plus/lu';
+import { LuAlertCircle, LuArrowRight, LuCheckCircle2, LuLoader2, LuSquare } from 'vue-icons-plus/lu';
 import {
     type RelayLogOverview,
     type RoundLog,
@@ -9,6 +9,8 @@ import {
     useLogResponseBody,
     useStopRound,
 } from '@/api/log';
+import { useGroupList } from '@/api/group';
+import { useChannelList } from '@/api/channel';
 import { Badge } from '@/components/ui/badge';
 import { useTranslations } from '@/composables/i18n';
 import { toast } from '@/composables/toast';
@@ -65,6 +67,17 @@ const detail = useLogDetail(
 
 const stopRound = useStopRound();
 
+const { data: groupsData } = useGroupList(
+    computed(() => detailReady.value),
+    computed(() => detailReady.value),
+);
+const groups = computed(() => groupsData.value ?? []);
+
+const { data: channelsData } = useChannelList(computed(() => detailReady.value));
+const channels = computed(() => channelsData.value ?? []);
+
+const activeGroup = computed(() => groups.value.find((group) => group.name.toLowerCase() === props.log.model?.toLowerCase()));
+
 const persistentRounds = computed<RoundLog[]>(() => {
     if (props.log.rounds && props.log.rounds.length > 0) return props.log.rounds;
     if (detail.data.value?.rounds && detail.data.value.rounds.length > 0) return detail.data.value.rounds;
@@ -96,6 +109,74 @@ const requestFailed = computed(() => props.log.status === 'failed' || props.log.
 const responseCommitted = computed(() => props.log.status === 'committed');
 const showRounds = computed(() => props.log.status === 'running' && rounds.value.length > 0);
 const roundSuccess = (r: RoundLog) => r.status >= 200 && r.status < 300;
+
+interface KeyChip {
+    keyIndex: number;          // 渠道内 key 序号(0 基)
+    round: RoundLog | null;    // 使用该 key 的轮次; null = 未使用
+    channelName: string;
+}
+interface ChannelChip {
+    name: string;
+    used: boolean;
+    success: boolean;
+    keys: KeyChip[];
+    selectRound: number | null; // 点击色块选中的轮次(该渠道首次使用)
+}
+
+// 渠道内 key 总数: 与后端 key_pool 同规则(换行/逗号分隔, 去空白)
+function keyCountOf(key: string): number {
+    return key.replace(',', '\n').split('\n').map((k) => k.trim()).filter((k) => k.length > 0).length || 1;
+}
+
+// channelSequence 按使用顺序排列使用过的渠道, 其后追加未使用的渠道(置灰);
+// 每个渠道展开其全部 key: 使用过的按轮次结果标记, 未使用的置灰。
+const channelSequence = computed<ChannelChip[]>(() => {
+    const group = activeGroup.value;
+    if (!group) return [];
+
+    const roundsByChannel = new Map<string, RoundLog[]>();
+    for (const r of persistentRounds.value) {
+        const list = roundsByChannel.get(r.channel_name) ?? [];
+        list.push(r);
+        roundsByChannel.set(r.channel_name, list);
+    }
+
+    const keyCountByChannel = new Map<number, number>();
+    const nameByChannelId = new Map<number, string>();
+    for (const item of [...(group.items ?? [])].sort((a, b) => a.priority - b.priority)) {
+        const channelId = item.channel_model?.channel_id;
+        if (channelId === undefined) continue;
+        const channel = channels.value.find((c) => c.raw.id === channelId)?.raw;
+        if (!channel) continue;
+        keyCountByChannel.set(channelId, keyCountOf(channel.key));
+        nameByChannelId.set(channelId, channel.name);
+    }
+
+    const seq: ChannelChip[] = [];
+    const pushChannel = (channelId: number, rounds: RoundLog[] | undefined) => {
+        const name = nameByChannelId.get(channelId) ?? '';
+        if (!name || seq.some((c) => c.name === name)) return;
+        const keyCount = keyCountByChannel.get(channelId) ?? 0;
+        const keys: KeyChip[] = [];
+        for (let idx = 0; idx < keyCount; idx++) {
+            const round = rounds?.find((r) => r.key_index === idx) ?? null;
+            keys.push({ keyIndex: idx, round, channelName: name });
+        }
+        const success = (rounds ?? []).some((r) => roundSuccess(r));
+        seq.push({ name, used: Boolean(rounds?.length), success, keys, selectRound: rounds?.[0]?.round ?? null });
+    };
+
+    // 使用过的渠道按轮次出现顺序
+    for (const [name, rounds] of roundsByChannel) {
+        const channelId = [...nameByChannelId.entries()].find(([, n]) => n === name)?.[0];
+        if (channelId !== undefined) pushChannel(channelId, rounds);
+    }
+    // 未使用的渠道按优先级顺序追加(置灰)
+    for (const [channelId, name] of nameByChannelId) {
+        if (!roundsByChannel.has(name)) pushChannel(channelId, undefined);
+    }
+    return seq;
+});
 
 onMounted(() => {
     const timer = window.setTimeout(() => {
@@ -172,47 +253,51 @@ async function handleStopRound() {
         </MorphingDialogTitle>
 
         <MorphingDialogDescription class="flex-1 min-h-0 flex flex-col gap-2">
-            <!-- 渠道使用顺序色块: 点击切换查看对应轮次; 成功绿标, 未产生最终结果的置灰 -->
             <div class="flex items-center gap-1.5 overflow-x-auto pb-1 shrink-0 text-xs">
                 <span class="text-muted-foreground shrink-0 font-medium">[{{ t('group') }}]:</span>
                 <button
-                    v-for="(r, i) in persistentRounds"
-                    :key="`c${i}`"
+                    v-for="c in channelSequence"
+                    :key="`c-${c.name}`"
                     type="button"
-                    @click="selectedRoundNum = r.round"
+                    :disabled="!c.used"
+                    @click="c.selectRound !== null && (selectedRoundNum = c.selectRound)"
                     :class="cn(
-                        'shrink-0 px-2 py-0.5 rounded-md border text-xs font-medium transition-colors',
-                        activeRound?.round === r.round
-                            ? 'border-primary bg-primary/10 text-primary shadow-xs'
-                            : roundSuccess(r)
+                        'shrink-0 px-2 py-0.5 rounded-md border text-xs font-medium transition-colors inline-flex items-center gap-1',
+                        c.used
+                            ? (c.success
                                 ? 'border-emerald-500/40 bg-emerald-500/5 text-emerald-600 dark:text-emerald-400'
-                                : 'border-border bg-muted/50 text-muted-foreground/60 hover:bg-muted hover:text-foreground',
+                                : 'border-border bg-muted/50 text-muted-foreground hover:bg-muted hover:text-foreground')
+                            : 'border-border/60 bg-muted/30 text-muted-foreground/40 cursor-default',
+                        activeRound?.round === c.selectRound && c.used && 'border-primary bg-primary/10 text-primary',
                     )"
                 >
-                    {{ r.channel_name }}{{ roundSuccess(r) ? ' ✓' : '' }}
+                    <LuCheckCircle2 v-if="c.success" class="size-3.5" />
+                    {{ c.name }}
                 </button>
             </div>
-            <!-- key 使用顺序色块: 轮换中间失败的删除线置灰, 最终 key 按轮次结果标记 -->
             <div class="flex items-center gap-1.5 overflow-x-auto pb-1 shrink-0 text-xs">
                 <span class="text-muted-foreground shrink-0 font-medium">[{{ t('key') }}]:</span>
-                <button
-                    v-for="(r, ri) in persistentRounds"
-                    :key="`k${ri}`"
-                    type="button"
-                    @click="selectedRoundNum = r.round"
-                    :class="cn(
-                        'shrink-0 px-2 py-0.5 rounded-md border text-xs font-medium transition-colors',
-                        activeRound?.round === r.round
-                            ? (roundSuccess(r)
-                                ? 'border-emerald-500/40 bg-emerald-500/5 text-emerald-600 dark:text-emerald-400'
-                                : 'border-primary/50 bg-primary/10 text-primary')
-                            : roundSuccess(r)
-                                ? 'border-emerald-500/40 text-emerald-600 dark:text-emerald-400'
-                                : 'border-border bg-muted/50 text-muted-foreground/60 hover:bg-muted',
-                    )"
-                >
-                    {{ t('key') }}{{ (r.key_index ?? 0) + 1 }}{{ roundSuccess(r) ? ' ✓' : '' }}
-                </button>
+                <template v-for="c in channelSequence" :key="`k-${c.name}`">
+                    <button
+                        v-for="k in c.keys"
+                        :key="`k-${c.name}-${k.keyIndex}`"
+                        type="button"
+                        :disabled="!k.round"
+                        @click="k.round && (selectedRoundNum = k.round.round)"
+                        :class="cn(
+                            'shrink-0 px-2 py-0.5 rounded-md border text-xs transition-colors inline-flex items-center gap-1',
+                            k.round
+                                ? (roundSuccess(k.round)
+                                    ? 'border-emerald-500/40 bg-emerald-500/5 text-emerald-600 dark:text-emerald-400'
+                                    : 'border-border bg-muted/50 text-muted-foreground hover:bg-muted hover:text-foreground')
+                                : 'border-border/60 bg-muted/30 text-muted-foreground/40 cursor-default',
+                            activeRound?.round === k.round?.round && k.round && 'border-primary bg-primary/10 text-primary',
+                        )"
+                    >
+                        <LuCheckCircle2 v-if="k.round && roundSuccess(k.round)" class="size-3" />
+                        {{ t('key') }}{{ k.keyIndex + 1 }}
+                    </button>
+                </template>
             </div>
 
             <div class="grid grid-cols-1 md:grid-cols-2 gap-4 flex-1 min-h-0">
