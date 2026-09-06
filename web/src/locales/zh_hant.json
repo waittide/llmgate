@@ -430,7 +430,8 @@
       "keyAttempts": "密鑰輪換嘗試",
       "transportError": "傳輸失敗",
       "usedChannels": "使用分組",
-      "usedKeys": "使用 Key"
+      "usedKeys": "使用 Key",
+      "key": "密鑰"
     },
     "filter": {
       "keyword": "關鍵詞",

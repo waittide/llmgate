@@ -1,14 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref, watchEffect } from 'vue';
-import {
-    LuAlertCircle,
-    LuArrowRight,
-    LuLoader2,
-    LuSquare,
-} from 'vue-icons-plus/lu';
-import { useTranslations } from '@/composables/i18n';
-import { toast } from '@/composables/toast';
-import { cn } from '@/lib/utils';
+import { LuAlertCircle, LuArrowRight, LuLoader2, LuSquare } from 'vue-icons-plus/lu';
 import {
     type RelayLogOverview,
     type RoundLog,
@@ -17,10 +9,10 @@ import {
     useLogResponseBody,
     useStopRound,
 } from '@/api/log';
-import { useGroupList, useUpdateGroupActiveItem, type GroupItem } from '@/api/group';
-import { useChannelList } from '@/api/channel';
 import { Badge } from '@/components/ui/badge';
-import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs';
+import { useTranslations } from '@/composables/i18n';
+import { toast } from '@/composables/toast';
+import { cn } from '@/lib/utils';
 import CopyButton from '@/components/common/CopyButton.vue';
 import {
     MorphingDialogContent,
@@ -32,7 +24,6 @@ import { getModelIcon } from './model-icons';
 import HttpMeta from './HttpMeta.vue';
 import JsonContent from './JsonContent.vue';
 import LogMetrics from './LogMetrics.vue';
-import MemberStatus from './MemberStatus.vue';
 
 interface ObservedRound {
     round: number;
@@ -51,16 +42,14 @@ const props = defineProps<Props>();
 const { t } = useTranslations('log.card');
 const { t: statusT } = useTranslations('log.status');
 
-const leftTab = ref<'request' | 'group'>('group');
 const rounds = ref<ObservedRound[]>([]);
 const observedRoundKey = ref('');
 const detailReady = ref(false);
-const switchingItemId = ref<number | null>(null);
 
 const requestBody = useLogRequestBody(
     computed(() => props.log.id),
     computed(() => props.log.started_at),
-    computed(() => detailReady.value && leftTab.value === 'request'),
+    computed(() => detailReady.value),
 );
 
 const responseBody = useLogResponseBody(
@@ -74,25 +63,7 @@ const detail = useLogDetail(
     computed(() => detailReady.value),
 );
 
-const { data: groupsData } = useGroupList(
-    computed(() => detailReady.value),
-    computed(() => detailReady.value),
-);
-const groups = computed(() => groupsData.value ?? []);
-
-const { data: channelsData } = useChannelList(computed(() => detailReady.value));
-const channels = computed(() => channelsData.value ?? []);
-
-const updateActiveItem = useUpdateGroupActiveItem();
 const stopRound = useStopRound();
-
-const channelNameByModelID = computed(() => {
-    const map = new Map<number, string>();
-    channels.value.forEach(({ raw: channel }) => {
-        channel.models.forEach((channelModel) => map.set(channelModel.id, channel.name));
-    });
-    return map;
-});
 
 const persistentRounds = computed<RoundLog[]>(() => {
     if (props.log.rounds && props.log.rounds.length > 0) return props.log.rounds;
@@ -125,8 +96,6 @@ const requestFailed = computed(() => props.log.status === 'failed' || props.log.
 const responseCommitted = computed(() => props.log.status === 'committed');
 const showRounds = computed(() => props.log.status === 'running' && rounds.value.length > 0);
 const roundSuccess = (r: RoundLog) => r.status >= 200 && r.status < 300;
-const activeGroup = computed(() => groups.value.find((group) => group.name.toLowerCase() === props.log.model?.toLowerCase()));
-const isWaitingForSelection = computed(() => props.log.status === 'running' && !props.log.sending && activeGroup.value?.mode === 'manual' && activeGroup.value.active_item_id === 0);
 
 onMounted(() => {
     const timer = window.setTimeout(() => {
@@ -153,64 +122,6 @@ function formatMilliseconds(value: number) {
     const milliseconds = Math.max(0, value);
     if (milliseconds < 1000) return `${Math.round(milliseconds)}ms`;
     return `${(milliseconds / 1000).toFixed(2)}s`;
-}
-
-function getItemChannelName(item: GroupItem): string {
-    if (!item.channel_model) return '-';
-    return (
-        channelNameByModelID.value.get(item.channel_model.id) ??
-        channels.value.find((c) => c.raw.id === item.channel_model?.channel_id)?.raw.name ??
-        `#${item.channel_model.channel_id}`
-    );
-}
-
-function getItemIcon(item: GroupItem) {
-    const modelName = item.channel_model?.name ?? '';
-    return getModelIcon(modelName);
-}
-
-function itemCurrent(item: GroupItem): boolean {
-    if (!activeGroup.value) return false;
-    const modelName = item.channel_model?.name ?? '';
-    const channelName = getItemChannelName(item);
-    const itemActive = item.id === activeGroup.value.active_item_id;
-    const itemSwitching = item.id === switchingItemId.value;
-    const isUsedByLog = Boolean(
-        actualChannel.value &&
-        (channelName === actualChannel.value || (!channelNameByModelID.value.size && (!channelName || channelName === '-'))) &&
-        (!actualModel.value || modelName === actualModel.value)
-    );
-
-    if (switchingItemId.value !== null) {
-        return itemSwitching;
-    }
-    if (isUsedByLog) {
-        return true;
-    }
-    if (props.log.status === 'running') {
-        return activeGroup.value.mode === 'failover'
-            ? activeGroup.value.runtime?.current_item_id === item.id
-            : itemActive;
-    }
-    return false;
-}
-
-async function handleSwitchItem(item: GroupItem) {
-    if (!activeGroup.value?.id || item.id === undefined || activeGroup.value.mode === 'failover') return;
-    const itemActive = item.id === activeGroup.value.active_item_id;
-    switchingItemId.value = item.id;
-    try {
-        await updateActiveItem.mutateAsync({ groupId: activeGroup.value.id, itemId: itemActive ? 0 : item.id });
-        if (props.log.sending) {
-            await stopRound.mutateAsync({ requestId: props.log.id, round: props.log.round });
-        }
-        toast.success(itemActive ? t('channelCleared') : t('channelChanged'));
-    } catch (cause) {
-        const message = cause instanceof Error ? `${t('channelChangeFailed')}: ${cause.message}` : t('channelChangeFailed');
-        toast.error(message);
-    } finally {
-        switchingItemId.value = null;
-    }
 }
 
 async function handleStopRound() {
@@ -261,81 +172,70 @@ async function handleStopRound() {
         </MorphingDialogTitle>
 
         <MorphingDialogDescription class="flex-1 min-h-0 flex flex-col gap-2">
-            <!-- 轮次切换条 -->
-            <div
-                v-if="persistentRounds.length > 1"
-                class="flex items-center gap-1.5 overflow-x-auto pb-1 shrink-0"
-            >
-                <span class="text-xs font-semibold text-muted-foreground mr-1 shrink-0">{{ t('round') }}:</span>
+            <!-- 渠道使用顺序色块: 点击切换查看对应轮次; 成功绿标, 未产生最终结果的置灰 -->
+            <div class="flex items-center gap-1.5 overflow-x-auto pb-1 shrink-0 text-xs">
+                <span class="text-muted-foreground shrink-0 font-medium">[{{ t('group') }}]:</span>
                 <button
-                    v-for="r in persistentRounds"
-                    :key="r.round"
+                    v-for="(r, i) in persistentRounds"
+                    :key="`c${i}`"
                     type="button"
                     @click="selectedRoundNum = r.round"
                     :class="cn(
-                        'flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-medium transition-colors border shrink-0',
+                        'shrink-0 px-2 py-0.5 rounded-md border text-xs font-medium transition-colors',
                         activeRound?.round === r.round
-                            ? 'bg-primary text-primary-foreground border-primary shadow-xs'
-                            : 'bg-muted/50 text-muted-foreground border-border hover:bg-muted hover:text-foreground',
+                            ? 'border-primary bg-primary/10 text-primary shadow-xs'
+                            : roundSuccess(r)
+                                ? 'border-emerald-500/40 bg-emerald-500/5 text-emerald-600 dark:text-emerald-400'
+                                : 'border-border bg-muted/50 text-muted-foreground/60 hover:bg-muted hover:text-foreground',
                     )"
                 >
-                    <span>{{ t('roundIndex', { index: r.round }) }}:</span>
-                    <span class="font-semibold">{{ r.channel_name }}</span>
-                    <Badge
-                        :variant="(r.status >= 200 && r.status < 300) ? 'secondary' : 'destructive'"
-                        :class="cn(
-                            'px-1 py-0 text-[10px]',
-                            activeRound?.round === r.round && (r.status >= 200 && r.status < 300) && 'bg-primary-foreground/20 text-primary-foreground',
-                        )"
-                    >
-                        {{ r.status || ((r.status >= 200 && r.status < 300) ? 200 : 500) }}
-                    </Badge>
-                    <span v-if="r.duration_ms > 0" class="opacity-70 text-[10px]">{{ formatMilliseconds(r.duration_ms) }}</span>
+                    {{ r.channel_name }}{{ roundSuccess(r) ? ' ✓' : '' }}
                 </button>
             </div>
+            <!-- key 使用顺序色块: 轮换中间失败的删除线置灰, 最终 key 按轮次结果标记 -->
+            <div class="flex items-center gap-1.5 overflow-x-auto pb-1 shrink-0 text-xs">
+                <span class="text-muted-foreground shrink-0 font-medium">[{{ t('key') }}]:</span>
+                <template v-for="(r, ri) in persistentRounds" :key="`kr${ri}`">
+                    <button
+                        v-for="(a, ai) in r.key_attempts ?? []"
+                        :key="`f${ri}-${ai}`"
+                        type="button"
+                        @click="selectedRoundNum = r.round"
+                        :class="cn(
+                            'shrink-0 px-2 py-0.5 rounded-md border text-xs line-through transition-colors',
+                            activeRound?.round === r.round
+                                ? 'border-destructive/50 bg-destructive/5 text-destructive/80'
+                                : 'border-border bg-muted/50 text-muted-foreground/50 hover:bg-muted',
+                        )"
+                    >
+                        {{ t('key') }}{{ a.key_index + 1 }}
+                    </button>
+                    <button
+                        type="button"
+                        @click="selectedRoundNum = r.round"
+                        :class="cn(
+                            'shrink-0 px-2 py-0.5 rounded-md border text-xs font-medium transition-colors',
+                            activeRound?.round === r.round
+                                ? (roundSuccess(r)
+                                    ? 'border-emerald-500/40 bg-emerald-500/5 text-emerald-600 dark:text-emerald-400'
+                                    : 'border-primary/50 bg-primary/10 text-primary')
+                                : roundSuccess(r)
+                                    ? 'border-emerald-500/40 text-emerald-600 dark:text-emerald-400'
+                                    : 'border-border bg-muted/50 text-muted-foreground/60 hover:bg-muted',
+                        )"
+                    >
+                        {{ t('key') }}{{ (r.key_index ?? 0) + 1 }}{{ roundSuccess(r) ? ' ✓' : '' }}
+                    </button>
+                    <span v-if="ri < persistentRounds.length - 1" class="text-muted-foreground/40 shrink-0">→</span>
+                </template>
+            </div>
 
-            <div class="flex items-center gap-1.5 overflow-x-auto shrink-0 text-xs">
-                <span class="text-muted-foreground shrink-0 font-medium">{{ t('usedChannels') }}</span>
-                <template v-for="(r, i) in persistentRounds" :key="`c${i}`">
-                    <span v-if="i > 0" class="text-muted-foreground/50 shrink-0">→</span>
-                    <span
-                        :class="cn('shrink-0 font-medium', roundSuccess(r) ? 'text-emerald-600 dark:text-emerald-400' : 'text-muted-foreground line-through')"
-                    >
-                        {{ r.channel_name }}{{ roundSuccess(r) ? ' ✓' : '' }}
-                    </span>
-                </template>
-            </div>
-            <div class="flex items-center gap-1.5 overflow-x-auto shrink-0 text-xs">
-                <span class="text-muted-foreground shrink-0 font-medium">{{ t('usedKeys') }}</span>
-                <template v-for="(r, ri) in persistentRounds" :key="`k${ri}`">
-                    <template v-for="(a, ai) in r.key_attempts ?? []" :key="`f${ri}-${ai}`">
-                        <span class="shrink-0 text-destructive">Key #{{ a.key_index + 1 }} ✗</span>
-                        <span class="text-muted-foreground/50 shrink-0">→</span>
-                    </template>
-                    <span
-                        :class="cn('shrink-0 font-medium', roundSuccess(r) ? 'text-emerald-600 dark:text-emerald-400' : 'text-destructive')"
-                    >
-                        Key #{{ (r.key_index ?? 0) + 1 }} {{ roundSuccess(r) ? '✓' : '✗' }}
-                    </span>
-                    <span v-if="ri < persistentRounds.length - 1" class="text-muted-foreground/50 shrink-0">→</span>
-                </template>
-            </div>
             <div class="grid grid-cols-1 md:grid-cols-2 gap-4 flex-1 min-h-0">
-                <!-- 左侧: 分组与请求体 -->
+                <!-- 左侧: 选中轮次的请求信息 -->
                 <div class="flex flex-col rounded-2xl border border-border bg-muted/30 overflow-hidden min-h-0">
-                    <div class="flex h-10 shrink-0 items-center gap-2 border-b border-border bg-muted/50 pl-1 pr-3 md:pr-4">
-                        <Tabs v-model="leftTab">
-                            <TabsList variant="text" class="p-0">
-                                <TabsTrigger value="group" class="pr-0">
-                                    {{ t('group') }}
-                                </TabsTrigger>
-                                <span aria-hidden="true" class="mx-1 inline-flex h-full -translate-y-px items-center text-sm font-medium leading-none text-muted-foreground/50">/</span>
-                                <TabsTrigger value="request" class="pl-0">
-                                    {{ t('requestContent') }}
-                                </TabsTrigger>
-                            </TabsList>
-                        </Tabs>
-                        <Badge v-if="leftTab === 'request'" variant="secondary" class="ml-auto text-xs">
+                    <div class="flex h-10 shrink-0 items-center gap-2 border-b border-border bg-muted/50 px-3 md:px-4">
+                        <span class="text-sm font-medium text-card-foreground">{{ t('requestContent') }}</span>
+                        <Badge variant="secondary" class="ml-auto text-xs">
                             {{ (log.usage.prompt_tokens - (log.usage.cache_read_tokens ?? 0)).toLocaleString() }} {{ t('tokens') }}
                         </Badge>
                     </div>
@@ -344,73 +244,35 @@ async function handleStopRound() {
                         <div v-if="!detailReady" class="flex h-full items-center justify-center">
                             <LuLoader2 class="size-5 animate-spin text-muted-foreground" />
                         </div>
-                        <template v-else-if="leftTab === 'request'">
-                            <div v-if="requestBody.isLoading.value" class="flex h-full items-center justify-center">
-                                <LuLoader2 class="size-5 animate-spin text-muted-foreground" />
-                            </div>
-                            <div v-else-if="requestBody.error.value" class="flex h-full flex-col items-center justify-center gap-2 px-4 text-xs text-destructive">
-                                <LuAlertCircle class="size-5" />
-                                <span>{{ t('detailUnavailable') }}</span>
-                            </div>
-                            <template v-else>
-                                <HttpMeta
-                                    :url="activeRound?.request_url || detail.data.value?.request_url"
-                                    :headers="activeRound?.request_headers || detail.data.value?.request_headers"
-                                    :loading="detail.isLoading.value"
-                                />
-                                <JsonContent
-                                    :content="activeRound?.request_body || requestBody.data.value"
-                                    :fallback-text="t('noRequestContent')"
-                                />
-                            </template>
+                        <div v-else-if="requestBody.isLoading.value" class="flex h-full items-center justify-center">
+                            <LuLoader2 class="size-5 animate-spin text-muted-foreground" />
+                        </div>
+                        <div v-else-if="requestBody.error.value" class="flex h-full flex-col items-center justify-center gap-2 px-4 text-xs text-destructive">
+                            <LuAlertCircle class="size-5" />
+                            <span>{{ t('detailUnavailable') }}</span>
+                        </div>
+                        <template v-else>
+                            <HttpMeta
+                                :url="activeRound?.request_url || detail.data.value?.request_url"
+                                :headers="activeRound?.request_headers || detail.data.value?.request_headers"
+                                :loading="detail.isLoading.value"
+                            />
+                            <JsonContent
+                                :content="activeRound?.request_body || requestBody.data.value"
+                                :fallback-text="t('noRequestContent')"
+                            />
                         </template>
-                        <div v-else-if="!activeGroup" class="flex h-full items-center justify-center px-4 text-xs text-muted-foreground">
-                            {{ t('groupUnavailable') }}
-                        </div>
-                        <div v-else-if="!activeGroup.items?.length" class="flex h-full items-center justify-center px-4 text-xs text-muted-foreground">
-                            {{ t('noGroupItems') }}
-                        </div>
-                        <div v-else class="divide-y divide-border">
-                            <button
-                                v-for="item in activeGroup.items"
-                                :key="item.id ?? item.channel_model_id"
-                                type="button"
-                                :aria-pressed="itemCurrent(item)"
-                                :disabled="item.id === undefined || activeGroup.mode === 'failover' || switchingItemId !== null || stopRound.isPending.value"
-                                @click="handleSwitchItem(item)"
-                                :class="cn(
-                                    'flex w-full items-center gap-2.5 rounded-lg px-3 py-2.5 text-left text-xs transition-colors hover:bg-muted/50 disabled:cursor-default disabled:hover:bg-transparent',
-                                    itemCurrent(item) && 'bg-muted/60 font-medium'
-                                )"
-                            >
-                                <component
-                                    :is="getItemIcon(item).Icon"
-                                    aria-hidden="true"
-                                    :class="getItemIcon(item).className"
-                                    width="20"
-                                    height="20"
-                                />
-                                <span class="min-w-0 flex-1">
-                                    <span class="block truncate font-semibold text-foreground">
-                                        {{ getItemChannelName(item) }}
-                                    </span>
-                                    <span class="block truncate text-[11px] text-muted-foreground">{{ item.channel_model?.name ?? '' }}</span>
-                                </span>
-                                <MemberStatus :group="activeGroup" :item-id="item.id" :now="now" :active="itemCurrent(item)" />
-                                <LuLoader2 v-if="item.id === switchingItemId" class="size-4 shrink-0 animate-spin text-muted-foreground" />
-                            </button>
-                        </div>
                     </div>
                 </div>
 
-                <!-- 右侧: 响应内容或重试/错误详情 -->
+                <!-- 右侧: 选中轮次的响应内容或重试/错误详情 -->
                 <div class="flex flex-col rounded-2xl border border-border bg-muted/30 overflow-hidden min-h-0">
                     <div class="flex h-10 shrink-0 items-center gap-2 border-b border-border bg-muted/50 px-3 md:px-4">
                         <span class="text-sm font-medium text-card-foreground">
-                            {{ isWaitingForSelection ? t('waitingChannelSelection') : showRounds ? t('retryDetails') : activeRound?.error ? t('errorInfo') : requestFailed ? t('errorInfo') : t('responseContent') }}
+                            {{ showRounds ? t('retryDetails') : activeRound?.error ? t('errorInfo') : requestFailed ? t('errorInfo') : t('responseContent') }}
                         </span>
                         <button
-                            v-if="log.status === 'running' && log.sending && activeGroup?.mode === 'manual'"
+                            v-if="log.status === 'running' && log.sending"
                             type="button"
                             :disabled="stopRound.isPending.value"
                             @click="handleStopRound"
@@ -428,10 +290,6 @@ async function handleStopRound() {
                     <div class="min-h-0 flex-1 overflow-auto">
                         <div v-if="!detailReady" class="flex h-full items-center justify-center">
                             <LuLoader2 class="size-5 animate-spin text-muted-foreground" />
-                        </div>
-                        <div v-else-if="isWaitingForSelection" class="flex h-full items-center justify-center gap-2 text-xs text-muted-foreground">
-                            <LuLoader2 class="size-4 animate-spin" />
-                            {{ t('waitingChannelSelection') }}
                         </div>
                         <template v-else-if="showRounds">
                             <div v-if="rounds.length" class="divide-y divide-border">
@@ -469,22 +327,22 @@ async function handleStopRound() {
                                 :loading="detail.isLoading.value"
                             />
                             <div
-                            v-if="activeRound.key_attempts?.length"
-                            class="mb-2 rounded-xl border border-orange-500/30 bg-orange-500/5 p-2.5 text-xs space-y-1"
-                        >
-                            <div class="font-medium text-orange-600 dark:text-orange-400">{{ t('keyAttempts') }}</div>
-                            <div
-                                v-for="(attempt, attemptIndex) in activeRound.key_attempts"
-                                :key="attemptIndex"
-                                class="flex items-center gap-2 text-muted-foreground"
+                                v-if="activeRound.key_attempts?.length"
+                                class="mb-2 rounded-xl border border-orange-500/30 bg-orange-500/5 p-2.5 text-xs space-y-1"
                             >
-                                <span class="font-medium text-foreground">Key #{{ attempt.key_index + 1 }}</span>
-                                <Badge variant="destructive" class="px-1 py-0 text-[10px]">{{ attempt.status > 0 ? attempt.status : t('transportError') }}</Badge>
-                                <span class="truncate" :title="attempt.error">{{ attempt.error }}</span>
+                                <div class="font-medium text-orange-600 dark:text-orange-400">{{ t('keyAttempts') }}</div>
+                                <div
+                                    v-for="(attempt, attemptIndex) in activeRound.key_attempts"
+                                    :key="attemptIndex"
+                                    class="flex items-center gap-2 text-muted-foreground"
+                                >
+                                    <span class="font-medium text-foreground">{{ t('key') }}{{ attempt.key_index + 1 }}</span>
+                                    <Badge variant="destructive" class="px-1 py-0 text-[10px]">{{ attempt.status > 0 ? attempt.status : t('transportError') }}</Badge>
+                                    <span class="truncate" :title="attempt.error">{{ attempt.error }}</span>
+                                </div>
                             </div>
-                        </div>
-                        <JsonContent
-                            :content="activeRound.response_body || activeRound.error || errorText"
+                            <JsonContent
+                                :content="activeRound.response_body || activeRound.error || errorText"
                                 :fallback-text="t('noResponseContent')"
                             />
                         </template>
@@ -494,25 +352,11 @@ async function handleStopRound() {
                         <div v-else-if="responseBody.isLoading.value" class="flex h-full items-center justify-center">
                             <LuLoader2 class="size-5 animate-spin text-muted-foreground" />
                         </div>
-                        <div v-else-if="responseBody.error.value" class="flex h-full flex-col items-center justify-center gap-2 px-4 text-xs text-destructive">
-                            <LuAlertCircle class="size-5" />
-                            <span>{{ t('detailUnavailable') }}</span>
-                        </div>
-                        <template v-else>
-                            <HttpMeta
-                                :url="detail.data.value?.response_url"
-                                :headers="detail.data.value?.response_headers"
-                                :loading="detail.isLoading.value"
-                            />
-                            <JsonContent :content="responseBody.data.value" :fallback-text="t('noResponseContent')" />
-                        </template>
                     </div>
                 </div>
             </div>
-        </MorphingDialogDescription>
 
-        <div class="flex w-full shrink-0 flex-wrap items-center gap-3 pt-4 mt-auto text-xs text-muted-foreground md:gap-4">
             <LogMetrics :log="log" :now="now" :brand-color="modelIconInfo.color" variant="footer" />
-        </div>
+        </MorphingDialogDescription>
     </MorphingDialogContent>
 </template>

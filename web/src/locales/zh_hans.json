@@ -430,7 +430,8 @@
       "keyAttempts": "密钥轮换尝试",
       "transportError": "传输失败",
       "usedChannels": "使用分组",
-      "usedKeys": "使用 Key"
+      "usedKeys": "使用 Key",
+      "key": "密钥"
     },
     "filter": {
       "keyword": "关键词",
