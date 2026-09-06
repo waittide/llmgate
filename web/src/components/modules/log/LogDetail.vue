@@ -356,7 +356,9 @@ async function handleStopRound() {
                 </div>
             </div>
 
-            <LogMetrics :log="log" :now="now" :brand-color="modelIconInfo.color" variant="footer" />
+            <div class="flex flex-wrap items-center gap-x-4 gap-y-1 shrink-0 border-t border-border pt-2 text-xs">
+                <LogMetrics :log="log" :now="now" :brand-color="modelIconInfo.color" variant="footer" />
+            </div>
         </MorphingDialogDescription>
     </MorphingDialogContent>
 </template>
