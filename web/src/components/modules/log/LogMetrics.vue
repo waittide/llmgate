@@ -66,9 +66,9 @@ const metrics = computed(() => {
 
 <template>
     <template v-for="metric in metrics" :key="metric.key">
-        <div :class="cn('flex items-center gap-1.5', variant === 'card' && metric.cellClassName)">
+        <div :class="cn('flex items-center gap-1.5 min-w-0', variant === 'card' && metric.cellClassName)">
             <component :is="metric.Icon" :class="metric.iconClassName" :style="metric.iconStyle" />
-            <span :class="metric.valueClassName">{{ metric.value }}</span>
+            <span :class="cn('truncate', metric.valueClassName)" :title="metric.value">{{ metric.value }}</span>
         </div>
     </template>
 </template>
