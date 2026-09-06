@@ -204,7 +204,6 @@ struct RoundFailure<'a> {
     err_body:            &'a str,
     should_cooldown:     bool,
     key_index:           usize,
-    key_attempts:        Vec<crate::model::KeyAttempt>,
 }
 fn record_round_failure(
     state: &AppState,
@@ -229,7 +228,6 @@ fn record_round_failure(
         duration_ms:      fail.duration_ms,
         error:            Some(fail.err_body.to_string()),
         key_index:        Some(fail.key_index),
-        key_attempts:     fail.key_attempts,
     };
     rounds.push(round_log.clone());
     // 客户端错误不触发冷却；该轮连同错误详情已记录在请求日志中，不再输出到终端
@@ -267,7 +265,6 @@ struct SuccessContext<'a> {
     price_opt:        Option<ModelPrice>,
     rounds:           Vec<crate::model::RoundLog>,
     key_index:        usize,
-    key_attempts:     Vec<crate::model::KeyAttempt>,
 }
 
 fn handle_successful_stream(state: &AppState, upstream_resp: reqwest::Response, ctx: SuccessContext<'_>) -> Response {
@@ -320,7 +317,6 @@ fn handle_successful_stream(state: &AppState, upstream_resp: reqwest::Response, 
         log_template,
         previous_rounds: ctx.rounds,
         key_index: Some(ctx.key_index),
-        key_attempts: ctx.key_attempts.clone(),
         response_capture: Vec::new(),
         cancel_rx: state.in_flight.get_cancel_receiver(ctx.log_base.id as u64),
         interrupted: false,
@@ -466,7 +462,6 @@ async fn handle_successful_json(
         duration_ms:      round_duration_ms,
         error:            None,
         key_index:        Some(ctx.key_index),
-        key_attempts:     ctx.key_attempts.clone(),
     };
     ctx.rounds.push(round_log.clone());
     let mut req_log = ctx.log_base.clone();
@@ -622,130 +617,6 @@ fn build_failed_relay_response(state: &AppState, ctx: FailedRelayContext) -> Res
         })
 }
 
-/// 单渠道发送（含 key 级轮换）：401/403/429 且存在未试 key 时，冷却当前 key
-/// 并顺延未试 key 重试（不消耗轮次）；key 穷尽后返回最后一个响应。
-/// 传输错误/超时以 String 记述（含 "timeout" 字样者映射为网关超时）。
-struct SendPlan<'a> {
-    state:                    &'a AppState,
-    channel:                  &'a Channel,
-    key_pool:                 &'a [String],
-    endpoint:                 &'a str,
-    body:                     Bytes,
-    client_headers:           &'a HeaderMap,
-    stream:                   bool,
-    timeout_secs:             Option<u64>,
-    first_event_timeout_secs: u64,
-    cooldown_seconds:         i64,
-}
-
-async fn send_with_key_rotation(
-    plan: SendPlan<'_>,
-    key_attempts: &mut Vec<crate::model::KeyAttempt>,
-) -> Result<(reqwest::Response, usize, Vec<crate::model::KeyAttempt>), (String, usize, Vec<crate::model::KeyAttempt>)> {
-    let SendPlan {
-        state,
-        channel: ch,
-        key_pool,
-        endpoint: target_endpoint,
-        body: body_bytes,
-        client_headers,
-        stream,
-        timeout_secs,
-        first_event_timeout_secs,
-        cooldown_seconds,
-    } = plan;
-    let client = get_client();
-    let mut key_idx = state.key_pool.pick(ch.id, key_pool.len());
-    let mut tried_keys = std::collections::HashSet::new();
-    loop {
-        let req_builder = match build_upstream_request(
-            client,
-            ch,
-            &key_pool[key_idx],
-            target_endpoint,
-            Some(body_bytes.clone()),
-            timeout_secs,
-            Some(client_headers),
-        ) {
-            Ok(rb) => rb,
-            Err(e) => {
-                break Err((
-                    format!("构建渠道 {} 请求失败: {}", ch.name, e),
-                    key_idx,
-                    std::mem::take(key_attempts),
-                ));
-            }
-        };
-        let fut = req_builder.send();
-        // 流式: 首事件超时说明请求已被上游受理并可能开始生成,重试会造成重复生成,故不轮换
-        let send_result = if stream {
-            match tokio::time::timeout(std::time::Duration::from_secs(first_event_timeout_secs), fut).await {
-                Ok(r) => r,
-                Err(_) => {
-                    break Err((
-                        format!("上游流式响应在 {}s 内未返回初始响应头", first_event_timeout_secs),
-                        key_idx,
-                        std::mem::take(key_attempts),
-                    ));
-                }
-            }
-        } else {
-            fut.await
-        };
-        match send_result {
-            // key 级可重试错误：冷却当前 key，换未试过的 key 重试（不消耗轮次）
-            Ok(resp) if matches!(resp.status().as_u16(), 401 | 403 | 429) && key_pool.len() > 1 => {
-                // 先确认还有未试 key 再消费响应体;穷尽时保留 resp 交由上层记录
-                match (0..key_pool.len()).find(|idx| *idx != key_idx && !tried_keys.contains(idx)) {
-                    Some(next) => {
-                        // 记录被轮换掉的 key 的失败原因(响应体截断);只记序号,密钥内容绝不入日志
-                        let failed_status = resp.status().as_u16();
-                        let err_body =
-                            crate::utils::truncate_utf8(&resp.text().await.unwrap_or_default(), 512).to_string();
-                        key_attempts.push(crate::model::KeyAttempt {
-                            key_index: key_idx,
-                            status:    failed_status,
-                            error:     err_body,
-                        });
-                        state
-                            .key_pool
-                            .report_failure(ch.id, key_idx, cooldown_seconds);
-                        tried_keys.insert(key_idx);
-                        key_idx = next;
-                        continue;
-                    }
-                    None => break Ok((resp, key_idx, std::mem::take(key_attempts))),
-                }
-            }
-            // 连接层失败(连接被拒/重置): 部分上游对封禁 key 直接断连而非返回 401,
-            // 同样轮换下一个未试 key;status 记 0 表示传输层失败
-            Err(e) if (e.is_connect() || e.is_request()) && key_pool.len() > 1 => {
-                match (0..key_pool.len()).find(|idx| *idx != key_idx && !tried_keys.contains(idx)) {
-                    Some(next) => {
-                        key_attempts.push(crate::model::KeyAttempt {
-                            key_index: key_idx,
-                            status:    0,
-                            error:     e.to_string(),
-                        });
-                        state
-                            .key_pool
-                            .report_failure(ch.id, key_idx, cooldown_seconds);
-                        tried_keys.insert(key_idx);
-                        key_idx = next;
-                        continue;
-                    }
-                    None => break Err((e.to_string(), key_idx, std::mem::take(key_attempts))),
-                }
-            }
-            other => {
-                break other
-                    .map(|resp| (resp, key_idx, std::mem::take(key_attempts)))
-                    .map_err(|e| (e.to_string(), key_idx, std::mem::take(key_attempts)));
-            }
-        }
-    }
-}
-
 /// 转发期兜底注销：`forward_relay` 的 future 在 await 点被 drop（客户端断连、
 /// 运行时关闭）时，in_flight 注册表条目会永久泄漏、初始日志行停留在 RUNNING。
 /// 本 guard 的 Drop 统一收尾：注销注册、广播并落盘一条 INTERRUPTED 日志。
@@ -861,6 +732,9 @@ pub async fn forward_relay(
     let max_attempts = group_obj.relay_config.max_attempts.max(1);
 
     let mut round = 0;
+    let mut items_tried = 0;
+    let mut keys_tried: HashSet<usize> = HashSet::new();
+    let mut item: Option<crate::model::GroupItem> = None;
     let mut last_target_channel = String::new();
     let mut last_target_model = String::new();
     let mut last_response_url = String::new();
@@ -870,62 +744,89 @@ pub async fn forward_relay(
     let mut rounds: Vec<crate::model::RoundLog> = Vec::new();
     let mut attempted_items = HashSet::new();
 
-    while round < max_attempts {
+    // 渠道级上下文: 同渠道轮换 key 时复用, 换渠道时重建
+    let mut current_group = match group::get_group_by_name(&state, &metadata.model) {
+        Ok(g) => g,
+        Err(_) => {
+            return build_failed_relay_response(
+                &state,
+                FailedRelayContext {
+                    log_base:              log_base.clone(),
+                    last_target_channel:   String::new(),
+                    last_target_model:     String::new(),
+                    last_response_url:     String::new(),
+                    last_response_headers: String::new(),
+                    last_status:           StatusCode::NOT_FOUND,
+                    last_error_body:       "分组不存在".to_string(),
+                    rounds:                Vec::new(),
+                    wait_time_ms:          0,
+                    round:                 0,
+                    api_key_id:            auth_ctx.api_key.id,
+                },
+            );
+        }
+    };
+    let mut channel_model: Option<crate::model::ChannelModel> = None;
+    let mut ch: Option<crate::model::Channel> = None;
+    let mut target_endpoint = String::new();
+    let mut final_body = Vec::new();
+    let mut key_pool: Vec<String> = Vec::new();
+
+    while items_tried < max_attempts {
         if *cancel_rx.borrow() {
             last_error_body = "请求已被中断".to_string();
             last_status = StatusCode::from_u16(499).unwrap_or(StatusCode::BAD_REQUEST);
             break;
         }
-        round += 1;
-        let round_start_time = Instant::now();
 
-        let current_group = match group::get_group_by_name(&state, &metadata.model) {
-            Ok(g) => g,
-            Err(_) => break,
-        };
-
-        let item = match state
-            .route_manager
-            .pick_candidate_item(&current_group, &attempted_items, |channel_model_id| {
-                state
-                    .channel_models
-                    .get(&channel_model_id)
-                    .map(|cm| {
-                        state
-                            .channels
-                            .get(&cm.channel_id)
-                            .is_some_and(|c| c.enabled)
-                    })
-                    .unwrap_or(false)
-            }) {
-            Some(it) => it,
-            None => {
-                break;
-            }
-        };
-        attempted_items.insert(item.id);
-
-        let channel_model = match state.channel_models.get(&item.channel_model_id) {
-            Some(cm) => cm.clone(),
-            None => {
-                state
+        // 需要新渠道时(item 为空): 选择下一个可用渠道项(计一次渠道尝试)
+        if item.is_none() {
+            current_group = match group::get_group_by_name(&state, &metadata.model) {
+                Ok(g) => g,
+                Err(_) => break,
+            };
+            let picked =
+                match state
                     .route_manager
-                    .report_failure(current_group.id, item.id, 60);
-                continue;
-            }
-        };
+                    .pick_candidate_item(&current_group, &attempted_items, |channel_model_id| {
+                        state
+                            .channel_models
+                            .get(&channel_model_id)
+                            .map(|cm| {
+                                state
+                                    .channels
+                                    .get(&cm.channel_id)
+                                    .is_some_and(|c| c.enabled)
+                            })
+                            .unwrap_or(false)
+                    }) {
+                    Some(it) => it,
+                    None => break,
+                };
+            attempted_items.insert(picked.id);
+            items_tried += 1;
+            keys_tried.clear();
+            item = Some(picked);
 
-        let ch = match channel::get_channel(&state, channel_model.channel_id) {
-            Ok(c) if c.enabled => c,
-            Ok(_) | Err(_) => {
-                // 渠道已被禁用/移除:这不是"失败",不打冷却(避免状态常驻"冷却"),
-                // 选择器已跳过此类项,此处仅兜底竞态
-                continue;
-            }
-        };
+            let cm = match state
+                .channel_models
+                .get(&item.as_ref().unwrap().channel_model_id)
+            {
+                Some(cm) => cm.clone(),
+                None => {
+                    // 渠道模型缺失: 记一次渠道尝试并换下一个
+                    continue;
+                }
+            };
+            let channel = match channel::get_channel(&state, cm.channel_id) {
+                Ok(c) if c.enabled => c,
+                Ok(_) | Err(_) => {
+                    // 渠道已被禁用/移除: 竞态兜底, 换下一个
+                    continue;
+                }
+            };
 
-        let (target_endpoint, final_body) =
-            match prepare_upstream_payload(format, metadata.stream, &body_bytes, &ch, &channel_model) {
+            let (endpoint, body) = match prepare_upstream_payload(format, metadata.stream, &body_bytes, &channel, &cm) {
                 Ok(pair) => pair,
                 Err(msg) => {
                     // 转换结果未通过目标形状校验：代理侧明确的 400，不透传上游
@@ -948,23 +849,35 @@ pub async fn forward_relay(
                     return resp;
                 }
             };
-        let target_req_url = format!("{}{}", normalize_base_url(&ch.base_url), target_endpoint);
-        let key_pool = ch.key_pool();
-        let channel_req_headers = super::upstream::build_upstream_headers(&ch, key_pool[0].as_str(), Some(&headers))
-            .map(|h| serialize_headers(&h))
-            .unwrap_or_else(|_| request_headers.clone());
-        let rewritten_body_str = String::from_utf8_lossy(&final_body).to_string();
-        let round_log_base = RequestLog {
-            round,
-            target_channel: ch.name.clone(),
-            target_model: channel_model.name.clone(),
-            request_url: target_req_url.clone(),
-            request_headers: channel_req_headers.clone(),
-            request_body: rewritten_body_str.clone(),
-            response_url: target_req_url.clone(),
-            ..log_base.clone()
-        };
 
+            channel_model = Some(cm);
+            key_pool = channel.key_pool();
+            ch = Some(channel);
+            target_endpoint = endpoint;
+            final_body = body;
+        }
+
+        let ch_ref = ch.as_ref().unwrap();
+        let cm_ref = channel_model.as_ref().unwrap();
+        round += 1;
+        let round_start_time = Instant::now();
+
+        // key 选择: 冷却机制自动轮换(失败的 key 已冷却); 全部试过则换渠道
+        let key_idx = state.key_pool.pick(ch_ref.id, key_pool.len());
+        if keys_tried.contains(&key_idx) {
+            // 该渠道所有 key 均已尝试: 弃用此渠道, 换下一个
+            item = None;
+            continue;
+        }
+        keys_tried.insert(key_idx);
+
+        // 本轮请求头使用本轮实际选中的 key
+        let target_req_url = format!("{}{}", normalize_base_url(&ch_ref.base_url), target_endpoint);
+        let channel_req_headers =
+            super::upstream::build_upstream_headers(ch_ref, key_pool[key_idx].as_str(), Some(&headers))
+                .map(|h| serialize_headers(&h))
+                .unwrap_or_else(|_| request_headers.clone());
+        let rewritten_body_str = String::from_utf8_lossy(&final_body).to_string();
         state.in_flight.broadcast(RequestOverview {
             id: request_id,
             status: request_status::RUNNING.to_string(),
@@ -972,8 +885,8 @@ pub async fn forward_relay(
             duration: start_time.elapsed().as_millis() as i64,
             model: metadata.model.clone(),
             round,
-            target_channel: ch.name.clone(),
-            target_model: channel_model.name.clone(),
+            target_channel: ch_ref.name.clone(),
+            target_model: cm_ref.name.clone(),
             sending: true,
             rounds: rounds.clone(),
             ..Default::default()
@@ -990,42 +903,102 @@ pub async fn forward_relay(
             )
         };
 
-        let mut key_attempts: Vec<crate::model::KeyAttempt> = Vec::new();
-        let send_res = send_with_key_rotation(
-            SendPlan {
-                state: &state,
-                channel: &ch,
-                key_pool: &key_pool,
-                endpoint: &target_endpoint,
-                body: Bytes::from(final_body),
-                client_headers: &headers,
-                stream: metadata.stream,
-                timeout_secs,
-                first_event_timeout_secs: current_group
-                    .relay_config
-                    .stream_first_event_timeout_seconds
-                    .max(5) as u64,
-                cooldown_seconds: current_group.relay_config.cooldown_seconds,
-            },
-            &mut key_attempts,
-        )
-        .await;
+        let request_builder = match build_upstream_request(
+            get_client(),
+            ch_ref,
+            &key_pool[key_idx],
+            &target_endpoint,
+            Some(Bytes::from(final_body.clone())),
+            timeout_secs,
+            Some(&headers),
+        ) {
+            Ok(rb) => rb,
+            Err(e) => {
+                last_target_channel = ch_ref.name.clone();
+                last_target_model = cm_ref.name.clone();
+                last_error_body = format!("构建渠道 {} 请求失败: {}", ch_ref.name, e);
+                last_status = StatusCode::BAD_GATEWAY;
+                record_round_failure(
+                    &state,
+                    current_group.id,
+                    item.as_ref().map(|i| i.id).unwrap_or(0),
+                    current_group.relay_config.cooldown_seconds,
+                    request_id,
+                    &mut rounds,
+                    RoundFailure {
+                        round,
+                        model: &metadata.model,
+                        started_at: &started_at_rfc3339,
+                        channel_name: &ch_ref.name,
+                        model_name: &cm_ref.name,
+                        target_req_url: &target_req_url,
+                        channel_req_headers: &channel_req_headers,
+                        rewritten_body_str: &rewritten_body_str,
+                        response_headers: "",
+                        status: 502,
+                        duration_ms: round_start_time.elapsed().as_millis() as i64,
+                        err_body: &last_error_body,
+                        should_cooldown: true,
+                        key_index: key_idx,
+                    },
+                );
+                item = None;
+                continue;
+            }
+        };
 
-        match send_res {
-            Ok((upstream_resp, key_idx, round_key_attempts)) => {
+        let fut = request_builder.send();
+
+        // 流式: 首事件超时说明请求已被上游受理并可能开始生成, 不轮换 key(避免重复生成)
+        let send_result = if metadata.stream {
+            match tokio::time::timeout(
+                std::time::Duration::from_secs(
+                    current_group
+                        .relay_config
+                        .stream_first_event_timeout_seconds
+                        .max(5) as u64,
+                ),
+                fut,
+            )
+            .await
+            {
+                Ok(r) => r.map_err(|e| e.to_string()),
+                Err(_) => Err(format!(
+                    "上游流式响应在 {}s 内未返回初始响应头",
+                    current_group
+                        .relay_config
+                        .stream_first_event_timeout_seconds
+                        .max(5)
+                )),
+            }
+        } else {
+            fut.await.map_err(|e| e.to_string())
+        };
+
+        match send_result {
+            Ok(upstream_resp) => {
                 let status = upstream_resp.status();
                 if status.is_success() {
                     state
                         .route_manager
-                        .report_success(current_group.id, item.id);
-                    state.key_pool.report_success(ch.id, key_idx);
-                    let price_opt = model::get_model_price(&state, &channel_model.name);
+                        .report_success(current_group.id, item.as_ref().map(|i| i.id).unwrap_or(0));
+                    state.key_pool.report_success(ch_ref.id, key_idx);
+                    let price_opt = model::get_model_price(&state, &cm_ref.name);
 
                     let ctx = SuccessContext {
-                        log_base: round_log_base,
+                        log_base: RequestLog {
+                            round,
+                            target_channel: ch_ref.name.clone(),
+                            target_model: cm_ref.name.clone(),
+                            request_url: target_req_url.clone(),
+                            request_headers: channel_req_headers.clone(),
+                            request_body: rewritten_body_str.clone(),
+                            response_url: target_req_url.clone(),
+                            ..log_base.clone()
+                        },
                         format,
-                        channel: &ch,
-                        channel_model: &channel_model,
+                        channel: ch_ref,
+                        channel_model: cm_ref,
                         api_key_id: auth_ctx.api_key.id,
                         body_str: &body_str,
                         round_start_time,
@@ -1033,7 +1006,6 @@ pub async fn forward_relay(
                         price_opt,
                         rounds,
                         key_index: key_idx,
-                        key_attempts: round_key_attempts,
                     };
                     if metadata.stream {
                         relay_guard.defuse();
@@ -1041,55 +1013,63 @@ pub async fn forward_relay(
                     }
                     relay_guard.defuse();
                     return handle_successful_json(&state, upstream_resp, ctx).await;
-                } else {
-                    let resp_headers = serialize_headers(upstream_resp.headers());
-                    let err_body =
-                        truncate_utf8(&upstream_resp.text().await.unwrap_or_default(), RESPONSE_CAPTURE_LIMIT)
-                            .to_string();
-                    let round_duration_ms = round_start_time.elapsed().as_millis() as i64;
-                    last_target_channel = ch.name.clone();
-                    last_target_model = channel_model.name.clone();
-                    last_response_url = target_req_url.clone();
-                    last_response_headers = resp_headers.clone();
-                    last_status = status;
-                    last_error_body = err_body.clone();
+                }
 
-                    let is_client = is_client_error(status);
-                    record_round_failure(
-                        &state,
-                        current_group.id,
-                        item.id,
-                        current_group.relay_config.cooldown_seconds,
-                        request_id,
-                        &mut rounds,
-                        RoundFailure {
-                            round,
-                            model: &metadata.model,
-                            started_at: &started_at_rfc3339,
-                            channel_name: &ch.name,
-                            model_name: &channel_model.name,
-                            target_req_url: &target_req_url,
-                            channel_req_headers: &channel_req_headers,
-                            rewritten_body_str: &rewritten_body_str,
-                            response_headers: &resp_headers,
-                            status: status.as_u16(),
-                            duration_ms: round_duration_ms,
-                            err_body: &err_body,
-                            should_cooldown: !is_client,
-                            key_index: key_idx,
-                            key_attempts: round_key_attempts,
-                        },
-                    );
+                let resp_headers = serialize_headers(upstream_resp.headers());
+                let err_body =
+                    truncate_utf8(&upstream_resp.text().await.unwrap_or_default(), RESPONSE_CAPTURE_LIMIT).to_string();
+                let round_duration_ms = round_start_time.elapsed().as_millis() as i64;
+                last_target_channel = ch_ref.name.clone();
+                last_target_model = cm_ref.name.clone();
+                last_response_url = target_req_url.clone();
+                last_response_headers = resp_headers.clone();
+                last_status = status;
+                last_error_body = err_body.clone();
 
-                    if is_client {
-                        break;
-                    }
+                // key 级失败(401/403/429): 冷却该 key, 同渠道换下一个
+                state
+                    .key_pool
+                    .report_failure(ch_ref.id, key_idx, current_group.relay_config.cooldown_seconds);
+                keys_tried.insert(key_idx);
+
+                let is_client = is_client_error(status);
+                record_round_failure(
+                    &state,
+                    current_group.id,
+                    item.as_ref().map(|i| i.id).unwrap_or(0),
+                    current_group.relay_config.cooldown_seconds,
+                    request_id,
+                    &mut rounds,
+                    RoundFailure {
+                        round,
+                        model: &metadata.model,
+                        started_at: &started_at_rfc3339,
+                        channel_name: &ch_ref.name,
+                        model_name: &cm_ref.name,
+                        target_req_url: &target_req_url,
+                        channel_req_headers: &channel_req_headers,
+                        rewritten_body_str: &rewritten_body_str,
+                        response_headers: &resp_headers,
+                        status: status.as_u16(),
+                        duration_ms: round_duration_ms,
+                        err_body: &err_body,
+                        should_cooldown: !is_client,
+                        key_index: key_idx,
+                    },
+                );
+
+                if is_client {
+                    break;
+                }
+                // 该渠道 key 已穷尽或服务端失败: 换下一个渠道
+                if !is_client && keys_tried.len() >= key_pool.len() {
+                    item = None;
                 }
             }
-            Err((err_msg, fail_key_idx, round_key_attempts)) => {
+            Err(err_msg) => {
                 let round_duration_ms = round_start_time.elapsed().as_millis() as i64;
-                last_target_channel = ch.name.clone();
-                last_target_model = channel_model.name.clone();
+                last_target_channel = ch_ref.name.clone();
+                last_target_model = cm_ref.name.clone();
                 last_response_url = target_req_url.clone();
                 last_response_headers = String::new();
                 last_status = if err_msg.contains("timeout") {
@@ -1099,10 +1079,19 @@ pub async fn forward_relay(
                 };
                 last_error_body = err_msg.clone();
 
+                // 连接层失败: 冷却该 key; 该渠道 key 全部试过后换下一个渠道
+                state
+                    .key_pool
+                    .report_failure(ch_ref.id, key_idx, current_group.relay_config.cooldown_seconds);
+                keys_tried.insert(key_idx);
+                if keys_tried.len() >= key_pool.len() {
+                    item = None;
+                }
+
                 record_round_failure(
                     &state,
                     current_group.id,
-                    item.id,
+                    item.as_ref().map(|i| i.id).unwrap_or(0),
                     current_group.relay_config.cooldown_seconds,
                     request_id,
                     &mut rounds,
@@ -1110,8 +1099,8 @@ pub async fn forward_relay(
                         round,
                         model: &metadata.model,
                         started_at: &started_at_rfc3339,
-                        channel_name: &ch.name,
-                        model_name: &channel_model.name,
+                        channel_name: &ch_ref.name,
+                        model_name: &cm_ref.name,
                         target_req_url: &target_req_url,
                         channel_req_headers: &channel_req_headers,
                         rewritten_body_str: &rewritten_body_str,
@@ -1120,14 +1109,13 @@ pub async fn forward_relay(
                         duration_ms: round_duration_ms,
                         err_body: &err_msg,
                         should_cooldown: true,
-                        key_index: fail_key_idx,
-                        key_attempts: round_key_attempts,
+                        key_index: key_idx,
                     },
                 );
             }
         }
 
-        if round < max_attempts && current_group.relay_config.retry_interval_seconds > 0 {
+        if items_tried < max_attempts && current_group.relay_config.retry_interval_seconds > 0 {
             let mut rx = cancel_rx.clone();
             tokio::select! {
                 _ = rx.changed() => {
@@ -1143,7 +1131,6 @@ pub async fn forward_relay(
             }
         }
     }
-    relay_guard.defuse();
 
     build_failed_relay_response(
         &state,
@@ -1250,82 +1237,5 @@ mod relay_guard_tests {
         assert!(state.in_flight.interrupt(id2)); // 未被注销
 
         let _ = std::fs::remove_file(db_path);
-    }
-}
-
-#[cfg(test)]
-mod key_rotation_tests {
-    use wiremock::{Mock, ResponseTemplate};
-
-    use super::*;
-    use crate::test_support::setup_test_state;
-
-    /// key 轮换的每一次失败都必须被记录:序号、状态码、截断后的上游原因(密钥本体不入日志)。
-    #[tokio::test]
-    async fn key_rotation_records_per_key_attempts() {
-        let (state, _db) = setup_test_state("key_attempts").await;
-        let server = wiremock::MockServer::start().await;
-
-        Mock::given(wiremock::matchers::header("authorization", "Bearer k1"))
-            .respond_with(ResponseTemplate::new(401).set_body_string("bad key 1"))
-            .mount(&server)
-            .await;
-        Mock::given(wiremock::matchers::header("authorization", "Bearer k2"))
-            .respond_with(ResponseTemplate::new(401).set_body_string("bad key 2"))
-            .mount(&server)
-            .await;
-        Mock::given(wiremock::matchers::header("authorization", "Bearer k3"))
-            .respond_with(
-                ResponseTemplate::new(200)
-                    .set_body_string(r#"{"choices":[{"message":{"role":"assistant","content":"ok"}}]}"#),
-            )
-            .mount(&server)
-            .await;
-
-        let ch = crate::model::Channel {
-            name: "multi-key".into(),
-            channel_type: crate::model::ChannelProvider::OpenaiCompletion,
-            enabled: true,
-            base_url: server.uri(),
-            key: "k1\nk2\nk3".into(),
-            models: vec![crate::model::ChannelModel {
-                name: "m".into(),
-                ..Default::default()
-            }],
-            ..Default::default()
-        };
-        let key_pool = ch.key_pool();
-        let headers = HeaderMap::new();
-        let mut key_attempts = Vec::new();
-
-        let plan = SendPlan {
-            state:                    &state,
-            channel:                  &ch,
-            key_pool:                 &key_pool,
-            endpoint:                 "/chat/completions",
-            body:                     Bytes::from(r#"{"model":"m","messages":[{"role":"user","content":"hi"}]}"#),
-            client_headers:           &headers,
-            stream:                   false,
-            timeout_secs:             Some(5),
-            first_event_timeout_secs: 5,
-            cooldown_seconds:         60,
-        };
-        let (resp, key_idx, attempts) = send_with_key_rotation(plan, &mut key_attempts)
-            .await
-            .unwrap();
-
-        assert_eq!(resp.status(), 200);
-        assert_eq!(key_idx, 2, "最终应由第 3 个 key 成功");
-        assert_eq!(attempts.len(), 2);
-        assert_eq!(attempts[0].key_index, 0);
-        assert_eq!(attempts[0].status, 401);
-        assert!(attempts[0].error.contains("bad key 1"));
-        assert_eq!(attempts[1].key_index, 1);
-        assert_eq!(attempts[1].status, 401);
-        assert!(attempts[1].error.contains("bad key 2"));
-        // 密钥本体绝不入日志
-        for attempt in &key_attempts {
-            assert!(!attempt.error.contains("k1") || !attempt.error.contains("Bearer"));
-        }
     }
 }

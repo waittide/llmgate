@@ -195,39 +195,24 @@ async function handleStopRound() {
             <!-- key 使用顺序色块: 轮换中间失败的删除线置灰, 最终 key 按轮次结果标记 -->
             <div class="flex items-center gap-1.5 overflow-x-auto pb-1 shrink-0 text-xs">
                 <span class="text-muted-foreground shrink-0 font-medium">[{{ t('key') }}]:</span>
-                <template v-for="(r, ri) in persistentRounds" :key="`kr${ri}`">
-                    <button
-                        v-for="(a, ai) in r.key_attempts ?? []"
-                        :key="`f${ri}-${ai}`"
-                        type="button"
-                        @click="selectedRoundNum = r.round"
-                        :class="cn(
-                            'shrink-0 px-2 py-0.5 rounded-md border text-xs line-through transition-colors',
-                            activeRound?.round === r.round
-                                ? 'border-destructive/50 bg-destructive/5 text-destructive/80'
-                                : 'border-border bg-muted/50 text-muted-foreground/50 hover:bg-muted',
-                        )"
-                    >
-                        {{ t('key') }}{{ a.key_index + 1 }}
-                    </button>
-                    <button
-                        type="button"
-                        @click="selectedRoundNum = r.round"
-                        :class="cn(
-                            'shrink-0 px-2 py-0.5 rounded-md border text-xs font-medium transition-colors',
-                            activeRound?.round === r.round
-                                ? (roundSuccess(r)
-                                    ? 'border-emerald-500/40 bg-emerald-500/5 text-emerald-600 dark:text-emerald-400'
-                                    : 'border-primary/50 bg-primary/10 text-primary')
-                                : roundSuccess(r)
-                                    ? 'border-emerald-500/40 text-emerald-600 dark:text-emerald-400'
-                                    : 'border-border bg-muted/50 text-muted-foreground/60 hover:bg-muted',
-                        )"
-                    >
-                        {{ t('key') }}{{ (r.key_index ?? 0) + 1 }}{{ roundSuccess(r) ? ' ✓' : '' }}
-                    </button>
-                    <span v-if="ri < persistentRounds.length - 1" class="text-muted-foreground/40 shrink-0">→</span>
-                </template>
+                <button
+                    v-for="(r, ri) in persistentRounds"
+                    :key="`k${ri}`"
+                    type="button"
+                    @click="selectedRoundNum = r.round"
+                    :class="cn(
+                        'shrink-0 px-2 py-0.5 rounded-md border text-xs font-medium transition-colors',
+                        activeRound?.round === r.round
+                            ? (roundSuccess(r)
+                                ? 'border-emerald-500/40 bg-emerald-500/5 text-emerald-600 dark:text-emerald-400'
+                                : 'border-primary/50 bg-primary/10 text-primary')
+                            : roundSuccess(r)
+                                ? 'border-emerald-500/40 text-emerald-600 dark:text-emerald-400'
+                                : 'border-border bg-muted/50 text-muted-foreground/60 hover:bg-muted',
+                    )"
+                >
+                    {{ t('key') }}{{ (r.key_index ?? 0) + 1 }}{{ roundSuccess(r) ? ' ✓' : '' }}
+                </button>
             </div>
 
             <div class="grid grid-cols-1 md:grid-cols-2 gap-4 flex-1 min-h-0">
@@ -326,24 +311,10 @@ async function handleStopRound() {
                                 :headers="activeRound.response_headers || detail.data.value?.response_headers"
                                 :loading="detail.isLoading.value"
                             />
-                            <div
-                                v-if="activeRound.key_attempts?.length"
-                                class="mb-2 rounded-xl border border-orange-500/30 bg-orange-500/5 p-2.5 text-xs space-y-1"
-                            >
-                                <div class="font-medium text-orange-600 dark:text-orange-400">{{ t('keyAttempts') }}</div>
-                                <div
-                                    v-for="(attempt, attemptIndex) in activeRound.key_attempts"
-                                    :key="attemptIndex"
-                                    class="flex items-center gap-2 text-muted-foreground"
-                                >
-                                    <span class="font-medium text-foreground">{{ t('key') }}{{ attempt.key_index + 1 }}</span>
-                                    <Badge variant="destructive" class="px-1 py-0 text-[10px]">{{ attempt.status > 0 ? attempt.status : t('transportError') }}</Badge>
-                                    <span class="truncate" :title="attempt.error">{{ attempt.error }}</span>
-                                </div>
-                            </div>
                             <JsonContent
                                 :content="activeRound.response_body || activeRound.error || errorText"
                                 :fallback-text="t('noResponseContent')"
+                                :collapsed="roundSuccess(activeRound)"
                             />
                         </template>
                         <template v-else-if="requestFailed">

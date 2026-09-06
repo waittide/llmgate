@@ -42,7 +42,6 @@ pub(crate) struct StreamFinalizer<S> {
     pub(crate) done:             bool,
     pub(crate) log_template:     RequestLog,
     pub(crate) previous_rounds:  Vec<crate::model::RoundLog>,
-    pub(crate) key_attempts:     Vec<crate::model::KeyAttempt>,
     pub(crate) key_index:        Option<usize>,
     pub(crate) response_capture: Vec<u8>,
     pub(crate) cancel_rx:        Option<tokio::sync::watch::Receiver<bool>>,
@@ -146,7 +145,6 @@ impl<S> StreamFinalizer<S> {
 
         let mut all_rounds = self.previous_rounds.clone();
         all_rounds.push(crate::model::RoundLog {
-            key_attempts:     self.key_attempts.clone(),
             key_index:        self.key_index,
             round:            self.log_template.round,
             channel_name:     self.log_template.target_channel.clone(),
@@ -300,7 +298,6 @@ mod tests {
             start_time:       Instant::now(),
             done:             false,
             log_template:     RequestLog::default(),
-            key_attempts:     Vec::new(),
             key_index:        Some(0),
             previous_rounds:  Vec::new(),
             response_capture: Vec::new(),

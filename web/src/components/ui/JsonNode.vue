@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed } from 'vue';
+import { ref, computed, watch } from 'vue';
 import { LuChevronDown, LuChevronRight, LuCopy, LuCheck } from 'vue-icons-plus/lu';
 import { useTranslations } from '@/composables/i18n';
 import { toast } from '@/composables/toast';
@@ -43,6 +43,10 @@ const isInitiallyCollapsed = computed(() => {
 });
 
 const isExpanded = ref(!isInitiallyCollapsed.value);
+// collapsed prop 变化时同步展开状态(切换轮次/选中项时生效)
+watch(() => props.collapsed, (v) => {
+    isExpanded.value = !v;
+});
 
 // 长字符串: 超过阈值的字符串值支持折叠(预览前 120 字符), 避免整段铺开
 const LONG_STRING_LIMIT = 120;

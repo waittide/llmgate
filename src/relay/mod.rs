@@ -43,7 +43,6 @@ mod tests {
                 status:           429,
                 duration_ms:      120,
                 error:            Some("{\"error\":{\"message\":\"Rate limit reached\"}}".to_string()),
-                key_attempts:     Vec::new(),
                 key_index:        Some(0),
             },
             RoundLog {
@@ -59,7 +58,6 @@ mod tests {
                 status:           200,
                 duration_ms:      350,
                 error:            None,
-                key_attempts:     Vec::new(),
                 key_index:        Some(0),
             },
         ];

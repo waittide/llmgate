@@ -5,9 +5,12 @@ import JsonView from '@/components/ui/json-view.vue';
 interface Props {
     content: string | object | undefined;
     fallbackText: string;
+    collapsed?: boolean;
 }
 
-const props = defineProps<Props>();
+const props = withDefaults(defineProps<Props>(), {
+    collapsed: true,
+});
 
 const parsed = computed(() => {
     if (props.content === undefined || props.content === '') return null;
@@ -36,7 +39,7 @@ const parsed = computed(() => {
             :value="parsed.data"
             :display-data-types="false"
             :display-object-size="false"
-            :collapsed="true"
+            :collapsed="collapsed"
         />
     </div>
 </template>
