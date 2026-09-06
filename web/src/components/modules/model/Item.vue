@@ -206,7 +206,7 @@ onUnmounted(() => {
         <div class="flex-1 min-w-0 flex flex-col justify-center gap-2">
             <Tooltip>
                 <TooltipTrigger as-child>
-                    <span class="w-fit max-w-full text-base font-semibold text-card-foreground leading-tight truncate">
+                    <span class="inline-block w-fit max-w-full text-base font-semibold text-card-foreground leading-tight truncate">
                         {{ model.name }}
                     </span>
                 </TooltipTrigger>

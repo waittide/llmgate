@@ -231,7 +231,7 @@ function handleConfirmDelete(id: string) {
                                 <TooltipTrigger as-child>
                                     <span
                                         :class="cn(
-                                            'w-fit max-w-full text-sm font-medium truncate leading-tight',
+                                            'inline-block w-fit max-w-full text-sm font-medium truncate leading-tight',
                                             member.enabled === false && 'text-muted-foreground'
                                         )"
                                     >
@@ -242,7 +242,7 @@ function handleConfirmDelete(id: string) {
                                     {{ member.name }}
                                 </TooltipContent>
                             </Tooltip>
-                            <span class="text-[10px] text-muted-foreground truncate leading-tight">
+                            <span class="inline-block w-fit max-w-full text-[10px] text-muted-foreground truncate leading-tight">
                                 {{ member.channel_name }}
                             </span>
                         </div>
