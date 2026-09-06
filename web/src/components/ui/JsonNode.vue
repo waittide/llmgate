@@ -3,6 +3,7 @@ import { ref, computed } from 'vue';
 import { LuChevronDown, LuChevronRight, LuCopy, LuCheck } from 'vue-icons-plus/lu';
 import { useTranslations } from '@/composables/i18n';
 import { toast } from '@/composables/toast';
+import { cn } from '@/lib/utils';
 
 interface Props {
     data: any;
@@ -42,6 +43,14 @@ const isInitiallyCollapsed = computed(() => {
 });
 
 const isExpanded = ref(!isInitiallyCollapsed.value);
+
+// 长字符串: 超过阈值的字符串值支持折叠(预览前 120 字符), 避免整段铺开
+const LONG_STRING_LIMIT = 120;
+const isLongString = computed(() => typeof props.data === 'string' && props.data.length > LONG_STRING_LIMIT);
+const longExpanded = ref(false);
+const displayText = computed(() =>
+    isLongString.value && !longExpanded.value ? props.data.slice(0, LONG_STRING_LIMIT) : props.data,
+);
 const copied = ref(false);
 let copyTimer: number | null = null;
 
@@ -200,7 +209,17 @@ async function copyNode(event: MouseEvent) {
 
         <!-- 基础类型（字符串/数字/布尔/null/undefined） -->
         <div v-else class="flex items-start gap-1 hover:bg-muted/30 rounded px-1 -mx-1 py-0.5 transition-colors">
-            <span class="w-3.5 shrink-0" />
+            <button
+                v-if="isLongString"
+                type="button"
+                class="size-3.5 mt-0.5 flex items-center justify-center text-muted-foreground hover:text-foreground shrink-0"
+                aria-label="Toggle collapse"
+                @click="longExpanded = !longExpanded"
+            >
+                <LuChevronDown v-if="longExpanded" class="size-3" />
+                <LuChevronRight v-else class="size-3" />
+            </button>
+            <span v-else class="w-3.5 shrink-0" />
             <!-- 键名 -->
             <span v-if="nodeKey !== undefined" class="text-[#0550ae] dark:text-[#79c0ff] font-medium">
                 "{{ nodeKey }}":
@@ -214,8 +233,13 @@ async function copyNode(event: MouseEvent) {
             <!-- 字符串值 -->
             <span
                 v-if="typeof data === 'string'"
-                class="text-[#0a3069] dark:text-[#7ee787] break-all whitespace-pre-wrap"
-            >"{{ data }}"</span>
+                :class="cn(
+                    'text-[#0a3069] dark:text-[#7ee787] break-all whitespace-pre-wrap',
+                    isLongString && 'cursor-pointer',
+                )"
+                :title="isLongString && !longExpanded ? data : undefined"
+                @click="isLongString && (longExpanded = !longExpanded)"
+            >"<template v-if="isLongString && !longExpanded">{{ displayText }}<span class="text-muted-foreground/70">… ({{ props.data.length }} 字符, 点击展开)</span></template><template v-else>{{ displayText }}</template>"</span>
 
             <!-- 数值 -->
             <span
