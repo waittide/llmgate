@@ -71,16 +71,16 @@ async fn main() -> Result<()> {
     info!("服务已启动，监听 http://{}", addr);
 
     let listener = tokio::net::TcpListener::bind(addr).await?;
-    // 优雅停机：信号触发后停止接收新连接，等待在途请求排空；
-    // drain_deadline 给排空加 30 秒上限，避免长连接（SSE）阻塞退出。
+    // 信号触发即退出 select,serve future 被丢弃 → 所有连接(含 SSE 长连接)立即关闭,
+    // 不做排空等待;在途请求的日志/统计由各收尾 Drop 兜底。
     tokio::select! {
-        res = axum::serve(listener, app).with_graceful_shutdown(shutdown_signal()) => {
+        res = axum::serve(listener, app) => {
             if let Err(e) = res {
                 tracing::error!("服务运行出错: {}", e);
             }
         }
-        _ = drain_deadline() => {
-            tracing::warn!("在途请求排空超时（30s），强制中断剩余连接");
+        _ = shutdown_signal() => {
+            info!("收到停机信号，正在关闭所有连接...");
         }
     }
 
@@ -98,7 +98,7 @@ async fn main() -> Result<()> {
         }
     })
     .await;
-    info!("服务已优雅退出");
+    info!("服务已退出");
     Ok(())
 }
 
@@ -127,14 +127,7 @@ async fn wait_signal() {
     }
 }
 
-/// axum 优雅停机触发源。
+/// axum 停机触发源。
 async fn shutdown_signal() {
     wait_signal().await;
-    info!("收到停机信号，正在停止服务...");
-}
-
-/// 排空上限：信号到达后最多再等 30 秒。
-async fn drain_deadline() {
-    wait_signal().await;
-    tokio::time::sleep(Duration::from_secs(30)).await;
 }
