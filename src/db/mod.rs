@@ -22,8 +22,10 @@ pub async fn init_db(db_path: &Path) -> Result<DbPool> {
         .busy_timeout(Duration::from_secs(10))
         .foreign_keys(true);
 
+    // WAL 模式下同一时刻仅允许单个写入者；过多连接只会在写路径上互相
+    // 争用 DB 锁（触发 busy_timeout 超时）。收敛到 8：足够并发读，写争用可控。
     let pool = SqlitePoolOptions::new()
-        .max_connections(32)
+        .max_connections(8)
         .min_connections(2)
         .acquire_timeout(Duration::from_secs(10))
         .connect_with(options)
