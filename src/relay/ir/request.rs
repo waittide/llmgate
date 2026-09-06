@@ -786,11 +786,20 @@ pub(super) fn parse_gemini(val: &Value) -> Option<RelayRequest> {
         .or_else(|| val.pointer("/tool_config/functionCallingConfig"))
         .map(|config| match as_str(config.get("mode")).unwrap_or("AUTO") {
             "NONE" => ToolChoice::None,
-            "ANY" => config
-                .pointer("/allowedFunctionNames/0")
-                .and_then(Value::as_str)
-                .map(|name| ToolChoice::Tool(name.to_string()))
-                .unwrap_or(ToolChoice::Required),
+            "ANY" => {
+                let allowed: Vec<&str> = config
+                    .get("allowedFunctionNames")
+                    .or_else(|| config.get("allowed_function_names"))
+                    .and_then(Value::as_array)
+                    .map(|names| names.iter().filter_map(Value::as_str).collect())
+                    .unwrap_or_default();
+                match allowed.as_slice() {
+                    // 单个允许函数可精确锁定；多个超出 IR 表达能力，
+                    // 降级为"必须调用某个工具"，绝不静默丢弃其余函数名
+                    [name] => ToolChoice::Tool((*name).to_string()),
+                    _ => ToolChoice::Required,
+                }
+            }
             _ => ToolChoice::Auto,
         });
     Some(req)
@@ -850,12 +859,9 @@ pub(super) fn emit_chat(req: &RelayRequest) -> Value {
     if let Some(v) = req.metadata.clone() {
         obj.insert("metadata".into(), v);
     }
-    if let Some(v) = req.safety_identifier.clone() {
-        obj.insert("safety_identifier".into(), Value::String(v));
-    }
-    if let Some(v) = req.prompt_cache_key.clone() {
-        obj.insert("prompt_cache_key".into(), Value::String(v));
-    }
+    // safety_identifier / prompt_cache_key 是 Responses API 专有字段：
+    // Chat Completions 目标不得携带（OpenAI 静默忽略，GLM 等严格上游直接 400）；
+    // 个别渠道确需时可用 param_override 静态补写
     if let Some(v) = req.user.clone() {
         obj.insert("user".into(), Value::String(v));
     }
@@ -1057,12 +1063,16 @@ pub(super) fn emit_responses(req: &RelayRequest) -> Value {
                 if msg.role == Role::Assistant {
                     // 文本 item 在先，tool_calls 剥离为随后的 function_call item，
                     // 保持 Responses 对话流中文本先于其引发的调用这一时序
+                    // 仅当唯一 part 为文本时才简化为字符串 content；
+                    // 图片等非文本 part 不能丢，必须保留数组形式
                     match content_parts.len() {
                         0 => {}
-                        1 => input.push(json!({
-                            "type": "message", "role": "assistant",
-                            "content": content_parts[0].get("text").cloned().unwrap_or(Value::Null)
-                        })),
+                        1 if content_parts[0].get("type").and_then(Value::as_str) == Some(text_type) => {
+                            input.push(json!({
+                                "type": "message", "role": "assistant",
+                                "content": content_parts[0].get("text").cloned().unwrap_or(Value::Null)
+                            }));
+                        }
                         _ => input.push(json!({ "type": "message", "role": "assistant", "content": content_parts })),
                     }
                     for part in &msg.content {
@@ -2252,5 +2262,25 @@ mod tests {
                 assert!(out_str.contains("23C"), "{src:?}->{dst:?} 丢失工具结果: {out_str}");
             }
         }
+    }
+
+    #[test]
+    fn chat_emit_drops_responses_only_fields() {
+        let chat = json!({
+            "model": "glm-5.3-flash",
+            "messages": [{ "role": "user", "content": "hi" }],
+            "prompt_cache_key": "ck-1",
+            "safety_identifier": "sid-1"
+        });
+        let out = convert(ApiFormat::OpenaiCompletion, &chat, ApiFormat::OpenaiCompletion);
+        assert!(
+            out.get("prompt_cache_key").is_none(),
+            "prompt_cache_key 不得进入 Chat Completions"
+        );
+        assert!(
+            out.get("safety_identifier").is_none(),
+            "safety_identifier 不得进入 Chat Completions"
+        );
+        assert_eq!(out.get("model").and_then(Value::as_str), Some("glm-5.3-flash"));
     }
 }
