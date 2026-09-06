@@ -428,7 +428,9 @@
       "roundIndex": "第 {index} 輪",
       "allRounds": "所有輪次",
       "keyAttempts": "密鑰輪換嘗試",
-      "transportError": "傳輸失敗"
+      "transportError": "傳輸失敗",
+      "usedChannels": "使用分組",
+      "usedKeys": "使用 Key"
     },
     "filter": {
       "keyword": "關鍵詞",

@@ -203,6 +203,7 @@ struct RoundFailure<'a> {
     duration_ms:         i64,
     err_body:            &'a str,
     should_cooldown:     bool,
+    key_index:           usize,
     key_attempts:        Vec<crate::model::KeyAttempt>,
 }
 fn record_round_failure(
@@ -227,6 +228,7 @@ fn record_round_failure(
         status:           fail.status,
         duration_ms:      fail.duration_ms,
         error:            Some(fail.err_body.to_string()),
+        key_index:        Some(fail.key_index),
         key_attempts:     fail.key_attempts,
     };
     rounds.push(round_log.clone());
@@ -264,6 +266,7 @@ struct SuccessContext<'a> {
     start_time:       Instant,
     price_opt:        Option<ModelPrice>,
     rounds:           Vec<crate::model::RoundLog>,
+    key_index:        usize,
     key_attempts:     Vec<crate::model::KeyAttempt>,
 }
 
@@ -316,6 +319,7 @@ fn handle_successful_stream(state: &AppState, upstream_resp: reqwest::Response, 
         done: false,
         log_template,
         previous_rounds: ctx.rounds,
+        key_index: Some(ctx.key_index),
         key_attempts: ctx.key_attempts.clone(),
         response_capture: Vec::new(),
         cancel_rx: state.in_flight.get_cancel_receiver(ctx.log_base.id as u64),
@@ -461,6 +465,7 @@ async fn handle_successful_json(
         status:           200,
         duration_ms:      round_duration_ms,
         error:            None,
+        key_index:        Some(ctx.key_index),
         key_attempts:     ctx.key_attempts.clone(),
     };
     ctx.rounds.push(round_log.clone());
@@ -636,7 +641,7 @@ struct SendPlan<'a> {
 async fn send_with_key_rotation(
     plan: SendPlan<'_>,
     key_attempts: &mut Vec<crate::model::KeyAttempt>,
-) -> Result<(reqwest::Response, usize), String> {
+) -> Result<(reqwest::Response, usize, Vec<crate::model::KeyAttempt>), (String, usize, Vec<crate::model::KeyAttempt>)> {
     let SendPlan {
         state,
         channel: ch,
@@ -663,7 +668,13 @@ async fn send_with_key_rotation(
             Some(client_headers),
         ) {
             Ok(rb) => rb,
-            Err(e) => break Err(format!("构建渠道 {} 请求失败: {}", ch.name, e)),
+            Err(e) => {
+                break Err((
+                    format!("构建渠道 {} 请求失败: {}", ch.name, e),
+                    key_idx,
+                    std::mem::take(key_attempts),
+                ));
+            }
         };
         let fut = req_builder.send();
         // 流式: 首事件超时说明请求已被上游受理并可能开始生成,重试会造成重复生成,故不轮换
@@ -671,9 +682,10 @@ async fn send_with_key_rotation(
             match tokio::time::timeout(std::time::Duration::from_secs(first_event_timeout_secs), fut).await {
                 Ok(r) => r,
                 Err(_) => {
-                    break Err(format!(
-                        "上游流式响应在 {}s 内未返回初始响应头",
-                        first_event_timeout_secs
+                    break Err((
+                        format!("上游流式响应在 {}s 内未返回初始响应头", first_event_timeout_secs),
+                        key_idx,
+                        std::mem::take(key_attempts),
                     ));
                 }
             }
@@ -702,7 +714,7 @@ async fn send_with_key_rotation(
                         key_idx = next;
                         continue;
                     }
-                    None => break Ok((resp, key_idx)),
+                    None => break Ok((resp, key_idx, std::mem::take(key_attempts))),
                 }
             }
             // 连接层失败(连接被拒/重置): 部分上游对封禁 key 直接断连而非返回 401,
@@ -722,11 +734,13 @@ async fn send_with_key_rotation(
                         key_idx = next;
                         continue;
                     }
-                    None => break Err(e.to_string()),
+                    None => break Err((e.to_string(), key_idx, std::mem::take(key_attempts))),
                 }
             }
             other => {
-                break other.map(|resp| (resp, key_idx)).map_err(|e| e.to_string());
+                break other
+                    .map(|resp| (resp, key_idx, std::mem::take(key_attempts)))
+                    .map_err(|e| (e.to_string(), key_idx, std::mem::take(key_attempts)));
             }
         }
     }
@@ -998,7 +1012,7 @@ pub async fn forward_relay(
         .await;
 
         match send_res {
-            Ok((upstream_resp, key_idx)) => {
+            Ok((upstream_resp, key_idx, round_key_attempts)) => {
                 let status = upstream_resp.status();
                 if status.is_success() {
                     state
@@ -1018,7 +1032,8 @@ pub async fn forward_relay(
                         start_time,
                         price_opt,
                         rounds,
-                        key_attempts: key_attempts.clone(),
+                        key_index: key_idx,
+                        key_attempts: round_key_attempts,
                     };
                     if metadata.stream {
                         relay_guard.defuse();
@@ -1061,7 +1076,8 @@ pub async fn forward_relay(
                             duration_ms: round_duration_ms,
                             err_body: &err_body,
                             should_cooldown: !is_client,
-                            key_attempts: key_attempts.clone(),
+                            key_index: key_idx,
+                            key_attempts: round_key_attempts,
                         },
                     );
 
@@ -1070,7 +1086,7 @@ pub async fn forward_relay(
                     }
                 }
             }
-            Err(err_msg) => {
+            Err((err_msg, fail_key_idx, round_key_attempts)) => {
                 let round_duration_ms = round_start_time.elapsed().as_millis() as i64;
                 last_target_channel = ch.name.clone();
                 last_target_model = channel_model.name.clone();
@@ -1104,7 +1120,8 @@ pub async fn forward_relay(
                         duration_ms: round_duration_ms,
                         err_body: &err_msg,
                         should_cooldown: true,
-                        key_attempts: key_attempts.clone(),
+                        key_index: fail_key_idx,
+                        key_attempts: round_key_attempts,
                     },
                 );
             }
@@ -1293,19 +1310,19 @@ mod key_rotation_tests {
             first_event_timeout_secs: 5,
             cooldown_seconds:         60,
         };
-        let (resp, key_idx) = send_with_key_rotation(plan, &mut key_attempts)
+        let (resp, key_idx, attempts) = send_with_key_rotation(plan, &mut key_attempts)
             .await
             .unwrap();
 
         assert_eq!(resp.status(), 200);
         assert_eq!(key_idx, 2, "最终应由第 3 个 key 成功");
-        assert_eq!(key_attempts.len(), 2);
-        assert_eq!(key_attempts[0].key_index, 0);
-        assert_eq!(key_attempts[0].status, 401);
-        assert!(key_attempts[0].error.contains("bad key 1"));
-        assert_eq!(key_attempts[1].key_index, 1);
-        assert_eq!(key_attempts[1].status, 401);
-        assert!(key_attempts[1].error.contains("bad key 2"));
+        assert_eq!(attempts.len(), 2);
+        assert_eq!(attempts[0].key_index, 0);
+        assert_eq!(attempts[0].status, 401);
+        assert!(attempts[0].error.contains("bad key 1"));
+        assert_eq!(attempts[1].key_index, 1);
+        assert_eq!(attempts[1].status, 401);
+        assert!(attempts[1].error.contains("bad key 2"));
         // 密钥本体绝不入日志
         for attempt in &key_attempts {
             assert!(!attempt.error.contains("k1") || !attempt.error.contains("Bearer"));

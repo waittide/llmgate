@@ -394,6 +394,8 @@ pub struct RoundLog {
     pub duration_ms:      i64,
     pub error:            Option<String>,
     pub key_attempts:     Vec<KeyAttempt>,
+    /// 本轮最终使用的 key 序号(成功或最后一次失败的 key)。
+    pub key_index:        Option<usize>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, sqlx::FromRow)]

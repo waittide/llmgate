@@ -124,6 +124,7 @@ const errorText = computed(() => activeRound.value?.error ?? props.log.error ?? 
 const requestFailed = computed(() => props.log.status === 'failed' || props.log.status === 'canceled');
 const responseCommitted = computed(() => props.log.status === 'committed');
 const showRounds = computed(() => props.log.status === 'running' && rounds.value.length > 0);
+const roundSuccess = (r: RoundLog) => r.status >= 200 && r.status < 300;
 const activeGroup = computed(() => groups.value.find((group) => group.name.toLowerCase() === props.log.model?.toLowerCase()));
 const isWaitingForSelection = computed(() => props.log.status === 'running' && !props.log.sending && activeGroup.value?.mode === 'manual' && activeGroup.value.active_item_id === 0);
 
@@ -293,6 +294,32 @@ async function handleStopRound() {
                 </button>
             </div>
 
+            <div class="flex items-center gap-1.5 overflow-x-auto shrink-0 text-xs">
+                <span class="text-muted-foreground shrink-0 font-medium">{{ t('usedChannels') }}</span>
+                <template v-for="(r, i) in persistentRounds" :key="`c${i}`">
+                    <span v-if="i > 0" class="text-muted-foreground/50 shrink-0">→</span>
+                    <span
+                        :class="cn('shrink-0 font-medium', roundSuccess(r) ? 'text-emerald-600 dark:text-emerald-400' : 'text-muted-foreground line-through')"
+                    >
+                        {{ r.channel_name }}{{ roundSuccess(r) ? ' ✓' : '' }}
+                    </span>
+                </template>
+            </div>
+            <div class="flex items-center gap-1.5 overflow-x-auto shrink-0 text-xs">
+                <span class="text-muted-foreground shrink-0 font-medium">{{ t('usedKeys') }}</span>
+                <template v-for="(r, ri) in persistentRounds" :key="`k${ri}`">
+                    <template v-for="(a, ai) in r.key_attempts ?? []" :key="`f${ri}-${ai}`">
+                        <span class="shrink-0 text-destructive">Key #{{ a.key_index + 1 }} ✗</span>
+                        <span class="text-muted-foreground/50 shrink-0">→</span>
+                    </template>
+                    <span
+                        :class="cn('shrink-0 font-medium', roundSuccess(r) ? 'text-emerald-600 dark:text-emerald-400' : 'text-destructive')"
+                    >
+                        Key #{{ (r.key_index ?? 0) + 1 }} {{ roundSuccess(r) ? '✓' : '✗' }}
+                    </span>
+                    <span v-if="ri < persistentRounds.length - 1" class="text-muted-foreground/50 shrink-0">→</span>
+                </template>
+            </div>
             <div class="grid grid-cols-1 md:grid-cols-2 gap-4 flex-1 min-h-0">
                 <!-- 左侧: 分组与请求体 -->
                 <div class="flex flex-col rounded-2xl border border-border bg-muted/30 overflow-hidden min-h-0">

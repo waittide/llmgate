@@ -35,6 +35,7 @@ export interface RoundLog {
     duration_ms: number;
     error?: string;
     key_attempts?: KeyAttempt[];
+    key_index?: number;
 }
 
 // RelayLogOverview 是请求状态流发送的完整进程内请求状态。

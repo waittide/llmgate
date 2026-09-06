@@ -428,7 +428,9 @@
       "roundIndex": "Round {index}",
       "allRounds": "All Rounds",
       "keyAttempts": "Key rotation attempts",
-      "transportError": "transport"
+      "transportError": "transport",
+      "usedChannels": "Channels used",
+      "usedKeys": "Keys used"
     },
     "filter": {
       "keyword": "Keyword",
