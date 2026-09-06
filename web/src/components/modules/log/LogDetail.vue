@@ -452,7 +452,7 @@ async function handleStopRound() {
                                 class="flex items-center gap-2 text-muted-foreground"
                             >
                                 <span class="font-medium text-foreground">Key #{{ attempt.key_index + 1 }}</span>
-                                <Badge variant="destructive" class="px-1 py-0 text-[10px]">{{ attempt.status }}</Badge>
+                                <Badge variant="destructive" class="px-1 py-0 text-[10px]">{{ attempt.status > 0 ? attempt.status : t('transportError') }}</Badge>
                                 <span class="truncate" :title="attempt.error">{{ attempt.error }}</span>
                             </div>
                         </div>

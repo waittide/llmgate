@@ -427,7 +427,8 @@
       "round": "轮次",
       "roundIndex": "第 {index} 轮",
       "allRounds": "所有轮次",
-      "keyAttempts": "密钥轮换尝试"
+      "keyAttempts": "密钥轮换尝试",
+      "transportError": "传输失败"
     },
     "filter": {
       "keyword": "关键词",

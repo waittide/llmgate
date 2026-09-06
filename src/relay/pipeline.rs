@@ -666,18 +666,21 @@ async fn send_with_key_rotation(
             Err(e) => break Err(format!("构建渠道 {} 请求失败: {}", ch.name, e)),
         };
         let fut = req_builder.send();
-        let res = if stream {
+        // 流式: 首事件超时说明请求已被上游受理并可能开始生成,重试会造成重复生成,故不轮换
+        let send_result = if stream {
             match tokio::time::timeout(std::time::Duration::from_secs(first_event_timeout_secs), fut).await {
-                Ok(r) => r.map_err(|e| e.to_string()),
-                Err(_) => Err(format!(
-                    "上游流式响应在 {}s 内未返回初始响应头",
-                    first_event_timeout_secs
-                )),
+                Ok(r) => r,
+                Err(_) => {
+                    break Err(format!(
+                        "上游流式响应在 {}s 内未返回初始响应头",
+                        first_event_timeout_secs
+                    ));
+                }
             }
         } else {
-            fut.await.map_err(|e| e.to_string())
+            fut.await
         };
-        match res {
+        match send_result {
             // key 级可重试错误：冷却当前 key，换未试过的 key 重试（不消耗轮次）
             Ok(resp) if matches!(resp.status().as_u16(), 401 | 403 | 429) && key_pool.len() > 1 => {
                 // 先确认还有未试 key 再消费响应体;穷尽时保留 resp 交由上层记录
@@ -702,7 +705,29 @@ async fn send_with_key_rotation(
                     None => break Ok((resp, key_idx)),
                 }
             }
-            other => break other.map(|resp| (resp, key_idx)),
+            // 连接层失败(连接被拒/重置): 部分上游对封禁 key 直接断连而非返回 401,
+            // 同样轮换下一个未试 key;status 记 0 表示传输层失败
+            Err(e) if (e.is_connect() || e.is_request()) && key_pool.len() > 1 => {
+                match (0..key_pool.len()).find(|idx| *idx != key_idx && !tried_keys.contains(idx)) {
+                    Some(next) => {
+                        key_attempts.push(crate::model::KeyAttempt {
+                            key_index: key_idx,
+                            status:    0,
+                            error:     e.to_string(),
+                        });
+                        state
+                            .key_pool
+                            .report_failure(ch.id, key_idx, cooldown_seconds);
+                        tried_keys.insert(key_idx);
+                        key_idx = next;
+                        continue;
+                    }
+                    None => break Err(e.to_string()),
+                }
+            }
+            other => {
+                break other.map(|resp| (resp, key_idx)).map_err(|e| e.to_string());
+            }
         }
     }
 }
