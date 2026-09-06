@@ -10,7 +10,7 @@ mod task;
 mod test_support;
 mod utils;
 
-use std::net::SocketAddr;
+use std::{net::SocketAddr, time::Duration};
 
 use anyhow::Result;
 use conf::Config;
@@ -47,8 +47,9 @@ async fn main() -> Result<()> {
     // 2. 初始化应用状态与内存缓存
     let state = AppState::init(pool).await?;
 
-    // 3. 启动后台定时任务
-    task::start_background_tasks(state.clone());
+    // 3. 启动后台定时任务（携带停机信号；句柄用于停机时限时等待）
+    let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+    let task_handles = task::start_background_tasks(state.clone(), shutdown_rx);
 
     // 4. 构建 Axum 路由
     let app = server::build_router(state.clone());
@@ -58,14 +59,16 @@ async fn main() -> Result<()> {
     info!("服务已启动，监听 http://{}", addr);
 
     let listener = tokio::net::TcpListener::bind(addr).await?;
+    // 优雅停机：信号触发后停止接收新连接，等待在途请求排空；
+    // drain_deadline 给排空加 30 秒上限，避免长连接（SSE）阻塞退出。
     tokio::select! {
-        res = axum::serve(listener, app) => {
+        res = axum::serve(listener, app).with_graceful_shutdown(shutdown_signal()) => {
             if let Err(e) = res {
                 tracing::error!("服务运行出错: {}", e);
             }
         }
-        _ = shutdown_signal() => {
-            info!("收到停机信号，正在停止服务...");
+        _ = drain_deadline() => {
+            tracing::warn!("在途请求排空超时（30s），强制中断剩余连接");
         }
     }
 
@@ -73,11 +76,18 @@ async fn main() -> Result<()> {
     if let Err(e) = op::stats::flush_stats_to_db(&state).await {
         tracing::error!("停机时落盘统计失败: {}", e);
     }
+
+    // 通知后台任务退出并限时等待，防止停机瞬间丢失统计结转
+    let _ = shutdown_tx.send(true);
+    for handle in task_handles {
+        let _ = tokio::time::timeout(Duration::from_secs(10), handle).await;
+    }
     info!("服务已优雅退出");
     Ok(())
 }
 
-async fn shutdown_signal() {
+/// 等待任一停机信号（Ctrl+C / SIGTERM）。
+async fn wait_signal() {
     let ctrl_c = async {
         tokio::signal::ctrl_c()
             .await
@@ -99,4 +109,16 @@ async fn shutdown_signal() {
         _ = ctrl_c => {},
         _ = terminate => {},
     }
+}
+
+/// axum 优雅停机触发源。
+async fn shutdown_signal() {
+    wait_signal().await;
+    info!("收到停机信号，正在停止服务...");
+}
+
+/// 排空上限：信号到达后最多再等 30 秒。
+async fn drain_deadline() {
+    wait_signal().await;
+    tokio::time::sleep(Duration::from_secs(30)).await;
 }
