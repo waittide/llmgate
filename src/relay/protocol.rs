@@ -11,10 +11,9 @@ pub enum ApiFormat {
 }
 
 #[derive(Debug, Default, Deserialize)]
+#[serde(default)]
 pub struct ChatRequestMetadata {
-    #[serde(default)]
     pub model:  String,
-    #[serde(default)]
     pub stream: bool,
 }
 

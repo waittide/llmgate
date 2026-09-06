@@ -7,22 +7,19 @@ use tokio::sync::{broadcast, watch};
 use crate::model::RequestLog;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
 pub struct Usage {
-    #[serde(default)]
     pub prompt_tokens:      i64,
-    #[serde(default)]
     pub completion_tokens:  i64,
-    #[serde(default)]
     pub total_tokens:       i64,
     /// 命中上游 prompt 缓存的输入 token（prompt_tokens 的子集）
-    #[serde(default)]
     pub cache_read_tokens:  i64,
     /// 写入上游 prompt 缓存的输入 token（prompt_tokens 的子集）
-    #[serde(default)]
     pub cache_write_tokens: i64,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
 pub struct RequestOverview {
     pub id:             u64,
     pub status:         String,
@@ -37,7 +34,7 @@ pub struct RequestOverview {
     pub sending:        bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error:          Option<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub rounds:         Vec<crate::model::RoundLog>,
 }
 

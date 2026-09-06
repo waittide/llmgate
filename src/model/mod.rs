@@ -9,11 +9,11 @@ pub struct User {
     pub password: String,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
 pub struct UserLogin {
     pub username: String,
     pub password: String,
-    #[serde(default)]
     pub expire:   i64,
 }
 
@@ -70,7 +70,7 @@ impl StatsMetrics {
 #[serde(default)]
 pub struct StatsTotal {
     pub id:      i64,
-    #[serde(flatten, default)]
+    #[serde(flatten)]
     pub metrics: StatsMetrics,
 }
 
@@ -79,7 +79,7 @@ pub struct StatsTotal {
 pub struct StatsHourly {
     pub hour:    i64,
     pub date:    String,
-    #[serde(flatten, default)]
+    #[serde(flatten)]
     pub metrics: StatsMetrics,
 }
 
@@ -87,7 +87,7 @@ pub struct StatsHourly {
 #[serde(default)]
 pub struct StatsDaily {
     pub date:    String,
-    #[serde(flatten, default)]
+    #[serde(flatten)]
     pub metrics: StatsMetrics,
 }
 
@@ -102,7 +102,7 @@ pub struct SystemStats {
 #[serde(default)]
 pub struct StatsAPIKey {
     pub api_key_id: i64,
-    #[serde(flatten, default)]
+    #[serde(flatten)]
     pub metrics:    StatsMetrics,
 }
 
@@ -175,7 +175,7 @@ pub struct ChannelModel {
     pub channel_id: i64,
     pub name:       String,
     pub source:     ChannelModelSource,
-    #[serde(flatten, default)]
+    #[serde(flatten)]
     pub metrics:    StatsMetrics,
 }
 
@@ -192,14 +192,12 @@ pub struct Channel {
     /// 支持多 key：换行或逗号分隔多个；粘性优先级使用（利于缓存命中），
     /// 429/401/403 时键级冷却顺延，全部失效才走渠道级失败
     pub key:            String,
-    #[serde(default)]
     pub models:         Vec<ChannelModel>,
-    #[serde(default)]
     pub auto_sync:      bool,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub custom_header:  Vec<CustomHeader>,
     pub param_override: Option<String>,
-    #[serde(flatten, default)]
+    #[serde(flatten)]
     pub metrics:        StatsMetrics,
 }
 
@@ -318,10 +316,10 @@ pub struct Group {
     pub items:          Vec<GroupItem>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
 pub struct GroupItemAddRequest {
     pub channel_model_id: i64,
-    #[serde(default)]
     pub priority:         i64,
 }
 
@@ -331,17 +329,15 @@ pub struct GroupItemUpdateRequest {
     pub priority: i64,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
 pub struct GroupUpdateRequest {
     pub id:              i64,
     pub name:            Option<String>,
     pub mode:            Option<GroupMode>,
     pub relay_config:    Option<GroupRelayConfig>,
-    #[serde(default)]
     pub items_to_add:    Vec<GroupItemAddRequest>,
-    #[serde(default)]
     pub items_to_update: Vec<GroupItemUpdateRequest>,
-    #[serde(default)]
     pub items_to_delete: Vec<i64>,
 }
 
@@ -441,7 +437,7 @@ pub struct ModelPrice {
 #[serde(default)]
 pub struct ModelInfo {
     pub name:  String,
-    #[serde(flatten, default)]
+    #[serde(flatten)]
     pub price: ModelPrice,
 }
 
@@ -453,11 +449,11 @@ pub struct OpenAIModel {
     pub owned_by: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
 pub struct OpenAIModelList {
     pub object:  String,
     pub data:    Vec<OpenAIModel>,
-    #[serde(default)]
     pub success: bool,
 }
 
@@ -492,7 +488,7 @@ pub struct BackupData {
     pub groups:         Vec<Group>,
     pub group_items:    Vec<GroupItem>,
     /// alias 兼容旧备份文件中的 `llm_infos` 字段名
-    #[serde(default, alias = "llm_infos")]
+    #[serde(alias = "llm_infos")]
     pub model_infos:    Vec<ModelInfo>,
 
     pub stats_total:   Option<Vec<StatsTotal>>,

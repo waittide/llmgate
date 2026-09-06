@@ -56,17 +56,15 @@ pub async fn stream_overview(State(state): State<AppState>) -> Response {
 
 // ---------------- 持久化日志查询 ----------------
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
 pub struct LogListParams {
     #[serde(default = "default_page")]
     pub page:      i64,
     #[serde(default = "default_page_size")]
     pub page_size: i64,
-    #[serde(default)]
     pub model:     String,
-    #[serde(default)]
     pub status:    String,
-    #[serde(default)]
     pub keyword:   String,
 }
 
