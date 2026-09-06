@@ -2,7 +2,7 @@ import { reactive } from 'vue';
 
 export type Locale = 'zh_hans' | 'zh_hant' | 'en';
 
-const STORAGE_KEY = 'octopus-settings';
+const STORAGE_KEY = 'llmgate-settings';
 
 function readPersistedLocale(): Locale {
     try {

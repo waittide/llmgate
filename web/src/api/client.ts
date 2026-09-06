@@ -44,7 +44,7 @@ function getActiveBearer(): string | null {
     if (apiKey || authToken) return apiKey || authToken;
     try {
         if (typeof localStorage !== 'undefined') {
-            const raw = localStorage.getItem('auth-storage');
+            const raw = localStorage.getItem('llmgate-auth');
             if (raw) {
                 const parsed = JSON.parse(raw);
                 const token = parsed?.state?.token;

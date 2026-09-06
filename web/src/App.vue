@@ -51,18 +51,6 @@ watchEffect(() => {
         void queryClient.prefetchQuery(statsTotalQueryOptions);
     }
 });
-
-// 当前界面提交后淡出并移除 HTML 首屏加载动画（对应 React 版 InitialLoadingGate）。
-watchEffect((onCleanup) => {
-    if (authStore.isLoading) return;
-    const loader = document.getElementById('initial-loader');
-    if (!loader || loader.dataset.state === 'hidden') return;
-    onCleanup(() => {});
-
-    loader.dataset.state = 'hidden';
-    loader.classList.add('octo-hide');
-    window.setTimeout(() => loader.remove(), 220);
-});
 </script>
 
 <template>

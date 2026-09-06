@@ -40,7 +40,7 @@ function getPageFromLocation(): Page | null {
 // auth-storage 由 zustand persist 写入；这里保持同样的 key/结构，无缝兼容已有会话。
 function readPersistedPage(): Page {
     try {
-        const raw = localStorage.getItem('nav-storage');
+        const raw = localStorage.getItem('llmgate-nav');
         if (raw) {
             const parsed = JSON.parse(raw) as { state?: { currentPage?: Page } };
             const page = parsed?.state?.currentPage;
@@ -63,7 +63,7 @@ function persistCurrentPage() {
     window.clearTimeout(persistTimer);
     persistTimer = window.setTimeout(() => {
         try {
-            localStorage.setItem('nav-storage', JSON.stringify({ state: { currentPage: appStore.currentPage } }));
+            localStorage.setItem('llmgate-nav', JSON.stringify({ state: { currentPage: appStore.currentPage } }));
         } catch {
             // ignore storage write error
         }

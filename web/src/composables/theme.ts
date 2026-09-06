@@ -27,7 +27,7 @@ function applyTheme() {
     root.style.colorScheme = resolvedTheme.value;
     document.querySelector('meta[name="theme-color"]')?.setAttribute(
         'content',
-        resolvedTheme.value === 'dark' ? '#413a2c' : '#eae9e3',
+        resolvedTheme.value === 'dark' ? '#1e1e2e' : '#eff1f5',
     );
     localStorage.setItem('theme', theme.value);
 }

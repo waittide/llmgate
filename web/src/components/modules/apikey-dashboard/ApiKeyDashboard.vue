@@ -8,7 +8,6 @@ import { useAPIKeyDashboardStats } from '@/api/apikey'
 import { logout } from '@/stores/auth'
 import { settingStore, setLocale } from '@/stores/setting'
 import AnimatedNumber from '@/components/common/AnimatedNumber.vue'
-import Logo from '@/components/modules/logo/Logo.vue'
 import CopyIconButton from '@/components/common/CopyButton.vue'
 import { Button } from '@/components/ui/button'
 import { Progress } from '@/components/ui/progress'
@@ -110,7 +109,6 @@ const toggleLanguage = () => {
     <div v-else class="mx-auto max-w-6xl px-3 md:px-6">
         <!-- Header - Consistent with app.tsx -->
         <header class="my-6 flex items-center gap-2 px-2">
-            <Logo :size="48" />
             <h1 class="ml-2 flex-1 truncate text-2xl font-bold tracking-tight">LLMGate</h1>
             <div class="flex items-center gap-2">
                 <Button variant="ghost" size="icon" @click="toggleTheme" class="rounded-xl hover:bg-accent">

@@ -1,18 +1,12 @@
 // 缓存策略或预缓存结构变化时递增版本，以便激活阶段清理旧缓存。
 const CACHE_VERSION = 'v3';
 const CACHE_NAMES = {
-    shell: `octopus-shell-${CACHE_VERSION}`,
-    static: `octopus-static-${CACHE_VERSION}`,
+    shell: `llmgate-shell-${CACHE_VERSION}`,
+    static: `llmgate-static-${CACHE_VERSION}`,
 };
 
 // 应用壳除构建入口外还必须包含的固定 PWA 资源。
-const CORE_ASSETS = [
-    '/manifest.json',
-    '/favicon.ico',
-    '/apple-icon.png',
-    '/web-app-manifest-192x192.png',
-    '/web-app-manifest-512x512.png',
-];
+const CORE_ASSETS = [];
 
 // extractShellAssets 从构建后的 HTML 中提取根路径和相对路径资源。
 function extractShellAssets(html) {
@@ -54,7 +48,7 @@ self.addEventListener('activate', (event) => {
         const cacheNames = await caches.keys();
         await Promise.all(
             cacheNames
-                .filter((name) => name.startsWith('octopus-') && !currentCaches.has(name))
+                .filter((name) => (name.startsWith('llmgate-') || name.startsWith('octopus-')) && !currentCaches.has(name))
                 .map((name) => caches.delete(name)),
         );
         await self.clients.claim();

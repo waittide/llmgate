@@ -14,7 +14,7 @@ interface UserLoginResponse {
  * localStorage key/结构保持 auth-storage: {state:{token,isAPIKeyAuth}}，
  * 保证与 React 版会话互通。
  */
-const STORAGE_KEY = 'auth-storage';
+const STORAGE_KEY = 'llmgate-auth';
 
 interface PersistedAuth {
     token: string | null;

@@ -7,7 +7,6 @@ import { Field, FieldDescription, FieldLabel } from "@/components/ui/field"
 import { Input } from "@/components/ui/input"
 import { useLogin } from "@/api/user"
 import { useAPIKeyLogin } from "@/api/apikey"
-import Logo from "@/components/modules/logo/Logo.vue"
 import { LuKeyRound, LuUser } from "vue-icons-plus/lu"
 import {
   Tabs,
@@ -61,7 +60,6 @@ const handleModeChange = (value: string | number) => {
   <div class="min-h-screen flex animate-in items-center justify-center px-6 text-foreground fade-in duration-300">
     <div class="w-full max-w-sm space-y-8">
       <header class="flex flex-col items-center gap-3">
-        <Logo :size="48" />
         <h1 class="text-2xl font-bold">LLMGate</h1>
       </header>
 

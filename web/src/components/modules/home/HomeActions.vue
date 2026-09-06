@@ -14,7 +14,6 @@ import dayjs from 'dayjs';
 import { toast } from '@/composables/toast';
 import { useTranslations } from '@/composables/i18n';
 import { buttonVariants } from '@/components/ui/button';
-import Logo from '@/components/modules/logo/Logo.vue';
 import HomeSections from './home-sections.vue';
 import { homeViewStore } from './store';
 
@@ -124,7 +123,6 @@ const handleDownloadImage = () => {
         >
             <!-- 分享图抬头, 与应用顶栏一致的标识和名称。 -->
             <div class="mb-4 flex items-center gap-x-2 px-2">
-                <Logo :size="48" />
                 <span class="text-3xl font-bold">LLMGate</span>
             </div>
             <HomeSections />

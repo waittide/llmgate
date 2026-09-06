@@ -1,6 +1,5 @@
 <script setup lang="ts">
 import { ref, watch } from 'vue';
-import Logo from '@/components/modules/logo/Logo.vue';
 import { NAV_ITEMS, appStore, setCurrentPage, type Page } from '@/stores/app';
 import { preloadPage } from '@/lib/page-preload';
 import { useTranslations } from '@/composables/i18n';
@@ -110,7 +109,6 @@ function onNavEnter(route: Page, index: number) {
         </div>
 
         <header class="my-3 md:my-6 flex flex-none items-center gap-x-2 px-2">
-            <Logo :size="48" />
             <div class="min-w-0 flex-1 overflow-hidden">
                 <Transition name="page-title" mode="out-in">
                     <div :key="appStore.currentPage" class="flex items-center">
