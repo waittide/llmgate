@@ -6,7 +6,7 @@
         "passwordPlaceholder": "请输入密码",
         "trustDevice": "信任此设备",
         "apikey": "API 密钥",
-        "apikeyPlaceholder": "请输入 API 密钥 (sk-lg-...)",
+        "apikeyPlaceholder": "请输入 API 密钥 (sk-...)",
         "mode": {
             "user": "账户登录",
             "apikey": "密钥登录"

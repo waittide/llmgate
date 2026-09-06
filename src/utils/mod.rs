@@ -1,5 +1,5 @@
 pub fn generate_api_key() -> String {
-    format!("sk-lg-{}", nanoid::nanoid!(32))
+    format!("sk-{}", nanoid::nanoid!(32))
 }
 
 pub fn estimate_tokens(text: &str) -> i64 {
