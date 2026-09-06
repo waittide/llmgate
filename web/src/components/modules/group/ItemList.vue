@@ -253,6 +253,7 @@ function handleConfirmDelete(id: string) {
                             :group="group"
                             :item-id="member.item_id"
                             :now="now"
+                            :disabled="member.enabled === false"
                             :active="member.item_id === activeItemId"
                             active-class-name="p-1"
                         />

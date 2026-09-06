@@ -10,6 +10,7 @@ export interface MemberStatusProps {
     group: Group; // group 提供当前路由和成员冷却时间戳。
     itemId?: number; // itemId 是待展示状态的成员 ID。
     now: number; // now 是所属列表共享的当前 Unix 毫秒时间。
+    disabled?: boolean; // disabled 表示成员所属渠道已被禁用(禁用态优先于冷却展示)。
     active?: boolean; // active 表示该成员当前正在使用。
     activeClassName?: string; // activeClassName 调整原有选中图标在不同列表中的间距。
 }
@@ -28,7 +29,8 @@ const cooldownUntil = computed(() => {
     return props.group.runtime.cooldowns[props.itemId] ?? 0;
 });
 
-const isCooling = computed(() => props.now < cooldownUntil.value);
+const isDisabled = computed(() => props.disabled === true);
+const isCooling = computed(() => !isDisabled.value && props.now < cooldownUntil.value);
 
 const coolingLabel = computed(() => {
     const seconds = Math.ceil((cooldownUntil.value - props.now) / 1000);
@@ -78,7 +80,15 @@ export function useRuntimeClock(source?: MaybeRefOrGetter<Group | Group[] | unde
 </script>
 
 <template>
-    <div v-if="isCooling" class="flex items-center gap-1.5 shrink-0">
+    <div v-if="isDisabled" class="flex items-center gap-1.5 shrink-0">
+        <Badge
+            variant="outline"
+            class="shrink-0 px-1.5 py-0 text-[10px] font-medium border-muted-foreground/30 bg-muted-foreground/10 text-muted-foreground"
+        >
+            {{ t('card.disabled') }}
+        </Badge>
+    </div>
+    <div v-else-if="isCooling" class="flex items-center gap-1.5 shrink-0">
         <Badge
             variant="outline"
             class="shrink-0 px-1.5 py-0 text-[10px] font-medium border-orange-500/30 bg-orange-500/10 text-orange-600 dark:text-orange-400"

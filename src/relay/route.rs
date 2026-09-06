@@ -46,13 +46,21 @@ impl RouteManager {
         })
     }
 
-    pub fn pick_candidate_item(&self, group: &Group, attempted_items: &HashSet<i64>) -> Option<GroupItem> {
+    /// `channel_pickable`: channel_model_id → 渠道是否可选(存在且未禁用)。
+    /// 禁用渠道不参与选择,也不会被打上冷却(禁用≠失败,避免状态常驻"冷却")。
+    pub fn pick_candidate_item(
+        &self,
+        group: &Group,
+        attempted_items: &HashSet<i64>,
+        channel_pickable: impl Fn(i64) -> bool,
+    ) -> Option<GroupItem> {
+        let pickable = |item: &GroupItem| channel_pickable(item.channel_model_id);
         if group.mode == GroupMode::Manual {
             // 优先选择本次请求尚未尝试过的 active_item
             if let Some(item) = group
                 .items
                 .iter()
-                .find(|item| item.id == group.active_item_id && !attempted_items.contains(&item.id))
+                .find(|item| item.id == group.active_item_id && !attempted_items.contains(&item.id) && pickable(item))
             {
                 return Some(item.clone());
             }
@@ -60,7 +68,7 @@ impl RouteManager {
             return group
                 .items
                 .iter()
-                .find(|item| !attempted_items.contains(&item.id))
+                .find(|item| !attempted_items.contains(&item.id) && pickable(item))
                 .cloned();
         }
 
@@ -70,7 +78,7 @@ impl RouteManager {
 
         // 选择尚未尝试且不在冷却期的最高优先级可用渠道（items 已按 priority 升序预排序）
         for item in &group.items {
-            if attempted_items.contains(&item.id) {
+            if attempted_items.contains(&item.id) || !pickable(item) {
                 continue;
             }
             if let Some(&deadline) = route.cooldowns.get(&item.id)
@@ -90,7 +98,7 @@ impl RouteManager {
         if let Some(item) = group
             .items
             .iter()
-            .filter(|item| !attempted_items.contains(&item.id))
+            .filter(|item| !attempted_items.contains(&item.id) && pickable(item))
             .min_by_key(|item| route.cooldowns.get(&item.id).copied().unwrap_or(0))
         {
             if route.current_item_id != item.id {
@@ -169,7 +177,7 @@ mod tests {
             items:          vec![item1.clone(), item2.clone()],
         };
         let picked = manager
-            .pick_candidate_item(&group_unselected, &HashSet::new())
+            .pick_candidate_item(&group_unselected, &HashSet::new(), |_| true)
             .expect("应能选中候选项");
         assert_eq!(picked.id, 10);
 
@@ -179,7 +187,7 @@ mod tests {
             ..group_unselected.clone()
         };
         let picked_stale = manager
-            .pick_candidate_item(&group_stale_active, &HashSet::new())
+            .pick_candidate_item(&group_stale_active, &HashSet::new(), |_| true)
             .expect("应能选中候选项");
         assert_eq!(picked_stale.id, 10);
 
@@ -189,7 +197,7 @@ mod tests {
             ..group_unselected.clone()
         };
         let picked2 = manager
-            .pick_candidate_item(&group_selected_item2, &HashSet::new())
+            .pick_candidate_item(&group_selected_item2, &HashSet::new(), |_| true)
             .expect("应能选中候选项");
         assert_eq!(picked2.id, 20);
 
@@ -200,7 +208,7 @@ mod tests {
         };
         assert!(
             manager
-                .pick_candidate_item(&group_empty, &HashSet::new())
+                .pick_candidate_item(&group_empty, &HashSet::new(), |_| true)
                 .is_none()
         );
     }
@@ -234,16 +242,67 @@ mod tests {
 
         let mut attempted = HashSet::new();
         // 首次选取: 项 101
-        let first = manager.pick_candidate_item(&group, &attempted).unwrap();
+        let first = manager
+            .pick_candidate_item(&group, &attempted, |_| true)
+            .unwrap();
         assert_eq!(first.id, 101);
 
         // 标记 101 已尝试
         attempted.insert(101);
-        let second = manager.pick_candidate_item(&group, &attempted).unwrap();
+        let second = manager
+            .pick_candidate_item(&group, &attempted, |_| true)
+            .unwrap();
         assert_eq!(second.id, 102);
 
         // 标记 102 已尝试 -> 候选耗尽返回 None
         attempted.insert(102);
-        assert!(manager.pick_candidate_item(&group, &attempted).is_none());
+        assert!(
+            manager
+                .pick_candidate_item(&group, &attempted, |_| true)
+                .is_none()
+        );
+    }
+
+    /// 渠道被禁用时,其成员不得被选中,也不得被打上冷却(回归:禁用渠道状态常驻"冷却")。
+    #[test]
+    fn test_pick_candidate_item_skips_disabled_channel() {
+        let manager = RouteManager::new();
+        let group = Group {
+            id:             1,
+            name:           "test-failover".to_string(),
+            mode:           GroupMode::Failover,
+            active_item_id: 0,
+            items:          vec![
+                GroupItem {
+                    id:               101,
+                    group_id:         1,
+                    channel_model_id: 1, // 渠道 11 已禁用
+                    channel_model:    None,
+                    priority:         1,
+                },
+                GroupItem {
+                    id:               102,
+                    group_id:         1,
+                    channel_model_id: 2, // 渠道 12 可用
+                    channel_model:    None,
+                    priority:         2,
+                },
+            ],
+            relay_config:   Default::default(),
+        };
+        let pickable = |channel_model_id: i64| channel_model_id != 1;
+
+        // 高优先级的禁用渠道被跳过,直接选中可用渠道
+        let picked = manager
+            .pick_candidate_item(&group, &HashSet::new(), pickable)
+            .unwrap();
+        assert_eq!(picked.id, 102);
+
+        // 禁用渠道即使带冷却,也不会作为探活候选返回
+        manager.report_failure(1, 101, 3600);
+        let probed = manager
+            .pick_candidate_item(&group, &HashSet::new(), pickable)
+            .unwrap();
+        assert_eq!(probed.id, 102);
     }
 }

@@ -829,8 +829,18 @@ pub async fn forward_relay(
 
         let item = match state
             .route_manager
-            .pick_candidate_item(&current_group, &attempted_items)
-        {
+            .pick_candidate_item(&current_group, &attempted_items, |channel_model_id| {
+                state
+                    .channel_models
+                    .get(&channel_model_id)
+                    .map(|cm| {
+                        state
+                            .channels
+                            .get(&cm.channel_id)
+                            .is_some_and(|c| c.enabled)
+                    })
+                    .unwrap_or(false)
+            }) {
             Some(it) => it,
             None => {
                 break;
@@ -851,9 +861,8 @@ pub async fn forward_relay(
         let ch = match channel::get_channel(&state, channel_model.channel_id) {
             Ok(c) if c.enabled => c,
             Ok(_) | Err(_) => {
-                state
-                    .route_manager
-                    .report_failure(current_group.id, item.id, 60);
+                // 渠道已被禁用/移除:这不是"失败",不打冷却(避免状态常驻"冷却"),
+                // 选择器已跳过此类项,此处仅兜底竞态
                 continue;
             }
         };
