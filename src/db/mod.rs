@@ -257,6 +257,14 @@ pub async fn migrate(pool: &DbPool) -> Result<()> {
     .await?;
 
     // 10. 请求日志表 (request_logs)
+    recreate_request_logs_table(pool).await?;
+
+    Ok(())
+}
+
+/// 重建 request_logs 表(建表 + 索引)。
+/// 迁移建表与"清空日志"共用同一份 DDL,保证两处 schema 不漂移。
+pub async fn recreate_request_logs_table(pool: &DbPool) -> Result<()> {
     sqlx::query(
         r#"
         CREATE TABLE IF NOT EXISTS request_logs (

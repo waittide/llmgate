@@ -125,10 +125,21 @@ pub async fn purge_expired_logs(state: &AppState) -> Result<i64> {
     let cutoff_date = (chrono::Utc::now() - chrono::Duration::days(days))
         .format("%Y%m%d")
         .to_string();
-    let res = sqlx::query("DELETE FROM request_logs WHERE created_at < ?")
+    // 大表全量删除会形成长事务(实测 20s+)并独占写锁,分批执行让其他写入得以穿插
+    let mut deleted = 0i64;
+    loop {
+        let res = sqlx::query(
+            "DELETE FROM request_logs WHERE id IN \
+             (SELECT id FROM request_logs WHERE created_at < ? LIMIT 2000)",
+        )
         .bind(cutoff_ms)
         .execute(&state.db)
         .await?;
+        deleted += res.rows_affected() as i64;
+        if res.rows_affected() < 2000 {
+            break;
+        }
+    }
     sqlx::query("DELETE FROM stats_dailies WHERE date < ?")
         .bind(&cutoff_date)
         .execute(&state.db)
@@ -137,15 +148,21 @@ pub async fn purge_expired_logs(state: &AppState) -> Result<i64> {
         .bind(&cutoff_date)
         .execute(&state.db)
         .await?;
-    Ok(res.rows_affected() as i64)
+    Ok(deleted)
 }
 
 /// 清空数据库中的所有请求日志。
+/// 大表逐行 DELETE 会形成长事务(实测 20s+)阻塞全部写入并拖慢停机;
+/// 直接重建表结构瞬间完成,页空间归还给后续日志复用。
 pub async fn clear_all_logs(state: &AppState) -> Result<i64> {
-    let res = sqlx::query("DELETE FROM request_logs")
+    let count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM request_logs")
+        .fetch_one(&state.db)
+        .await?;
+    sqlx::query("DROP TABLE IF EXISTS request_logs")
         .execute(&state.db)
         .await?;
-    Ok(res.rows_affected() as i64)
+    crate::db::recreate_request_logs_table(&state.db).await?;
+    Ok(count.0)
 }
 
 /// 根据 ID 查询单条请求日志。
@@ -254,5 +271,38 @@ mod tests {
         assert_eq!(row.cost, 0.5);
         assert_eq!((row.cache_read_tokens, row.cache_write_tokens), (100, 5));
         assert_eq!(row.target_channel, "ch-1");
+    }
+
+    /// 清空日志必须瞬间完成(重建表而非逐行 DELETE),且重建后表可继续正常写入读取。
+    #[tokio::test]
+    async fn test_clear_all_logs_rebuilds_table_and_keeps_it_usable() {
+        let (state, _path) = setup_test_state("log_clear").await;
+        for i in 0..3 {
+            create_initial_log(
+                &state,
+                "m",
+                "/v1/chat/completions",
+                "{}",
+                &format!("body-{i}"),
+                1700000000000 + i,
+            )
+            .await
+            .unwrap();
+        }
+
+        let cleared = clear_all_logs(&state).await.unwrap();
+        assert_eq!(cleared, 3);
+        let count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM request_logs")
+            .fetch_one(&state.db)
+            .await
+            .unwrap();
+        assert_eq!(count.0, 0);
+
+        // 重建后的表可继续正常写入与读取
+        let id = create_initial_log(&state, "m2", "/v1/chat/completions", "{}", "after-clear", 1700000100000)
+            .await
+            .unwrap();
+        let body = get_request_body(&state, id).await.unwrap();
+        assert_eq!(body.as_deref(), Some("after-clear"));
     }
 }
