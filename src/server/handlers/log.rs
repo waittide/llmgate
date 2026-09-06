@@ -110,14 +110,16 @@ pub async fn get_log_detail(State(state): State<AppState>, Path(id): Path<u64>) 
 pub async fn get_request_body(State(state): State<AppState>, Path(id): Path<u64>) -> Response {
     match op_log::get_request_body(&state, id as i64).await {
         Ok(Some(body)) => success(body),
-        Ok(None) | Err(_) => error(StatusCode::NOT_FOUND, "请求报文不存在"),
+        Ok(None) => error(StatusCode::NOT_FOUND, "请求报文不存在"),
+        Err(e) => internal_error(e),
     }
 }
 
 pub async fn get_response_body(State(state): State<AppState>, Path(id): Path<u64>) -> Response {
     match op_log::get_response_body(&state, id as i64).await {
         Ok(Some(body)) => success(body),
-        Ok(None) | Err(_) => error(StatusCode::NOT_FOUND, "响应报文不存在"),
+        Ok(None) => error(StatusCode::NOT_FOUND, "响应报文不存在"),
+        Err(e) => internal_error(e),
     }
 }
 

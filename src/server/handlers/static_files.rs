@@ -33,7 +33,11 @@ pub async fn serve_static(uri: Uri) -> Response<Body> {
         }
         None => {
             // API 路由与静态资源路径不得回退到 SPA 的 index.html
-            if uri.path().starts_with("/api/") || uri.path().starts_with("/v1/") || path.starts_with("assets/") {
+            if uri.path().starts_with("/api/")
+                || uri.path().starts_with("/v1/")
+                || uri.path().starts_with("/v1beta/")
+                || path.starts_with("assets/")
+            {
                 return Response::builder()
                     .status(StatusCode::NOT_FOUND)
                     .header(header::CONTENT_TYPE, HeaderValue::from_static("application/json"))

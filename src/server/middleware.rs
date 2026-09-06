@@ -20,17 +20,25 @@ pub struct AuthContext {
     pub is_anthropic_header: bool,
 }
 
-/// 从 Authorization 头提取 JWT（token 仅经请求头传输）。
-fn extract_admin_token(headers: &HeaderMap) -> Option<String> {
-    let auth_header = headers.get(header::AUTHORIZATION)?;
-    let auth_str = auth_header.to_str().ok()?;
-    let stripped = auth_str.strip_prefix("Bearer ")?;
-    let trimmed = stripped.trim();
+/// 按 RFC 6750 提取 Bearer token；scheme 大小写不敏感（部分客户端发送小写 `bearer`）。
+fn strip_bearer_token(auth_str: &str) -> Option<String> {
+    let (scheme, rest) = auth_str.split_once(' ')?;
+    if !scheme.eq_ignore_ascii_case("Bearer") {
+        return None;
+    }
+    let trimmed = rest.trim();
     if trimmed.is_empty() {
         None
     } else {
         Some(trimmed.to_string())
     }
+}
+
+/// 从 Authorization 头提取 JWT（token 仅经请求头传输）。
+fn extract_admin_token(headers: &HeaderMap) -> Option<String> {
+    let auth_header = headers.get(header::AUTHORIZATION)?;
+    let auth_str = auth_header.to_str().ok()?;
+    strip_bearer_token(auth_str)
 }
 
 /// 从请求中提取 API Key，优先级：x-api-key > Authorization Bearer >
@@ -46,10 +54,9 @@ fn extract_api_key(headers: &HeaderMap, query: Option<&str>) -> Option<(String, 
 
     if let Some(auth_header) = headers.get(header::AUTHORIZATION)
         && let Ok(auth_str) = auth_header.to_str()
-        && let Some(stripped) = auth_str.strip_prefix("Bearer ")
-        && !stripped.trim().is_empty()
+        && let Some(stripped) = strip_bearer_token(auth_str)
     {
-        return Some((stripped.trim().to_string(), false));
+        return Some((stripped, false));
     }
 
     if let Some(goog_key) = headers.get("x-goog-api-key")
