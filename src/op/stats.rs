@@ -166,7 +166,7 @@ fn rollover_daily_if_needed(state: &AppState, now_date: &str) {
         }
 
         for h in prev_hourlies {
-            let _ = sqlx::query(
+            if let Err(e) = sqlx::query(
                 r#"
                 INSERT INTO stats_hourlies (hour, date, input_token, output_token, input_cost, output_cost, wait_time, request_success, request_failed)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -190,7 +190,13 @@ fn rollover_daily_if_needed(state: &AppState, now_date: &str) {
             .bind(h.metrics.request_success)
             .bind(h.metrics.request_failed)
             .execute(&mut *tx)
-            .await;
+            .await
+            {
+                // 单条小时写入失败即中止整个结转事务（tx drop 自动回滚），
+                // 避免部分写入被提交造成统计静默损坏
+                tracing::error!("写入结转的小时统计失败（hour={} date={}），事务已回滚: {}", h.hour, h.date, e);
+                return;
+            }
         }
 
         if let Err(e) = tx.commit().await {

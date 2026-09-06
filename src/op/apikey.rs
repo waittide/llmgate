@@ -67,13 +67,16 @@ pub async fn create_api_key(state: &AppState, key: &mut APIKey) -> Result<()> {
 
     key.id = result.last_insert_rowid();
 
-    // 确保对应的 stats_api_keys 统计记录存在
-    let _ = sqlx::query(
+    // 确保对应的 stats_api_keys 统计记录存在（失败仅记日志，不阻塞 key 创建）
+    if let Err(e) = sqlx::query(
         "INSERT OR IGNORE INTO stats_api_keys (api_key_id, input_token, output_token, input_cost, output_cost, wait_time, request_success, request_failed) VALUES (?, 0, 0, 0, 0, 0, 0, 0)"
     )
     .bind(key.id)
     .execute(&state.db)
-    .await;
+    .await
+    {
+        tracing::warn!("初始化 API Key 统计记录失败（id={}）: {}", key.id, e);
+    }
 
     refresh_apikey_cache(state).await?;
     Ok(())

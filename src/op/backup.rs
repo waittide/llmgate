@@ -201,14 +201,17 @@ pub async fn import_backup(state: &AppState, backup: BackupData) -> Result<DBImp
         // 若存在内嵌渠道模型，同时插入并关联对应的 channel_id
         if inserted_id > 0 {
             for cm in &ch.models {
-                let _ = sqlx::query(
+                if let Err(e) = sqlx::query(
                     "INSERT INTO channel_models (channel_id, name, source) VALUES (?, ?, ?) ON CONFLICT(channel_id, name) DO NOTHING",
                 )
                 .bind(inserted_id)
                 .bind(&cm.name)
                 .bind(cm.source.as_str())
                 .execute(&mut *tx)
-                .await;
+                .await
+                {
+                    warn!("导入内嵌渠道模型失败（channel_id={inserted_id} name={}）: {}", cm.name, e);
+                }
             }
         }
     }
@@ -311,14 +314,17 @@ pub async fn import_backup(state: &AppState, backup: BackupData) -> Result<DBImp
         // 若存在内嵌分组成员，同时插入并关联对应的 group_id
         if inserted_id > 0 {
             for item in &grp.items {
-                let _ = sqlx::query(
+                if let Err(e) = sqlx::query(
                     "INSERT INTO group_items (group_id, channel_model_id, priority) VALUES (?, ?, ?) ON CONFLICT(group_id, channel_model_id) DO NOTHING",
                 )
                 .bind(inserted_id)
                 .bind(item.channel_model_id)
                 .bind(item.priority)
                 .execute(&mut *tx)
-                .await;
+                .await
+                {
+                    warn!("导入内嵌分组成员失败（group_id={inserted_id} channel_model_id={}）: {}", item.channel_model_id, e);
+                }
             }
         }
     }
