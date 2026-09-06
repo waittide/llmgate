@@ -59,9 +59,8 @@ pub struct AppState {
     pub route_manager:  Arc<RouteManager>,
     pub key_pool:       Arc<KeyPool>,
     pub in_flight:      Arc<InFlightRegistry>,
-    /// JWT 签名密钥：初始为内置默认值，用户缓存刷新后派生为 `username_password`
-    /// （见 op::user::refresh_user_cache）。因此修改密码会使所有已签发 token 失效
-    /// （全员登出）；账号密码不变则密钥跨重启保持稳定。
+    /// JWT 签名密钥：首次启动生成高熵随机值并持久化到 settings 表（见
+    /// op::user::ensure_jwt_secret），跨重启稳定，与账号密码解耦。
     pub jwt_secret:     Arc<RwLock<String>>,
 }
 
@@ -101,13 +100,13 @@ impl AppState {
         };
 
         state.refresh_all_caches().await?;
+        user::ensure_jwt_secret(&state).await?;
         stats::refresh_stats_cache(&state).await?;
         info!("所有内存缓存初始化完成");
         Ok(state)
     }
 
     pub async fn refresh_all_caches(&self) -> Result<()> {
-        user::refresh_user_cache(self).await?;
         setting::refresh_setting_cache(self).await?;
         apikey::refresh_apikey_cache(self).await?;
         channel::refresh_channel_cache(self).await?;
