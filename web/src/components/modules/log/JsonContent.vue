@@ -36,7 +36,7 @@ const parsed = computed(() => {
             :value="parsed.data"
             :display-data-types="false"
             :display-object-size="false"
-            :collapsed="false"
+            :collapsed="true"
         />
     </div>
 </template>

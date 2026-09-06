@@ -199,7 +199,7 @@ async function copyNode(event: MouseEvent) {
         </div>
 
         <!-- 基础类型（字符串/数字/布尔/null/undefined） -->
-        <div v-else class="flex items-center gap-1 hover:bg-muted/30 rounded px-1 -mx-1 py-0.5 transition-colors w-fit">
+        <div v-else class="flex items-start gap-1 hover:bg-muted/30 rounded px-1 -mx-1 py-0.5 transition-colors">
             <span class="w-3.5 shrink-0" />
             <!-- 键名 -->
             <span v-if="nodeKey !== undefined" class="text-[#0550ae] dark:text-[#79c0ff] font-medium">
