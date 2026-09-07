@@ -259,7 +259,7 @@ async function handleStopRound() {
             <Badge
                 v-if="persistentRounds.length > 1"
                 variant="outline"
-                class="text-[11px] ml-auto"
+                class="text-[11px] ml-auto mr-6"
             >
                 {{ t('roundIndex', { index: activeRound?.round ?? log.round }) }} / {{ persistentRounds.length }}
             </Badge>
