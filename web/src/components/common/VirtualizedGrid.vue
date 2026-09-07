@@ -118,31 +118,39 @@ const rowCount = computed(() => {
     return itemRowCount.value + (hasFooterRow.value ? 1 : 0);
 });
 
-function getVirtualRowKey(rowIndex: number): string {
+function getVirtualRowKey(items: T[], rowIndex: number): string {
     if (hasFooterRow.value && rowIndex === itemRowCount.value) {
         return '__virtual-footer__';
     }
 
     const rowStartIndex = rowIndex * columnCount.value;
-    const firstItem = props.items[rowStartIndex];
+    const firstItem = items[rowStartIndex];
     if (!firstItem) return `row-empty-${rowIndex}`;
 
     return `row-${String(props.getItemKey(firstItem, rowStartIndex))}`;
 }
 
 const rowVirtualizer = useVirtualizer(
-    computed(() => ({
-        count: rowCount.value,
-        getScrollElement: () => containerRef.value,
-        getItemKey: getVirtualRowKey,
-        estimateSize: () => props.estimateItemHeight + props.gap,
-        measureElement: (element: Element) =>
-            element instanceof HTMLElement
-                ? element.offsetHeight
-                : element.getBoundingClientRect().height,
-        overscan: props.overscan,
-    }))
+    computed(() => {
+        // 快照当次条目数组并据此生成 getItemKey 闭包: 数组被整体替换(如实时刷新
+        // 且条目数不变)时, 依赖其身份重建虚拟器配置, 强制 tanstack-virtual 按新
+        // 数组重算行键与尺寸。否则行键停留在旧数组, 模板却按新数组取内容,
+        // 同一行键出现两份不同内容的 DOM, 造成条目重叠错位。
+        const items = props.items;
+        return {
+            count: rowCount.value,
+            getScrollElement: () => containerRef.value,
+            getItemKey: (rowIndex: number) => getVirtualRowKey(items, rowIndex),
+            estimateSize: () => props.estimateItemHeight + props.gap,
+            measureElement: (element: Element) =>
+                element instanceof HTMLElement
+                    ? element.offsetHeight
+                    : element.getBoundingClientRect().height,
+            overscan: props.overscan,
+        };
+    })
 );
+
 
 const virtualRows = computed(() => rowVirtualizer.value.getVirtualItems());
 const totalSize = computed(() => rowVirtualizer.value.getTotalSize());
