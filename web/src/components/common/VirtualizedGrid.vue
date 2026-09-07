@@ -185,7 +185,7 @@ watch(
     <div class="relative h-full min-h-0 w-full">
         <div
             ref="containerRef"
-            class="relative h-full w-full overflow-y-auto overscroll-contain rounded-t-3xl"
+            class="relative h-full w-full overflow-y-auto overscroll-contain rounded-t-3xl px-px"
         >
             <div
                 v-if="rowCount > 0"
