@@ -476,7 +476,7 @@ async fn handle_successful_json(
     req_log.cost = cost;
     req_log.wait_time = elapsed_ms;
     req_log.error = None;
-    req_log.rounds_detail = serde_json::to_string(&ctx.rounds).unwrap_or_default();
+    req_log.rounds_detail = log::serialize_rounds_detail(state, &ctx.rounds);
 
     state.in_flight.broadcast(RequestOverview::from(&req_log));
     state.in_flight.unregister(ctx.log_base.id as u64);
@@ -588,14 +588,14 @@ fn build_failed_relay_response(state: &AppState, ctx: FailedRelayContext) -> Res
     req_log.wait_time = ctx.wait_time_ms;
     req_log.round = ctx.round;
     req_log.error = Some(error_message);
-    req_log.rounds_detail = serde_json::to_string(&ctx.rounds).unwrap_or_default();
+    req_log.rounds_detail = log::serialize_rounds_detail(state, &ctx.rounds);
     state.in_flight.broadcast(RequestOverview::from(&req_log));
     state.in_flight.unregister(ctx.log_base.id as u64);
 
     let state_clone = state.clone();
     tokio::spawn(async move {
         if let Err(e) = log::update_completed_log(&state_clone, &req_log).await {
-            tracing::error!("写入已失败请求日志失败: {}", e);
+            tracing::error!("写入已完成请求日志失败: {}", e);
         }
     });
     Response::builder()

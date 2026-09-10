@@ -117,6 +117,139 @@ mod tests {
     }
 
     const CHAT_OK_BODY: &str = r#"{"id":"x","choices":[{"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}"#;
+    /// 捕获上游实际收到的请求体，用于断言"记录开关不影响转发"。
+    struct CaptureBody(std::sync::Arc<parking_lot::Mutex<Vec<u8>>>);
+
+    impl wiremock::Respond for CaptureBody {
+        fn respond(&self, request: &wiremock::Request) -> wiremock::ResponseTemplate {
+            *self.0.lock() = request.body.clone();
+            wiremock::ResponseTemplate::new(200).set_body_string(CHAT_OK_BODY)
+        }
+    }
+
+    async fn wait_finished_log(state: &AppState, id: i64) -> crate::model::RequestLog {
+        for _ in 0..100 {
+            if let Some(row) = op::log::get_request_log(state, id).await.unwrap()
+                && row.status != crate::model::request_status::RUNNING
+            {
+                return row;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        panic!("日志未在期限内完成回写");
+    }
+
+    /// 记录开关关闭时：request_body / response_body / rounds_detail 中的报文体一律落库为空，
+    /// 但转发给上游的载荷保持完整（开关只影响日志，不影响转发）。
+    #[tokio::test]
+    async fn body_recording_switches_off_leave_bodies_empty() {
+        let (state, db_path) = test_support::setup_test_state("relay_body_off").await;
+        op::setting::set_setting_string(&state, crate::op::log::LOG_REQUEST_BODY_ENABLED_KEY, "0")
+            .await
+            .unwrap();
+        op::setting::set_setting_string(&state, crate::op::log::LOG_RESPONSE_BODY_ENABLED_KEY, "0")
+            .await
+            .unwrap();
+
+        let server = wiremock::MockServer::start().await;
+        let captured: std::sync::Arc<parking_lot::Mutex<Vec<u8>>> = Default::default();
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .respond_with(CaptureBody(captured.clone()))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let model = add_channel(&state, "ch", &server.uri(), "k1", "m-bodyoff").await;
+        let mut group = crate::model::Group {
+            name: "m-bodyoff".into(),
+            mode: crate::model::GroupMode::Failover,
+            items: vec![crate::model::GroupItem {
+                channel_model_id: model.id,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        op::group::create_group(&state, &mut group).await.unwrap();
+
+        let content = "x".repeat(200 * 1024);
+        let req_body = json!({
+            "model": "m-bodyoff",
+            "messages": [{ "role": "user", "content": content }]
+        });
+        let resp = forward_relay(
+            state.clone(),
+            test_auth(),
+            ApiFormat::OpenaiCompletion,
+            None,
+            Uri::from_static("/v1/chat/completions"),
+            HeaderMap::new(),
+            Bytes::from(req_body.to_string()),
+        )
+        .await;
+        assert_eq!(resp.status(), 200);
+        server.verify().await;
+
+        // 上游必须收到完整未截断的载荷
+        let upstream: serde_json::Value = serde_json::from_slice(&captured.lock()).unwrap();
+        assert_eq!(upstream["messages"][0]["content"].as_str().unwrap().len(), 200 * 1024);
+
+        let log = wait_finished_log(&state, 1).await;
+        assert_eq!(log.request_body, "");
+        assert_eq!(log.response_body, "");
+        let rounds: Vec<crate::model::RoundLog> = serde_json::from_str(&log.rounds_detail).unwrap();
+        assert_eq!(rounds.len(), 1);
+        assert_eq!(rounds[0].request_body, "");
+        assert_eq!(rounds[0].response_body, "");
+        let _ = std::fs::remove_file(db_path);
+    }
+
+    /// 记录开关默认开启：报文体必须完整落库，不做任何截断。
+    #[tokio::test]
+    async fn body_recording_defaults_store_full_bodies() {
+        let (state, db_path) = test_support::setup_test_state("relay_body_on").await;
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .respond_with(wiremock::ResponseTemplate::new(200).set_body_string(CHAT_OK_BODY))
+            .mount(&server)
+            .await;
+
+        let model = add_channel(&state, "ch", &server.uri(), "k1", "m-bodyon").await;
+        let mut group = crate::model::Group {
+            name: "m-bodyon".into(),
+            mode: crate::model::GroupMode::Failover,
+            items: vec![crate::model::GroupItem {
+                channel_model_id: model.id,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        op::group::create_group(&state, &mut group).await.unwrap();
+
+        let content = "y".repeat(200 * 1024);
+        let req_body = json!({
+            "model": "m-bodyon",
+            "messages": [{ "role": "user", "content": content.clone() }]
+        });
+        let raw = req_body.to_string();
+        let resp = forward_relay(
+            state.clone(),
+            test_auth(),
+            ApiFormat::OpenaiCompletion,
+            None,
+            Uri::from_static("/v1/chat/completions"),
+            HeaderMap::new(),
+            Bytes::from(raw.clone()),
+        )
+        .await;
+        assert_eq!(resp.status(), 200);
+
+        let log = wait_finished_log(&state, 1).await;
+        assert_eq!(log.request_body, raw);
+        let rounds: Vec<crate::model::RoundLog> = serde_json::from_str(&log.rounds_detail).unwrap();
+        assert!(rounds[0].request_body.contains(&content));
+        assert!(rounds[0].request_body.len() >= content.len());
+        let _ = std::fs::remove_file(db_path);
+    }
 
     async fn add_channel(
         state: &AppState,

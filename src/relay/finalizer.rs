@@ -171,7 +171,7 @@ impl<S> StreamFinalizer<S> {
         req_log.cost = cost;
         req_log.wait_time = elapsed_ms;
         req_log.error = error_opt;
-        req_log.rounds_detail = serde_json::to_string(&all_rounds).unwrap_or_default();
+        req_log.rounds_detail = log::serialize_rounds_detail(&self.state, &all_rounds);
 
         let overview = RequestOverview::from(&req_log);
         self.state.in_flight.broadcast(overview);

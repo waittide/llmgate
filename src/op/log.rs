@@ -4,6 +4,8 @@ use sqlx::QueryBuilder;
 use crate::{model::RequestLog, op::AppState};
 
 pub const LOG_RETENTION_DAYS_KEY: &str = "log_retention_days";
+pub const LOG_REQUEST_BODY_ENABLED_KEY: &str = "log_request_body_enabled";
+pub const LOG_RESPONSE_BODY_ENABLED_KEY: &str = "log_response_body_enabled";
 const DEFAULT_RETENTION_DAYS: i64 = 7;
 
 /// 获取配置的日志保留天数（默认 7 天）。
@@ -14,6 +16,49 @@ pub fn get_log_retention_days(state: &AppState) -> i64 {
         .and_then(|e| e.value().parse::<i64>().ok())
         .filter(|v| *v > 0)
         .unwrap_or(DEFAULT_RETENTION_DAYS)
+}
+
+/// 报文体记录开关："0" 表示关闭（落库为空串），缺省或其他值视为开启。
+fn body_recording_enabled(state: &AppState, key: &str) -> bool {
+    state
+        .settings
+        .get(key)
+        .map(|e| e.value() != "0")
+        .unwrap_or(true)
+}
+
+/// 是否把请求体写入日志（settings: log_request_body_enabled，默认开启）。
+pub fn is_log_request_body(state: &AppState) -> bool {
+    body_recording_enabled(state, LOG_REQUEST_BODY_ENABLED_KEY)
+}
+
+/// 是否把响应体写入日志（settings: log_response_body_enabled，默认开启）。
+pub fn is_log_response_body(state: &AppState) -> bool {
+    body_recording_enabled(state, LOG_RESPONSE_BODY_ENABLED_KEY)
+}
+
+/// 序列化轮次明细；记录开关关闭时同步清空对应报文体，
+/// 避免关闭后报文体仍经 rounds_detail（每轮各一份）落库。
+pub fn serialize_rounds_detail(state: &AppState, rounds: &[crate::model::RoundLog]) -> String {
+    let request_on = is_log_request_body(state);
+    let response_on = is_log_response_body(state);
+    if request_on && response_on {
+        return serde_json::to_string(rounds).unwrap_or_default();
+    }
+    let sanitized: Vec<crate::model::RoundLog> = rounds
+        .iter()
+        .map(|r| {
+            let mut r = r.clone();
+            if !request_on {
+                r.request_body.clear();
+            }
+            if !response_on {
+                r.response_body.clear();
+            }
+            r
+        })
+        .collect();
+    serde_json::to_string(&sanitized).unwrap_or_default()
 }
 
 /// 在请求到达时立即向数据库插入一条 `running` 状态的初始请求日志，
@@ -36,7 +81,7 @@ pub async fn create_initial_log(
     .bind(model)
     .bind(request_url)
     .bind(request_headers)
-    .bind(request_body)
+    .bind(if is_log_request_body(state) { request_body } else { "" })
     .bind(created_at)
     .execute(&state.db)
     .await?;
@@ -72,7 +117,11 @@ pub async fn update_completed_log(state: &AppState, log: &RequestLog) -> Result<
     .bind(&log.target_model)
     .bind(&log.response_url)
     .bind(&log.response_headers)
-    .bind(&log.response_body)
+    .bind(if is_log_response_body(state) {
+        log.response_body.as_str()
+    } else {
+        ""
+    })
     .bind(log.prompt_tokens)
     .bind(log.completion_tokens)
     .bind(log.total_tokens)
@@ -117,8 +166,6 @@ pub async fn get_recent_logs(state: &AppState, limit: i64) -> Result<Vec<Request
 }
 
 /// 删除早于配置保留期限的过期数据，返回清理的请求日志行数。
-/// 覆盖 request_logs（按 created_at 毫秒）与统计明细 stats_dailies / stats_hourlies
-/// （date 为 %Y%m%d 字符串，字典序即时间序）；stats_totals 与 stats_api_keys 为累计聚合，不清理。
 pub async fn purge_expired_logs(state: &AppState) -> Result<i64> {
     let days = get_log_retention_days(state);
     let cutoff_ms = chrono::Utc::now().timestamp_millis() - days * 86400 * 1000;
@@ -153,7 +200,8 @@ pub async fn purge_expired_logs(state: &AppState) -> Result<i64> {
 
 /// 清空数据库中的所有请求日志。
 /// 大表逐行 DELETE 会形成长事务(实测 20s+)阻塞全部写入并拖慢停机;
-/// 直接重建表结构瞬间完成,页空间归还给后续日志复用。
+/// 直接重建表结构瞬间完成;随后 VACUUM 把归还给 freelist 的页真正收缩成文件,
+/// 否则清空后 data.db 仍停留在历史高水位(实测曾积压 2.5GB)。
 pub async fn clear_all_logs(state: &AppState) -> Result<i64> {
     let count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM request_logs")
         .fetch_one(&state.db)
@@ -162,6 +210,13 @@ pub async fn clear_all_logs(state: &AppState) -> Result<i64> {
         .execute(&state.db)
         .await?;
     crate::db::recreate_request_logs_table(&state.db).await?;
+    // DROP/recreate 只把页归还 freelist，文件不收缩；VACUUM 重建镜像，但 WAL 模式下
+    // 重建结果先进 WAL，主文件要等 checkpoint 才真正截断——故随后强制 checkpoint。
+    // 此刻表刚清空、存活页极少，整个序列瞬间完成。
+    sqlx::query("VACUUM").execute(&state.db).await?;
+    sqlx::query("PRAGMA wal_checkpoint(TRUNCATE)")
+        .execute(&state.db)
+        .await?;
     Ok(count.0)
 }
 
@@ -274,30 +329,50 @@ mod tests {
     }
 
     /// 清空日志必须瞬间完成(重建表而非逐行 DELETE),且重建后表可继续正常写入读取。
+    /// 同时验证磁盘收缩契约:清空后 VACUUM 必须把文件还给磁盘,不能停留在高水位
+    /// (回归:清空 2.5GB 库后文件曾依旧占盘 2.5GB)。
     #[tokio::test]
     async fn test_clear_all_logs_rebuilds_table_and_keeps_it_usable() {
-        let (state, _path) = setup_test_state("log_clear").await;
+        let (state, path) = setup_test_state("log_clear").await;
+        let big_body = "x".repeat(1024 * 1024);
+        for i in 0..5 {
+            create_initial_log(&state, "m", "/v1/chat/completions", "{}", &big_body, 1700000000000 + i)
+                .await
+                .unwrap();
+        }
+        // 把 WAL 内容压实进主库文件，使 before 尺寸反映真实数据量
+        let _: (i64, i64, i64) = sqlx::query_as("PRAGMA wal_checkpoint(TRUNCATE)")
+            .fetch_one(&state.db)
+            .await
+            .unwrap();
+        let size_before = std::fs::metadata(&path).unwrap().len();
+        assert!(size_before > 3 * 1024 * 1024, "前置数据应已写入主文件: {size_before}");
+
         for i in 0..3 {
-            create_initial_log(
+            let _ = create_initial_log(
                 &state,
                 "m",
                 "/v1/chat/completions",
                 "{}",
                 &format!("body-{i}"),
-                1700000000000 + i,
+                1700000100000 + i,
             )
             .await
             .unwrap();
         }
-
         let cleared = clear_all_logs(&state).await.unwrap();
-        assert_eq!(cleared, 3);
+        assert_eq!(cleared, 8);
         let count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM request_logs")
             .fetch_one(&state.db)
             .await
             .unwrap();
         assert_eq!(count.0, 0);
 
+        let size_after = std::fs::metadata(&path).unwrap().len();
+        assert!(
+            size_after * 10 < size_before,
+            "清空后必须收缩文件: before={size_before} after={size_after}"
+        );
         // 重建后的表可继续正常写入与读取
         let id = create_initial_log(&state, "m2", "/v1/chat/completions", "{}", "after-clear", 1700000100000)
             .await

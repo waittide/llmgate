@@ -20,7 +20,14 @@ pub async fn init_db(db_path: &Path) -> Result<DbPool> {
         .journal_mode(SqliteJournalMode::Wal)
         .synchronous(SqliteSynchronous::Normal)
         .busy_timeout(Duration::from_secs(10))
-        .foreign_keys(true);
+        .foreign_keys(true)
+        // 大报文日志场景调优：默认 auto-checkpoint 阈值（1000 页）下，MB 级 body 写入
+        // 几次就会触发 checkpoint——checkpoint 是对主库文件的随机覆写 + fsync，在
+        // CoW 文件系统（btrfs）上写放大明显，表现为 INSERT/UPDATE 偶发秒级卡顿。
+        // 放宽阈值摊平触发频率；加大页缓存并用 mmap 读，减少列表/SSE 概览冷读。
+        .pragma("wal_autocheckpoint", "4000")
+        .pragma("cache_size", "-16000")
+        .pragma("mmap_size", "268435456");
 
     // WAL 模式下同一时刻仅允许单个写入者；过多连接只会在写路径上互相
     // 争用 DB 锁（触发 busy_timeout 超时）。收敛到 8：足够并发读，写争用可控。
@@ -84,6 +91,8 @@ pub async fn migrate(pool: &DbPool) -> Result<()> {
         ("model_info_update_interval", "24"),
         ("sync_model_interval", "24"),
         ("log_retention_days", "7"),
+        ("log_request_body_enabled", "1"),
+        ("log_response_body_enabled", "1"),
     ];
     for (k, v) in default_settings {
         sqlx::query("INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)")
