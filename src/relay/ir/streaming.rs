@@ -1491,53 +1491,69 @@ where
     }
 }
 
+/// 上游格式 → 事件解析器。
+fn parser_for(format: ApiFormat) -> DynParser {
+    match format {
+        ApiFormat::OpenaiCompletion => DynParser::Chat(ChatEventParser::default()),
+        ApiFormat::OpenaiResponse => DynParser::Responses(ResponsesEventParser::default()),
+        ApiFormat::AnthropicMessage => DynParser::Anthropic(AnthropicEventParser::default()),
+        ApiFormat::GeminiGenerate => DynParser::Gemini(GeminiEventParser::default()),
+    }
+}
+
+/// 客户端格式 → 事件发射器。
+fn sink_for(format: ApiFormat, model: String) -> DynSink {
+    match format {
+        ApiFormat::OpenaiCompletion => DynSink::Chat(ChatChunkSink::new(model)),
+        ApiFormat::OpenaiResponse => DynSink::Responses(ResponsesSink::new(model)),
+        ApiFormat::AnthropicMessage => DynSink::Anthropic(AnthropicSink::new(model)),
+        ApiFormat::GeminiGenerate => DynSink::Gemini(GeminiSink::new(model)),
+    }
+}
+
 /// 按上游格式构造 parser，按客户端格式构造 sink。
+///
+/// 同格式必须由调用方直通：经 IR 往返会重写 chunk 的 id 与字段形状，与直通不等价。
 pub fn translate<S>(
     inner: S,
-    upstream: crate::relay::protocol::ApiFormat,
-    client: crate::relay::protocol::ApiFormat,
+    upstream: ApiFormat,
+    client: ApiFormat,
     model: String,
 ) -> Pin<Box<dyn Stream<Item = Result<Bytes, std::io::Error>> + Send>>
 where
     S: Stream<Item = Result<Bytes, std::io::Error>> + Send + Unpin + 'static,
 {
-    use crate::relay::protocol::ApiFormat;
-    match (upstream, client) {
-        (ApiFormat::OpenaiCompletion, _) => {
-            let sink = match client {
-                ApiFormat::OpenaiResponse => DynSink::Responses(ResponsesSink::new(model)),
-                ApiFormat::AnthropicMessage => DynSink::Anthropic(AnthropicSink::new(model)),
-                ApiFormat::GeminiGenerate => DynSink::Gemini(GeminiSink::new(model)),
-                _ => unreachable!("同格式直通不进入翻译泵"),
-            };
-            Box::pin(StreamTranslate::new(inner, ChatEventParser::default(), sink))
+    assert_ne!(upstream, client, "同格式响应应直通，不得进入翻译泵");
+    Box::pin(StreamTranslate::new(
+        inner,
+        parser_for(upstream),
+        sink_for(client, model),
+    ))
+}
+
+enum DynParser {
+    Chat(ChatEventParser),
+    Responses(ResponsesEventParser),
+    Anthropic(AnthropicEventParser),
+    Gemini(GeminiEventParser),
+}
+
+impl EventParser for DynParser {
+    fn parse(&mut self, event: &str) -> Vec<StreamEvent> {
+        match self {
+            DynParser::Chat(p) => p.parse(event),
+            DynParser::Responses(p) => p.parse(event),
+            DynParser::Anthropic(p) => p.parse(event),
+            DynParser::Gemini(p) => p.parse(event),
         }
-        (ApiFormat::OpenaiResponse, _) => {
-            let sink = match client {
-                ApiFormat::OpenaiCompletion => DynSink::Chat(ChatChunkSink::new(model)),
-                ApiFormat::AnthropicMessage => DynSink::Anthropic(AnthropicSink::new(model)),
-                ApiFormat::GeminiGenerate => DynSink::Gemini(GeminiSink::new(model)),
-                _ => unreachable!("同格式直通不进入翻译泵"),
-            };
-            Box::pin(StreamTranslate::new(inner, ResponsesEventParser::default(), sink))
-        }
-        (ApiFormat::AnthropicMessage, _) => {
-            let sink = match client {
-                ApiFormat::OpenaiCompletion => DynSink::Chat(ChatChunkSink::new(model)),
-                ApiFormat::OpenaiResponse => DynSink::Responses(ResponsesSink::new(model)),
-                ApiFormat::GeminiGenerate => DynSink::Gemini(GeminiSink::new(model)),
-                _ => unreachable!("同格式直通不进入翻译泵"),
-            };
-            Box::pin(StreamTranslate::new(inner, AnthropicEventParser::default(), sink))
-        }
-        (ApiFormat::GeminiGenerate, _) => {
-            let sink = match client {
-                ApiFormat::OpenaiCompletion => DynSink::Chat(ChatChunkSink::new(model)),
-                ApiFormat::OpenaiResponse => DynSink::Responses(ResponsesSink::new(model)),
-                ApiFormat::AnthropicMessage => DynSink::Anthropic(AnthropicSink::new(model)),
-                _ => unreachable!("同格式直通不进入翻译泵"),
-            };
-            Box::pin(StreamTranslate::new(inner, GeminiEventParser::default(), sink))
+    }
+
+    fn finished(&self) -> bool {
+        match self {
+            DynParser::Chat(p) => p.finished(),
+            DynParser::Responses(p) => p.finished(),
+            DynParser::Anthropic(p) => p.finished(),
+            DynParser::Gemini(p) => p.finished(),
         }
     }
 }
