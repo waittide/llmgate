@@ -219,6 +219,78 @@ pub fn responses_status(reason: &StopReason) -> (&'static str, Value) {
     }
 }
 
+/// IR 用量 → 各协议的 usage 对象。
+///
+/// 单一来源：流式 sink 与非流式 emitter 必须写出同一形状，否则同一次上游结果
+/// 在两条路径下对客户端的字段口径会不一致。
+/// 缓存明细在各协议里的位置不同，且 Anthropic 的口径与 IR 相反（见 `anthropic_usage`）。
+fn total_or_sum(usage: &Usage) -> i64 {
+    if usage.total_tokens > 0 {
+        usage.total_tokens
+    } else {
+        usage.prompt_tokens + usage.completion_tokens
+    }
+}
+
+/// Chat / Responses 共用的 OpenAI 风格缓存明细字段名。
+pub fn chat_usage(usage: &Usage) -> Value {
+    let mut value = json!({
+        "prompt_tokens": usage.prompt_tokens,
+        "completion_tokens": usage.completion_tokens,
+        "total_tokens": total_or_sum(usage)
+    });
+    if usage.cache_read_tokens > 0 {
+        value["prompt_tokens_details"] = json!({ "cached_tokens": usage.cache_read_tokens });
+    }
+    value
+}
+
+pub fn responses_usage(usage: &Usage) -> Value {
+    let mut value = json!({
+        "input_tokens": usage.prompt_tokens,
+        "output_tokens": usage.completion_tokens,
+        "total_tokens": total_or_sum(usage)
+    });
+    if usage.cache_read_tokens > 0 {
+        value["input_tokens_details"] = json!({ "cached_tokens": usage.cache_read_tokens });
+    }
+    value
+}
+
+/// Anthropic 的 usage。
+///
+/// 口径差异：IR 的 `prompt_tokens` 是含缓存的**总**输入（OpenAI 语义），而 Anthropic 的
+/// `input_tokens` **不含**缓存部分。原样透出会让客户端把缓存量重复计入，故此处拆分，
+/// 并把两部分单列——客户端自行相加即得总输入，计费侧也按同一口径还原。
+pub fn anthropic_usage(usage: &Usage) -> Value {
+    let total = usage.prompt_tokens.max(0);
+    let cache_read = usage.cache_read_tokens.max(0).min(total);
+    let cache_write = usage.cache_write_tokens.max(0).min(total - cache_read);
+    let mut value = json!({
+        "input_tokens": total - cache_read - cache_write,
+        "output_tokens": usage.completion_tokens
+    });
+    if cache_read > 0 {
+        value["cache_read_input_tokens"] = json!(cache_read);
+    }
+    if cache_write > 0 {
+        value["cache_creation_input_tokens"] = json!(cache_write);
+    }
+    value
+}
+
+pub fn gemini_usage(usage: &Usage) -> Value {
+    let mut value = json!({
+        "promptTokenCount": usage.prompt_tokens,
+        "candidatesTokenCount": usage.completion_tokens,
+        "totalTokenCount": total_or_sum(usage)
+    });
+    if usage.cache_read_tokens > 0 {
+        value["cachedContentTokenCount"] = json!(usage.cache_read_tokens);
+    }
+    value
+}
+
 /// Gemini functionCall 的确定性调用 ID：同一调用跨 chunk 重复下发时幂等。
 pub fn gemini_call_id(name: &str, arguments_json: &str) -> String {
     use std::hash::{Hash, Hasher};

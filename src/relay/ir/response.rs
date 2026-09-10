@@ -3,8 +3,9 @@
 use serde_json::{Value, json};
 
 use super::{
-    ContentPart, RelayResponse, StopReason, anthropic_stop_reason, chat_finish_reason, gemini_call_id,
-    gemini_finish_reason, responses_status, stop_reason_from_anthropic, stop_reason_from_chat, stop_reason_from_gemini,
+    ContentPart, RelayResponse, StopReason, anthropic_stop_reason, anthropic_usage, chat_finish_reason, chat_usage,
+    gemini_call_id, gemini_finish_reason, gemini_usage, responses_status, responses_usage, stop_reason_from_anthropic,
+    stop_reason_from_chat, stop_reason_from_gemini,
 };
 use crate::relay::{protocol::extract_usage_from_json, state::Usage};
 
@@ -254,15 +255,7 @@ pub(super) fn emit_chat(resp: &RelayResponse) -> Value {
         "created": chrono::Utc::now().timestamp(),
         "model": resp.model,
         "choices": [{ "index": 0, "message": message, "finish_reason": finish_reason }],
-        "usage": {
-            "prompt_tokens": usage.prompt_tokens,
-            "completion_tokens": usage.completion_tokens,
-            "total_tokens": if usage.total_tokens > 0 {
-                usage.total_tokens
-            } else {
-                usage.prompt_tokens + usage.completion_tokens
-            }
-        }
+        "usage": chat_usage(usage)
     })
 }
 
@@ -312,15 +305,7 @@ pub(super) fn emit_responses(resp: &RelayResponse) -> Value {
         "output": output,
         "error": null,
         "incomplete_details": incomplete_details,
-        "usage": {
-            "input_tokens": usage.prompt_tokens,
-            "output_tokens": usage.completion_tokens,
-            "total_tokens": if usage.total_tokens > 0 {
-                usage.total_tokens
-            } else {
-                usage.prompt_tokens + usage.completion_tokens
-            }
-        }
+        "usage": responses_usage(usage)
     })
 }
 
@@ -369,7 +354,7 @@ pub(super) fn emit_anthropic(resp: &RelayResponse) -> Value {
         "content": content,
         "stop_reason": stop_reason,
         "stop_sequence": null,
-        "usage": { "input_tokens": usage.prompt_tokens, "output_tokens": usage.completion_tokens }
+        "usage": anthropic_usage(usage)
     })
 }
 
@@ -399,15 +384,7 @@ pub(super) fn emit_gemini(resp: &RelayResponse) -> Value {
             "content": { "role": "model", "parts": parts },
             "finishReason": finish_reason
         }],
-        "usageMetadata": {
-            "promptTokenCount": usage.prompt_tokens,
-            "candidatesTokenCount": usage.completion_tokens,
-            "totalTokenCount": if usage.total_tokens > 0 {
-                usage.total_tokens
-            } else {
-                usage.prompt_tokens + usage.completion_tokens
-            }
-        },
+        "usageMetadata": gemini_usage(usage),
         "modelVersion": resp.model
     })
 }
@@ -750,5 +727,66 @@ mod tests {
         assert_eq!(response.get("type").unwrap(), "message");
         assert_eq!(response.pointer("/content/0/text").unwrap(), "Hello");
         assert_eq!(response.get("stop_reason").unwrap(), "end_turn");
+    }
+
+    #[test]
+    fn cache_usage_round_trips_between_protocols() {
+        // Anthropic → Chat：缓存明细落到 prompt_tokens_details
+        let anthropic = json!({
+            "model": "claude-3-5-sonnet",
+            "stop_reason": "end_turn",
+            "content": [{ "type": "text", "text": "ok" }],
+            "usage": {
+                "input_tokens": 20,
+                "cache_read_input_tokens": 80,
+                "cache_creation_input_tokens": 10,
+                "output_tokens": 5
+            }
+        });
+        let chat = convert(
+            ApiFormat::AnthropicMessage,
+            &anthropic,
+            ApiFormat::OpenaiCompletion,
+            "m",
+        );
+        assert_eq!(chat.pointer("/usage/prompt_tokens").unwrap(), 110);
+        assert_eq!(
+            chat.pointer("/usage/prompt_tokens_details/cached_tokens")
+                .unwrap(),
+            80
+        );
+
+        // Chat → Anthropic：input_tokens 拆出未命中部分，缓存单列（相加即总输入）
+        let anthropic = convert(ApiFormat::OpenaiCompletion, &chat, ApiFormat::AnthropicMessage, "m");
+        assert_eq!(anthropic.pointer("/usage/input_tokens").unwrap(), 30);
+        assert_eq!(anthropic.pointer("/usage/cache_read_input_tokens").unwrap(), 80);
+        assert_eq!(anthropic.pointer("/usage/output_tokens").unwrap(), 5);
+    }
+
+    #[test]
+    fn responses_cache_usage_uses_input_details() {
+        let chat = json!({
+            "choices": [{ "message": { "content": "ok" }, "finish_reason": "stop" }],
+            "usage": {
+                "prompt_tokens": 50,
+                "completion_tokens": 4,
+                "total_tokens": 54,
+                "prompt_tokens_details": { "cached_tokens": 30 }
+            }
+        });
+        let responses = convert(ApiFormat::OpenaiCompletion, &chat, ApiFormat::OpenaiResponse, "m");
+        assert_eq!(
+            responses
+                .pointer("/usage/input_tokens_details/cached_tokens")
+                .unwrap(),
+            30
+        );
+        // 回读：Responses 的 cached_tokens 必须被用量提取识别（否则计费丢折扣）
+        assert_eq!(
+            crate::relay::protocol::extract_usage_from_json(&responses)
+                .unwrap()
+                .cache_read_tokens,
+            30
+        );
     }
 }

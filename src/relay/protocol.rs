@@ -145,6 +145,7 @@ pub fn extract_usage_from_json(val: &Value) -> Option<Usage> {
         let cache_read_tokens = usage_obj
             .get("cache_read_input_tokens")
             .or_else(|| usage_obj.pointer("/prompt_tokens_details/cached_tokens"))
+            .or_else(|| usage_obj.pointer("/input_tokens_details/cached_tokens"))
             .or_else(|| usage_obj.get("cachedContentTokenCount"))
             .and_then(|v| v.as_i64())
             .unwrap_or(0);

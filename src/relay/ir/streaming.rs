@@ -15,8 +15,9 @@ use futures::Stream;
 use serde_json::{Value, json};
 
 use super::{
-    StopReason, anthropic_stop_reason, chat_finish_reason, gemini_call_id, gemini_finish_reason, responses_status,
-    stop_reason_from_anthropic, stop_reason_from_chat, stop_reason_from_gemini,
+    StopReason, anthropic_stop_reason, anthropic_usage, chat_finish_reason, chat_usage, gemini_call_id,
+    gemini_finish_reason, gemini_usage, responses_status, responses_usage, stop_reason_from_anthropic,
+    stop_reason_from_chat, stop_reason_from_gemini,
 };
 use crate::relay::{
     SseBuffer, parse_sse_event,
@@ -563,11 +564,7 @@ impl ChatChunkSink {
             "choices": [{ "index": 0, "delta": {}, "finish_reason": finish_reason }]
         });
         if let Some(usage) = &self.usage {
-            chunk["usage"] = json!({
-                "prompt_tokens": usage.prompt_tokens,
-                "completion_tokens": usage.completion_tokens,
-                "total_tokens": usage.total_tokens
-            });
+            chunk["usage"] = chat_usage(usage);
         }
         vec![chunk_bytes(&chunk), Bytes::from_static(b"data: [DONE]\n\n")]
     }
@@ -893,11 +890,7 @@ impl ResponsesSink {
             output.push(item);
         }
 
-        let (input_tokens, output_tokens, total_tokens) = self
-            .usage
-            .as_ref()
-            .map(|u| (u.prompt_tokens, u.completion_tokens, u.total_tokens))
-            .unwrap_or((0, 0, 0));
+        let usage = self.usage.clone().unwrap_or_default();
         let (status, incomplete_details) = responses_status(reason);
         self.push_event(
             if status == "incomplete" {
@@ -916,11 +909,7 @@ impl ResponsesSink {
                     "output": output,
                     "error": null,
                     "incomplete_details": incomplete_details,
-                    "usage": {
-                        "input_tokens": input_tokens,
-                        "output_tokens": output_tokens,
-                        "total_tokens": total_tokens
-                    }
+                    "usage": responses_usage(&usage)
                 }
             }),
         );
@@ -1132,16 +1121,12 @@ impl AnthropicSink {
         }
         let stop_reason = anthropic_stop_reason(reason, !self.tools.is_empty());
         // message_start 里的 input_tokens 恒为 0（构造时尚未知）；在此补发真实值
-        let (input_tokens, output_tokens) = self
-            .usage
-            .as_ref()
-            .map(|u| (u.prompt_tokens, u.completion_tokens))
-            .unwrap_or((0, 0));
+        let usage = self.usage.clone().unwrap_or_default();
         self.push(
             "message_delta",
             json!({
                 "delta": { "stop_reason": stop_reason, "stop_sequence": null },
-                "usage": { "input_tokens": input_tokens, "output_tokens": output_tokens }
+                "usage": anthropic_usage(&usage)
             }),
         );
         self.push("message_stop", json!({}));
@@ -1282,21 +1267,13 @@ impl GeminiSink {
             let parsed: Value = serde_json::from_str(&call.arguments).unwrap_or_else(|_| json!({}));
             parts.push(json!({ "functionCall": { "name": call.name, "args": parsed } }));
         }
-        let (prompt_tokens, completion_tokens, total_tokens) = self
-            .usage
-            .as_ref()
-            .map(|u| (u.prompt_tokens, u.completion_tokens, u.total_tokens))
-            .unwrap_or((0, 0, 0));
+        let usage = self.usage.clone().unwrap_or_default();
         self.push(json!({
             "candidates": [{
                 "content": { "role": "model", "parts": parts },
                 "finishReason": finish_reason
             }],
-            "usageMetadata": {
-                "promptTokenCount": prompt_tokens,
-                "candidatesTokenCount": completion_tokens,
-                "totalTokenCount": total_tokens
-            }
+            "usageMetadata": gemini_usage(&usage)
         }));
     }
 }
@@ -1968,5 +1945,46 @@ mod tests {
         assert!(out.contains("boom"));
         assert!(!out.contains("response.completed"));
         assert_eq!(error.as_deref(), Some("boom"));
+    }
+
+    /// 跨格式流式的缓存用量必须双向无损：上游 Anthropic 的缓存命中/写入经 Chat 客户端
+    /// 出来仍是 OpenAI 的 cached_tokens，计费才拿得到缓存折扣。
+    #[tokio::test]
+    async fn anthropic_cache_usage_survives_to_chat_client() {
+        let (out, error) = run_checked(
+            ApiFormat::AnthropicMessage,
+            ApiFormat::OpenaiCompletion,
+            vec![
+                "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"m\",\"usage\":{\"input_tokens\":20,\"cache_read_input_tokens\":80,\"cache_creation_input_tokens\":10,\"output_tokens\":0}}}\n\n",
+                "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"ok\"}}\n\n",
+                "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":5}}\n\n",
+                "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
+            ],
+        )
+        .await;
+        assert_eq!(error, None);
+        // 总输入 = 20 + 80 + 10（IR 口径），缓存明细单列
+        assert!(out.contains("\"prompt_tokens\":110"), "{out}");
+        assert!(out.contains("\"cached_tokens\":80"), "{out}");
+        assert!(out.contains("\"completion_tokens\":5"), "{out}");
+    }
+
+    /// 反方向：上游 Chat 的 cached_tokens 转给 Anthropic 客户端时，input_tokens 必须
+    /// 只含未命中缓存的部分，缓存量单列——否则客户端自行相加会重复计入。
+    #[tokio::test]
+    async fn chat_cache_usage_survives_to_anthropic_client() {
+        let (out, error) = run_checked(
+            ApiFormat::OpenaiCompletion,
+            ApiFormat::AnthropicMessage,
+            vec![
+                "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"}}],\"usage\":{\"prompt_tokens\":110,\"completion_tokens\":5,\"total_tokens\":115,\"prompt_tokens_details\":{\"cached_tokens\":80}}}\n\n",
+                "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+            ],
+        )
+        .await;
+        assert_eq!(error, None);
+        assert!(out.contains("\"input_tokens\":30"), "input 只含未命中部分: {out}");
+        assert!(out.contains("\"cache_read_input_tokens\":80"), "{out}");
+        assert!(out.contains("\"output_tokens\":5"), "{out}");
     }
 }
