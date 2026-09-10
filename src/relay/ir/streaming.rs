@@ -14,7 +14,7 @@ use futures::Stream;
 use serde_json::{Value, json};
 
 use super::{
-    StopReason, anthropic_stop_reason, chat_finish_reason, gemini_call_id, gemini_finish_reason,
+    StopReason, anthropic_stop_reason, chat_finish_reason, gemini_call_id, gemini_finish_reason, responses_status,
     stop_reason_from_anthropic, stop_reason_from_chat, stop_reason_from_gemini,
 };
 use crate::relay::{SseBuffer, parse_sse_event, protocol::extract_usage_from_json, state::Usage};
@@ -842,13 +842,13 @@ impl ResponsesSink {
             .as_ref()
             .map(|u| (u.prompt_tokens, u.completion_tokens, u.total_tokens))
             .unwrap_or((0, 0, 0));
-        let (status, incomplete_details) = if *reason == StopReason::Length {
-            ("incomplete", json!({ "reason": "max_output_tokens" }))
-        } else {
-            ("completed", Value::Null)
-        };
+        let (status, incomplete_details) = responses_status(reason);
         self.push_event(
-            "response.completed",
+            if status == "incomplete" {
+                "response.incomplete"
+            } else {
+                "response.completed"
+            },
             json!({
                 "response": {
                     "id": self.response_id,
@@ -1584,6 +1584,24 @@ mod tests {
         assert!(out.contains("event: response.output_text.delta"));
         assert!(out.contains("\"delta\":\"Hello\""));
         assert_eq!(out.matches("event: response.completed").count(), 1);
+    }
+
+    /// 截断的上游流在 Responses 客户端侧必须以 `response.incomplete` 收尾，
+    /// 不能报 `response.completed` 却带着 `status: incomplete`。
+    #[tokio::test]
+    async fn chat_truncated_to_responses_incomplete_event() {
+        let out = run(
+            ApiFormat::OpenaiCompletion,
+            ApiFormat::OpenaiResponse,
+            vec![
+                "data: {\"choices\":[{\"delta\":{\"content\":\"part\"},\"finish_reason\":null}]}\n\n",
+                "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"length\"}]}\n\n",
+            ],
+        )
+        .await;
+        assert!(out.contains("event: response.incomplete"));
+        assert!(out.contains("\"reason\":\"max_output_tokens\""));
+        assert_eq!(out.matches("event: response.completed").count(), 0);
     }
 
     #[tokio::test]

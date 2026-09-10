@@ -4,7 +4,7 @@
 //! 字段卫生由此按能力集中决策——parser 只接收各格式已知字段（未知即剥离），
 //! emitter 按目标支持面决定映射或丢弃，替代散落各转换器的逐份清理逻辑。
 
-use serde_json::Value;
+use serde_json::{Value, json};
 
 pub mod request;
 pub mod response;
@@ -204,6 +204,18 @@ pub fn gemini_finish_reason(reason: &StopReason) -> &'static str {
         StopReason::Length => "MAX_TOKENS",
         StopReason::ContentFilter => "SAFETY",
         _ => "STOP",
+    }
+}
+
+/// `StopReason` → Responses 的 `(status, incomplete_details)`。
+///
+/// 截断与内容过滤都属于未完成：终态事件名与非流式 `status` 由同一份映射决定，
+/// 避免流式报 `response.completed` 却带着 `status: incomplete` 的自相矛盾。
+pub fn responses_status(reason: &StopReason) -> (&'static str, Value) {
+    match reason {
+        StopReason::Length => ("incomplete", json!({ "reason": "max_output_tokens" })),
+        StopReason::ContentFilter => ("incomplete", json!({ "reason": "content_filter" })),
+        _ => ("completed", Value::Null),
     }
 }
 

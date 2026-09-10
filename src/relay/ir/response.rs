@@ -4,7 +4,7 @@ use serde_json::{Value, json};
 
 use super::{
     ContentPart, RelayResponse, StopReason, anthropic_stop_reason, chat_finish_reason, gemini_call_id,
-    gemini_finish_reason, stop_reason_from_anthropic, stop_reason_from_chat, stop_reason_from_gemini,
+    gemini_finish_reason, responses_status, stop_reason_from_anthropic, stop_reason_from_chat, stop_reason_from_gemini,
 };
 use crate::relay::{protocol::extract_usage_from_json, state::Usage};
 
@@ -300,11 +300,7 @@ pub(super) fn emit_responses(resp: &RelayResponse) -> Value {
             _ => {}
         }
     }
-    let (status, incomplete_details) = if resp.stop_reason == StopReason::Length {
-        ("incomplete", json!({ "reason": "max_output_tokens" }))
-    } else {
-        ("completed", Value::Null)
-    };
+    let (status, incomplete_details) = responses_status(&resp.stop_reason);
     let usage = &resp.usage;
     json!({
         "id": format!("resp_{}", nanoid::nanoid!(24)),
@@ -539,6 +535,18 @@ mod tests {
         let resp = convert(ApiFormat::OpenaiCompletion, &chat, ApiFormat::OpenaiResponse, "m");
         assert_eq!(resp.get("status").unwrap(), "incomplete");
         assert_eq!(resp.pointer("/incomplete_details/reason").unwrap(), "max_output_tokens");
+
+        // 内容过滤同属未完成，理由与截断区分开
+        let filtered = json!({
+            "choices": [{
+                "index": 0,
+                "message": { "role": "assistant", "content": "" },
+                "finish_reason": "content_filter"
+            }]
+        });
+        let resp = convert(ApiFormat::OpenaiCompletion, &filtered, ApiFormat::OpenaiResponse, "m");
+        assert_eq!(resp.get("status").unwrap(), "incomplete");
+        assert_eq!(resp.pointer("/incomplete_details/reason").unwrap(), "content_filter");
     }
 
     #[test]
