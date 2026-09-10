@@ -1296,6 +1296,13 @@ where
                 Poll::Ready(Some(Err(error))) => return Poll::Ready(Some(Err(error))),
                 Poll::Ready(None) => {
                     this.finished = true;
+                    // 上游在最后一个事件后直接断流（缺空行）时，残留字节仍是事件，
+                    // 通常是承载 finish 与 usage 的那一个，不能当作空。
+                    if let Some(tail) = this.sse.flush() {
+                        for ev in this.parser.parse(&tail) {
+                            this.pending.extend(this.sink.handle(&ev));
+                        }
+                    }
                     if !this.parser.finished() {
                         let tail = this.sink.handle(&StreamEvent::Finish {
                             reason: StopReason::Stop,
@@ -1413,6 +1420,18 @@ mod tests {
                 out.push_str(&String::from_utf8_lossy(&chunk));
                 out
             })
+    }
+
+    /// 上游最后一个事件没有以空行收尾（EOF 截断）时，不得丢弃该事件里的内容。
+    #[tokio::test]
+    async fn unterminated_trailing_event_is_not_dropped() {
+        let out = run(
+            ApiFormat::OpenaiCompletion,
+            ApiFormat::AnthropicMessage,
+            vec!["data: {\"choices\":[{\"delta\":{\"content\":\"tail\"}}]}"],
+        )
+        .await;
+        assert!(out.contains("tail"));
     }
 
     #[tokio::test]

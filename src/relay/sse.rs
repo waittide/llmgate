@@ -50,6 +50,18 @@ impl SseBuffer {
         self.buf.drain(..end);
         Some(event)
     }
+
+    /// 取出流结束时的残留字节。
+    ///
+    /// 上游在最后一个事件后直接断流（缺空行）时，残留字节仍是一个待解析的事件，
+    /// 丢弃它通常意味着丢掉 finish chunk 与 usage。
+    pub(crate) fn flush(&mut self) -> Option<String> {
+        if !self.buf.iter().any(|byte| !byte.is_ascii_whitespace()) {
+            self.buf.clear();
+            return None;
+        }
+        Some(String::from_utf8_lossy(&std::mem::take(&mut self.buf)).into_owned())
+    }
 }
 
 pub(crate) fn extract_usage_from_sse_buffer(buffer: &mut Vec<u8>, usage: &mut Option<Usage>) {
