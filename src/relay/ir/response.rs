@@ -581,6 +581,39 @@ mod tests {
     }
 
     #[test]
+    fn truncated_tool_call_keeps_max_tokens_stop_reason() {
+        // 截断发生在工具参数只生成了一半时：stop_reason 必须是 max_tokens，
+        // 报 tool_use 会让客户端把残缺 JSON 当作完整调用执行。
+        let chat = json!({
+            "choices": [{
+                "index": 0,
+                "message": { "role": "assistant", "content": null, "tool_calls": [
+                    { "id": "call_1", "type": "function",
+                      "function": { "name": "calc", "arguments": "{\"x\":" } }
+                ]},
+                "finish_reason": "length"
+            }],
+            "usage": { "prompt_tokens": 1, "completion_tokens": 2 }
+        });
+        let anthropic = convert(ApiFormat::OpenaiCompletion, &chat, ApiFormat::AnthropicMessage, "m");
+        assert_eq!(anthropic.pointer("/stop_reason").unwrap(), "max_tokens");
+
+        // 正常结束且有工具调用时仍报 tool_use
+        let done = json!({
+            "choices": [{
+                "index": 0,
+                "message": { "role": "assistant", "content": null, "tool_calls": [
+                    { "id": "call_1", "type": "function",
+                      "function": { "name": "calc", "arguments": "{\"x\":1}" } }
+                ]},
+                "finish_reason": "tool_calls"
+            }]
+        });
+        let anthropic = convert(ApiFormat::OpenaiCompletion, &done, ApiFormat::AnthropicMessage, "m");
+        assert_eq!(anthropic.pointer("/stop_reason").unwrap(), "tool_use");
+    }
+
+    #[test]
     fn anthropic_thinking_to_reasoning_content() {
         let anthropic_resp = json!({
             "id": "msg_t",

@@ -175,9 +175,13 @@ pub fn stop_reason_from_anthropic(reason: Option<&str>) -> StopReason {
     }
 }
 
-/// `StopReason` → Anthropic `stop_reason`；存在工具调用时（`has_tool_calls`）必须报 `tool_use`。
+/// `StopReason` → Anthropic `stop_reason`。
+///
+/// 与 `chat_finish_reason` 同一约定：仅在正常结束时才因存在工具调用改报 `tool_use`。
+/// 截断（`max_tokens`）与内容过滤必须保留原终止原因——否则客户端会把只生成了一半
+/// 参数的 tool_use 当作完整调用执行。
 pub fn anthropic_stop_reason(reason: &StopReason, has_tool_calls: bool) -> &'static str {
-    if has_tool_calls {
+    if *reason == StopReason::Stop && has_tool_calls {
         return "tool_use";
     }
     match reason {
