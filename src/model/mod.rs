@@ -360,6 +360,25 @@ pub struct APIKey {
     pub supported_models: String,
 }
 
+impl APIKey {
+    /// 模型白名单视图：`supported_models` 是逗号分隔的名字，空白项忽略。
+    pub fn supported_models(&self) -> impl Iterator<Item = &str> {
+        self.supported_models
+            .split(',')
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+    }
+
+    /// 该密钥是否可用某个模型；白名单为空表示不限制。
+    ///
+    /// 按需遍历原始字符串：鉴权在每个转发请求上都要做，没必要为此先构造一份
+    /// `Vec<String>`；白名单的解析口径也只此一处。
+    pub fn supports_model(&self, model: &str) -> bool {
+        let mut allowed = self.supported_models().peekable();
+        allowed.peek().is_none() || allowed.any(|name| name == model)
+    }
+}
+
 // ---------------- 系统设置 (Setting) ----------------
 #[derive(Debug, Clone, Default, Serialize, Deserialize, sqlx::FromRow)]
 #[serde(default)]
@@ -536,5 +555,25 @@ mod tests {
         assert_eq!(json_val.get("request_failed").unwrap(), 2);
         assert_eq!(json_val.get("wait_time").unwrap(), 150);
         assert!(json_val.get("metrics").is_none());
+    }
+
+    /// 白名单的判定口径：空白名单不限制；逗号两侧空白忽略；名字须完全匹配。
+    #[test]
+    fn test_api_key_supports_model() {
+        let key = |models: &str| APIKey {
+            supported_models: models.to_string(),
+            ..Default::default()
+        };
+
+        // 空白名单表示不限制
+        assert!(key("").supports_model("gpt-4o"));
+        assert!(key("   ").supports_model("gpt-4o"));
+        assert!(key(" , ,").supports_model("gpt-4o"));
+
+        // 命中与未命中，且忽略列表项两侧空白
+        assert!(key("gpt-4o, claude-3").supports_model("claude-3"));
+        assert!(!key("gpt-4o, claude-3").supports_model("claude-3-opus"));
+        // 模型名不做模糊匹配
+        assert!(!key("gpt-4o").supports_model("gpt-4o-mini"));
     }
 }

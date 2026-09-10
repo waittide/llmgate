@@ -16,7 +16,6 @@ use crate::{
 #[derive(Clone, Debug)]
 pub struct AuthContext {
     pub api_key:             APIKey,
-    pub supported_models:    Vec<String>,
     pub is_anthropic_header: bool,
 }
 
@@ -120,20 +119,8 @@ pub async fn api_key_auth_middleware(State(state): State<AppState>, mut req: Req
         return error(StatusCode::UNAUTHORIZED, "API 密钥已达到费用上限");
     }
 
-    let supported_models: Vec<String> = if api_key_obj.supported_models.trim().is_empty() {
-        Vec::new()
-    } else {
-        api_key_obj
-            .supported_models
-            .split(',')
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
-            .collect()
-    };
-
     let auth_context = AuthContext {
         api_key: api_key_obj,
-        supported_models,
         is_anthropic_header,
     };
 

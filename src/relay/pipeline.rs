@@ -157,7 +157,7 @@ fn validate_relay_request(
         )));
     }
 
-    if !auth_ctx.supported_models.is_empty() && !auth_ctx.supported_models.contains(&metadata.model) {
+    if !auth_ctx.api_key.supports_model(&metadata.model) {
         return Err(Box::new(error(
             StatusCode::UNAUTHORIZED,
             "model not supported by this api key",

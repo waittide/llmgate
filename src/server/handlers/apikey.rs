@@ -40,17 +40,12 @@ pub async fn get_api_key_stats_by_id(
     Extension(auth_ctx): Extension<Arc<AuthContext>>,
 ) -> Response {
     let stats = get_stats_api_key(&state, auth_ctx.api_key.id);
-    let all_models = crate::op::group::list_model_names(&state);
-    let models_str = if auth_ctx.api_key.supported_models.is_empty() {
-        all_models.join(", ")
-    } else {
-        let supported = &auth_ctx.supported_models;
-        all_models
-            .into_iter()
-            .filter(|m| supported.contains(m))
-            .collect::<Vec<_>>()
-            .join(", ")
-    };
+    // 白名单为空时 supports_model 恒真，等价于列出全部模型
+    let models_str = crate::op::group::list_model_names(&state)
+        .into_iter()
+        .filter(|m| auth_ctx.api_key.supports_model(m))
+        .collect::<Vec<_>>()
+        .join(", ");
 
     let mut info = auth_ctx.api_key.clone();
     info.supported_models = models_str;

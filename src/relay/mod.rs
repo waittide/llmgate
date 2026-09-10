@@ -102,7 +102,6 @@ mod tests {
                 max_cost:         0.0,
                 supported_models: String::new(),
             },
-            supported_models:    Vec::new(),
             is_anthropic_header: false,
         })
     }

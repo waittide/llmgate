@@ -66,10 +66,8 @@ pub async fn get_model_list(
     Extension(auth_ctx): Extension<Arc<AuthContext>>,
 ) -> Response {
     let mut models = group::list_model_names(&state);
-
-    if !auth_ctx.supported_models.is_empty() {
-        models.retain(|m| auth_ctx.supported_models.contains(m));
-    }
+    // 空白名单表示不限制；supports_model 已把这一语义收在一处
+    models.retain(|m| auth_ctx.api_key.supports_model(m));
 
     if auth_ctx.is_anthropic_header {
         let now_str = chrono::Utc::now().to_rfc3339();
