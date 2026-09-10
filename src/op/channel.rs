@@ -257,9 +257,8 @@ pub async fn set_channel_enabled(state: &AppState, id: i64, enabled: bool) -> Re
         .execute(&state.db)
         .await?;
 
-    if let Some(mut ch) = state.channels.get_mut(&id) {
-        ch.enabled = enabled;
-    }
+    // 遵守缓存同步约定（op/mod.rs）：全量重载而非逐键修补，避免投影与事实源分歧
+    refresh_channel_cache(state).await?;
     Ok(())
 }
 

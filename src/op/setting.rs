@@ -8,12 +8,11 @@ pub async fn refresh_setting_cache(state: &AppState) -> Result<()> {
         .await?;
 
     // 原子同步内存缓存（与 model 缓存同模式），避免 clear+insert 留出的读取空窗
+    let live: std::collections::HashSet<&str> = settings.iter().map(|s| s.key.as_str()).collect();
     for s in &settings {
         state.settings.insert(s.key.clone(), s.value.clone());
     }
-    state
-        .settings
-        .retain(|k, _| settings.iter().any(|s| &s.key == k));
+    state.settings.retain(|k, _| live.contains(k.as_str()));
     Ok(())
 }
 
