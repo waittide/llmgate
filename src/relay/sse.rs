@@ -1,6 +1,9 @@
 //! SSE 缓冲与解析工具：跨网络分片累积字节、按完整事件切分、提取用量。
 
-use crate::relay::{protocol::extract_usage_from_json, state::Usage};
+use crate::relay::{
+    protocol::extract_usage_from_json,
+    state::{Usage, merge_usage},
+};
 
 pub(crate) const SSE_BUFFER_LIMIT: usize = 64 * 1024; // 64KB 临时 SSE 累加缓冲区上限
 
@@ -78,40 +81,7 @@ pub(crate) fn extract_usage_from_sse_buffer(buffer: &mut Vec<u8>, usage: &mut Op
                         && let Ok(val) = serde_json::from_str::<serde_json::Value>(trimmed)
                         && let Some(u) = extract_usage_from_json(&val)
                     {
-                        // 跨事件合并 Token 计数（例如 Anthropic 的 message_start 提供 input_tokens，
-                        // 而 message_delta 提供 output_tokens）。
-                        let mut merged = match usage {
-                            Some(existing) => Usage {
-                                prompt_tokens:      if existing.prompt_tokens > 0 {
-                                    existing.prompt_tokens
-                                } else {
-                                    u.prompt_tokens
-                                },
-                                completion_tokens:  if existing.completion_tokens > 0 {
-                                    existing.completion_tokens
-                                } else {
-                                    u.completion_tokens
-                                },
-                                total_tokens:       if existing.total_tokens > 0 {
-                                    existing.total_tokens
-                                } else {
-                                    u.total_tokens
-                                },
-                                cache_read_tokens:  if existing.cache_read_tokens > 0 {
-                                    existing.cache_read_tokens
-                                } else {
-                                    u.cache_read_tokens
-                                },
-                                cache_write_tokens: if existing.cache_write_tokens > 0 {
-                                    existing.cache_write_tokens
-                                } else {
-                                    u.cache_write_tokens
-                                },
-                            },
-                            None => u,
-                        };
-                        merged.normalize_total();
-                        *usage = Some(merged);
+                        merge_usage(usage, u);
                     }
                 }
             }

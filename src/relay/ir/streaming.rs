@@ -24,7 +24,7 @@ use crate::relay::{
     error::is_error_envelope,
     parse_sse_event,
     protocol::{ApiFormat, extract_usage_from_json},
-    state::Usage,
+    state::{Usage, merge_usage},
 };
 
 /// 流式事件的中间定义。
@@ -88,42 +88,6 @@ pub trait EventSink {
     fn handle(&mut self, event: &StreamEvent) -> Vec<Bytes>;
     /// 流收尾：对未终止的流补发终态字节（chat 为 finish chunk + [DONE]）
     fn finish(&mut self) -> Vec<Bytes>;
-}
-
-/// 字段级合并用量：非零值优先（例如 Anthropic 的 input/output 分属两个事件）。
-fn merge_usage(existing: &mut Option<Usage>, incoming: Usage) {
-    let mut merged = match existing.take() {
-        Some(old) => Usage {
-            prompt_tokens:      if old.prompt_tokens > 0 {
-                old.prompt_tokens
-            } else {
-                incoming.prompt_tokens
-            },
-            completion_tokens:  if old.completion_tokens > 0 {
-                old.completion_tokens
-            } else {
-                incoming.completion_tokens
-            },
-            total_tokens:       if old.total_tokens > 0 {
-                old.total_tokens
-            } else {
-                incoming.total_tokens
-            },
-            cache_read_tokens:  if old.cache_read_tokens > 0 {
-                old.cache_read_tokens
-            } else {
-                incoming.cache_read_tokens
-            },
-            cache_write_tokens: if old.cache_write_tokens > 0 {
-                old.cache_write_tokens
-            } else {
-                incoming.cache_write_tokens
-            },
-        },
-        None => incoming,
-    };
-    merged.normalize_total();
-    *existing = Some(merged);
 }
 
 // ---------- 上游 Parsers ----------

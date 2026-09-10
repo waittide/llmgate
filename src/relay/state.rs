@@ -37,6 +37,29 @@ pub struct Usage {
 }
 
 impl Usage {
+    /// 分阶段用量合并：非零值优先。
+    ///
+    /// 上游常把一个请求的用量拆在多个事件里（Anthropic 的 message_start 给
+    /// input_tokens、message_delta 给 output_tokens），字段级取非零值再自洽化。
+    pub fn merge(&mut self, incoming: Usage) {
+        if self.prompt_tokens == 0 {
+            self.prompt_tokens = incoming.prompt_tokens;
+        }
+        if self.completion_tokens == 0 {
+            self.completion_tokens = incoming.completion_tokens;
+        }
+        if self.total_tokens == 0 {
+            self.total_tokens = incoming.total_tokens;
+        }
+        if self.cache_read_tokens == 0 {
+            self.cache_read_tokens = incoming.cache_read_tokens;
+        }
+        if self.cache_write_tokens == 0 {
+            self.cache_write_tokens = incoming.cache_write_tokens;
+        }
+        self.normalize_total();
+    }
+
     /// 分阶段用量合并后的自洽化。
     ///
     /// total 小于分项之和，说明它是上一阶段事件的陈旧值（Anthropic 的 input 与 output
@@ -47,6 +70,14 @@ impl Usage {
         if self.total_tokens < sum {
             self.total_tokens = sum;
         }
+    }
+}
+
+/// 把一次事件里读到的用量并入累加槽（首次出现即初始化）。
+pub fn merge_usage(slot: &mut Option<Usage>, incoming: Usage) {
+    match slot {
+        Some(existing) => existing.merge(incoming),
+        None => *slot = Some(incoming),
     }
 }
 
