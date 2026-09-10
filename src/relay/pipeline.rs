@@ -277,7 +277,7 @@ async fn handle_successful_stream(
     // 上游声明成功却返回非 SSE 体（200 + JSON/HTML 错误页、忽略 stream 的完整应答）：
     // 按流处理只会给客户端一个“正常但为空”的流，上游错误被静默吞掉。
     if is_non_sse_content_type(upstream_resp.headers()) {
-        return handle_non_sse_body(state, upstream_resp, ctx).await;
+        return handle_successful_json(state, upstream_resp, ctx).await;
     }
     state.in_flight.broadcast(RequestOverview {
         id: ctx.log_base.id as u64,
@@ -368,30 +368,10 @@ fn is_non_sse_content_type(headers: &HeaderMap) -> bool {
         .is_some_and(|content_type| !content_type.to_ascii_lowercase().contains("event-stream"))
 }
 
-/// 流式请求收到非 SSE 成功响应时的处理。
-///
-/// - 响应体是错误信封或不是 JSON：上游把错误塞进了 200，按网关失败返回（502 + 客户端协议错误体）
-/// - 响应体是合法 JSON 且不带 error：上游忽略了 stream 参数，按完整应答转换后返回
-async fn handle_non_sse_body(state: &AppState, upstream_resp: reqwest::Response, ctx: SuccessContext<'_>) -> Response {
-    let response_headers = serialize_headers(upstream_resp.headers());
-    let raw_bytes = match upstream_resp.bytes().await {
-        Ok(bytes) => bytes,
-        Err(e) => {
-            return upstream_body_failure(state, ctx, response_headers, format!("读取上游响应体失败: {e}"));
-        }
-    };
-    let body = String::from_utf8_lossy(&raw_bytes);
-    // 非 JSON（HTML 错误页、纯文本）同样不是可用应答
-    let is_error = serde_json::from_str::<Value>(&body)
-        .ok()
-        .is_none_or(|value| is_error_envelope(&value));
-    if is_error {
-        return upstream_body_failure(state, ctx, response_headers, body.to_string());
-    }
-    complete_json_response(state, raw_bytes, response_headers, ctx)
-}
-
 /// 读取 `reqwest::Response` 中的完整应答体；读取失败按网关失败收尾。
+///
+/// 流式请求遇到非 SSE 成功响应（上游忽略了 stream 参数）也走这里：
+/// 完整应答的处理与普通非流式请求没有区别。
 async fn handle_successful_json(
     state: &AppState,
     upstream_resp: reqwest::Response,
@@ -438,24 +418,23 @@ fn upstream_body_failure(
 }
 
 /// 转换并按目标格式返回完整（非流式）应答体。
+///
+/// 上游声明成功不等于响应体可用：四种协议的成功应答都是 JSON，因此非 JSON 体
+/// （HTML 错误页、纯文本）与顶层 error 信封一律按网关失败收尾，绝不当作正常应答
+/// 返回——否则客户端拿到 2xx + 无法解析的内容，上游错误被静默吞掉。
 fn complete_json_response(
     state: &AppState,
     raw_bytes: Bytes,
     response_headers: String,
     mut ctx: SuccessContext<'_>,
 ) -> Response {
-    let parsed = serde_json::from_slice::<serde_json::Value>(&raw_bytes).ok();
-    // 上游把错误塞进 200：四种协议的错误体都包在顶层 error 里。跨格式解析会把
-    // `{"error": ...}` 解析成空内容（parse_* 不校验载荷），客户端于是收到
-    // 200 + 空应答、上游错误被静默吞掉，故此处显式判失败。
-    if parsed.as_ref().is_some_and(is_error_envelope) {
-        return upstream_body_failure(
-            state,
-            ctx,
-            response_headers,
-            String::from_utf8_lossy(&raw_bytes).to_string(),
-        );
-    }
+    let parsed = match serde_json::from_slice::<Value>(&raw_bytes) {
+        Ok(value) if !is_error_envelope(&value) => value,
+        _ => {
+            let message = truncate_utf8(&String::from_utf8_lossy(&raw_bytes), RESPONSE_CAPTURE_LIMIT).to_string();
+            return upstream_body_failure(state, ctx, response_headers, message);
+        }
+    };
     // 跨格式：上游格式 → IR → 客户端格式；同格式直通
     let upstream_format = ir::channel_format(&ctx.channel.channel_type);
     let converted = if ctx.format == upstream_format {
@@ -463,10 +442,8 @@ fn complete_json_response(
         // BTreeMap）、改变数值书写形式，且对大响应白白多花一次序列化；用量仍取自 parsed。
         None
     } else {
-        parsed.as_ref().and_then(|val| {
-            let resp = ir::parse_response(upstream_format, val, &ctx.log_base.model)?;
-            Some(ir::emit_response(&resp, ctx.format))
-        })
+        ir::parse_response(upstream_format, &parsed, &ctx.log_base.model)
+            .map(|resp| ir::emit_response(&resp, ctx.format))
     };
     let resp_bytes = if ctx.format == upstream_format {
         raw_bytes
@@ -490,19 +467,15 @@ fn complete_json_response(
     // 入库用截断版本，避免大响应撑爆 request_logs；返回给客户端的 resp_bytes 不受影响
     let resp_str = truncate_utf8(&String::from_utf8_lossy(&resp_bytes), RESPONSE_CAPTURE_LIMIT).to_string();
 
-    let usage = converted
-        .as_ref()
-        .or(parsed.as_ref())
-        .and_then(extract_usage_from_json)
-        .unwrap_or_else(|| {
-            let completion_tokens = estimate_tokens(&resp_str);
-            Usage {
-                prompt_tokens: ctx.prompt_tokens,
-                completion_tokens,
-                total_tokens: ctx.prompt_tokens + completion_tokens,
-                ..Default::default()
-            }
-        });
+    let usage = extract_usage_from_json(converted.as_ref().unwrap_or(&parsed)).unwrap_or_else(|| {
+        let completion_tokens = estimate_tokens(&resp_str);
+        Usage {
+            prompt_tokens: ctx.prompt_tokens,
+            completion_tokens,
+            total_tokens: ctx.prompt_tokens + completion_tokens,
+            ..Default::default()
+        }
+    });
 
     let cost = calculate_cost(
         usage.prompt_tokens,

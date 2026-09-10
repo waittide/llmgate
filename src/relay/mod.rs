@@ -448,6 +448,55 @@ mod tests {
         let _ = std::fs::remove_file(db_path);
     }
 
+    /// 非流式请求遇到 200 + 非 JSON 体（HTML 错误页、纯文本）时，不得当作正常应答
+    /// 透传：四种协议的成功应答都是 JSON，非 JSON 只可能是上游把错误塞进了 200。
+    #[tokio::test]
+    async fn non_stream_non_json_success_body_fails_loudly() {
+        let (state, db_path) = test_support::setup_test_state("relay_nonjson").await;
+        let upstream = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::any())
+            .respond_with(
+                wiremock::ResponseTemplate::new(200).set_body_string("<html><body>502 Bad Gateway</body></html>"),
+            )
+            .mount(&upstream)
+            .await;
+
+        let model = add_channel(&state, "ch-nonjson", &upstream.uri(), "k1", "m-nonjson").await;
+        let mut group = crate::model::Group {
+            name: "m-nonjson".into(),
+            mode: crate::model::GroupMode::Failover,
+            items: vec![crate::model::GroupItem {
+                channel_model_id: model.id,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        op::group::create_group(&state, &mut group).await.unwrap();
+
+        // 同格式（Chat 上游、Chat 客户端）：旧行为会把 HTML 原样当 200 成功透传
+        let resp = forward_relay(
+            state.clone(),
+            test_auth(),
+            ApiFormat::OpenaiCompletion,
+            None,
+            Uri::from_static("/v1/chat/completions"),
+            HeaderMap::new(),
+            chat_body("m-nonjson").await,
+        )
+        .await;
+        assert!(!resp.status().is_success(), "非 JSON 的 200 体不得当成功返回");
+        let bytes = axum::body::to_bytes(resp.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let body = String::from_utf8_lossy(&bytes);
+        assert!(body.contains("Bad Gateway"), "上游原文应作为错误线索透出: {body}");
+
+        let log = wait_finished_log(&state, 1).await;
+        assert_eq!(log.status, crate::model::request_status::FAILED);
+
+        let _ = std::fs::remove_file(db_path);
+    }
+
     #[tokio::test]
     async fn failover_to_next_channel_on_500() {
         let (state, db_path) = test_support::setup_test_state("failover_500").await;
