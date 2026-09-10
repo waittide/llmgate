@@ -3,28 +3,12 @@
 use serde_json::{Value, json};
 
 use super::{
-    ContentPart, RelayResponse, anthropic_stop_reason, anthropic_usage, arguments_json_string, chat_finish_reason,
-    chat_usage, gemini_call_id, gemini_finish_reason, gemini_usage, responses_status, responses_usage,
-    stop_reason_from_anthropic, stop_reason_from_chat, stop_reason_from_gemini, stop_reason_from_responses,
+    ContentPart, RelayResponse, anthropic_stop_reason, anthropic_usage, arguments_from_string, arguments_json_string,
+    as_str, chat_finish_reason, chat_usage, gemini_call_id, gemini_finish_reason, gemini_usage, owned_str,
+    responses_status, responses_usage, stop_reason_from_anthropic, stop_reason_from_chat, stop_reason_from_gemini,
+    stop_reason_from_responses,
 };
 use crate::relay::{protocol::extract_usage_from_json, state::Usage};
-
-fn as_str(v: Option<&Value>) -> Option<&str> {
-    v.and_then(Value::as_str)
-}
-
-fn owned_str(v: Option<&Value>) -> Option<String> {
-    as_str(v).map(str::to_string)
-}
-
-/// 解析 Chat 形态的 arguments（JSON 字符串）为 Value，失败时保留原始字符串。
-fn arguments_from_string(v: Option<&Value>) -> Value {
-    match v {
-        Some(Value::String(s)) => serde_json::from_str(s).unwrap_or_else(|_| Value::String(s.clone())),
-        Some(other) => other.clone(),
-        None => json!({}),
-    }
-}
 
 fn usage_of(val: &Value) -> Usage {
     extract_usage_from_json(val).unwrap_or_default()

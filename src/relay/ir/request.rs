@@ -4,21 +4,12 @@ use std::collections::HashMap;
 
 use serde_json::{Value, json};
 
-use super::{ContentPart, ImageSource, Message, RelayRequest, Role, Sampling, Tool, ToolChoice, arguments_json_string};
+use super::{
+    ContentPart, ImageSource, Message, RelayRequest, Role, Sampling, Tool, ToolChoice, arguments_from_string,
+    arguments_json_string, as_str, non_null, owned_str,
+};
 
 // ---------- 通用小工具 ----------
-
-fn as_str(v: Option<&Value>) -> Option<&str> {
-    v.and_then(Value::as_str)
-}
-
-fn owned_str(v: Option<&Value>) -> Option<String> {
-    as_str(v).map(str::to_string)
-}
-
-fn non_null(v: Option<&Value>) -> Option<Value> {
-    v.filter(|v| !v.is_null()).cloned()
-}
 
 /// Chat/Anthropic 的 stop（字符串或数组）→ IR 停止序列。
 fn parse_stop(v: Option<&Value>) -> Vec<String> {
@@ -51,15 +42,6 @@ fn render_result_string(content: &Value) -> String {
         Value::String(s) => s.clone(),
         Value::Null => String::new(),
         other => serde_json::to_string(other).unwrap_or_default(),
-    }
-}
-
-/// 解析 Chat 形态的 arguments（JSON 字符串）为 Value，失败时保留原始字符串。
-fn arguments_from_string(v: Option<&Value>) -> Value {
-    match v {
-        Some(Value::String(s)) => serde_json::from_str(s).unwrap_or_else(|_| Value::String(s.clone())),
-        Some(other) => other.clone(),
-        None => json!({}),
     }
 }
 

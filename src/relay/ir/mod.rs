@@ -6,13 +6,40 @@
 
 use serde_json::{Value, json};
 
-pub mod request;
-pub mod response;
-pub mod streaming;
 use crate::{
     model::ChannelProvider,
     relay::{protocol::ApiFormat, state::Usage},
 };
+
+pub mod request;
+pub mod response;
+pub mod streaming;
+
+// ---------- 解析期通用小工具 ----------
+// request / response 两个方向的解析边界共用同一组取值约定，定义在此处保证
+// 语义单点：同一字段在两个方向的解释不会各自漂移。
+
+pub(super) fn as_str(v: Option<&Value>) -> Option<&str> {
+    v.and_then(Value::as_str)
+}
+
+pub(super) fn owned_str(v: Option<&Value>) -> Option<String> {
+    as_str(v).map(str::to_string)
+}
+
+/// 去掉 null 的克隆：`null` 与字段缺失同义。
+pub(super) fn non_null(v: Option<&Value>) -> Option<Value> {
+    v.filter(|v| !v.is_null()).cloned()
+}
+
+/// 解析 Chat 形态的 arguments（JSON 字符串）为 Value，失败时保留原始字符串。
+pub(super) fn arguments_from_string(v: Option<&Value>) -> Value {
+    match v {
+        Some(Value::String(s)) => serde_json::from_str(s).unwrap_or_else(|_| Value::String(s.clone())),
+        Some(other) => other.clone(),
+        None => json!({}),
+    }
+}
 
 /// 渠道提供方 ↔ 协议格式的唯一映射。
 pub fn channel_format(provider: &ChannelProvider) -> ApiFormat {
