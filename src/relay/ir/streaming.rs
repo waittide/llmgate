@@ -1373,6 +1373,17 @@ impl<S, P: EventParser, K: EventSink> StreamTranslate<S, P, K> {
             failed: None,
         }
     }
+
+    /// 解析一个 SSE 事件并送入 sink；错误帧登记为待终止原因，
+    /// 使调用方能在交付错误事件后以 Err 结束传输。
+    fn dispatch(&mut self, event: &str) {
+        for ev in self.parser.parse(event) {
+            if let StreamEvent::Error { message } = &ev {
+                self.failed = Some(message.clone());
+            }
+            self.pending.extend(self.sink.handle(&ev));
+        }
+    }
 }
 
 impl<S, P, K> Stream for StreamTranslate<S, P, K>
@@ -1401,12 +1412,7 @@ where
                 Poll::Ready(Some(Ok(bytes))) => {
                     this.sse.feed(&bytes);
                     while let Some(event) = this.sse.next_event() {
-                        for ev in this.parser.parse(&event) {
-                            if let StreamEvent::Error { message } = &ev {
-                                this.failed = Some(message.clone());
-                            }
-                            this.pending.extend(this.sink.handle(&ev));
-                        }
+                        this.dispatch(&event);
                         if this.failed.is_some() {
                             // 上游已报错：其后的事件一律不再处理
                             break;
@@ -1419,18 +1425,20 @@ where
                     // 上游在最后一个事件后直接断流（缺空行）时，残留字节仍是事件，
                     // 通常是承载 finish 与 usage 的那一个，不能当作空。
                     if let Some(tail) = this.sse.flush() {
-                        for ev in this.parser.parse(&tail) {
-                            this.pending.extend(this.sink.handle(&ev));
-                        }
+                        this.dispatch(&tail);
                     }
-                    if !this.parser.finished() {
-                        let tail = this.sink.handle(&StreamEvent::Finish {
-                            reason: StopReason::Stop,
-                        });
+                    // 残留事件本身是错误帧：交给循环顶部先交付错误事件再以 Err 终止，
+                    // 不得再补正常结束（否则客户端把错误当空应答）。
+                    if this.failed.is_none() {
+                        if !this.parser.finished() {
+                            let tail = this.sink.handle(&StreamEvent::Finish {
+                                reason: StopReason::Stop,
+                            });
+                            this.pending.extend(tail);
+                        }
+                        let tail = this.sink.finish();
                         this.pending.extend(tail);
                     }
-                    let tail = this.sink.finish();
-                    this.pending.extend(tail);
                 }
                 Poll::Pending => return Poll::Pending,
             }
@@ -1840,6 +1848,26 @@ mod tests {
         assert!(out.contains("event: response.incomplete"));
         assert!(out.contains("\"reason\":\"max_output_tokens\""));
         assert_eq!(out.matches("event: response.completed").count(), 0);
+    }
+
+    /// 残留（缺空行收尾）的尾部事件若是错误帧，同样必须以 Err 终止传输：
+    /// 否则错误帧作为普通字节交付后，流以正常 EOF 结束，客户端把错误当空应答。
+    #[tokio::test]
+    async fn unterminated_trailing_error_event_terminates_stream() {
+        let (out, error) = run_checked(
+            ApiFormat::OpenaiCompletion,
+            ApiFormat::AnthropicMessage,
+            vec![
+                "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n",
+                "data: {\"error\":{\"message\":\"tail boom\"}}",
+            ],
+        )
+        .await;
+        assert!(out.contains("hi"), "{out}");
+        assert!(out.contains("event: error"), "错误事件必须交付: {out}");
+        assert!(out.contains("tail boom"), "{out}");
+        assert!(!out.contains("message_stop"), "错误流不得补正常结束: {out}");
+        assert_eq!(error.as_deref(), Some("tail boom"));
     }
 
     /// 上游 Responses 流以 `response.incomplete` 收尾时，截断原因必须传到客户端，
