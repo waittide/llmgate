@@ -268,7 +268,16 @@ struct SuccessContext<'a> {
     key_index:        usize,
 }
 
-fn handle_successful_stream(state: &AppState, upstream_resp: reqwest::Response, ctx: SuccessContext<'_>) -> Response {
+async fn handle_successful_stream(
+    state: &AppState,
+    upstream_resp: reqwest::Response,
+    ctx: SuccessContext<'_>,
+) -> Response {
+    // 上游声明成功却返回非 SSE 体（200 + JSON/HTML 错误页、忽略 stream 的完整应答）：
+    // 按流处理只会给客户端一个“正常但为空”的流，上游错误被静默吞掉。
+    if is_non_sse_content_type(upstream_resp.headers()) {
+        return handle_non_sse_body(state, upstream_resp, ctx).await;
+    }
     state.in_flight.broadcast(RequestOverview {
         id: ctx.log_base.id as u64,
         status: request_status::COMMITTED.to_string(),
@@ -349,37 +358,93 @@ fn handle_successful_stream(state: &AppState, upstream_resp: reqwest::Response, 
         })
 }
 
+/// 上游是否明确声明了非 SSE 的 content-type。
+///
+/// content-type 缺失时按 SSE 处理：宽松的上游（尤其自建反代）常不带该头，
+/// 只有明确声明了其他类型才判定“这不是流”。
+fn is_non_sse_content_type(headers: &HeaderMap) -> bool {
+    headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|content_type| !content_type.to_ascii_lowercase().contains("event-stream"))
+}
+
+/// 流式请求收到非 SSE 成功响应时的处理。
+///
+/// - 响应体是错误信封或不是 JSON：上游把错误塞进了 200，按网关失败返回（502 + 客户端协议错误体）
+/// - 响应体是合法 JSON 且不带 error：上游忽略了 stream 参数，按完整应答转换后返回
+async fn handle_non_sse_body(state: &AppState, upstream_resp: reqwest::Response, ctx: SuccessContext<'_>) -> Response {
+    let response_headers = serialize_headers(upstream_resp.headers());
+    let raw_bytes = match upstream_resp.bytes().await {
+        Ok(bytes) => bytes,
+        Err(e) => {
+            return upstream_body_failure(state, ctx, response_headers, format!("读取上游响应体失败: {e}"));
+        }
+    };
+    let body = String::from_utf8_lossy(&raw_bytes);
+    // 四种协议的错误体都包在顶层 error 里；非 JSON（HTML 错误页、纯文本）同样不是可用应答
+    let is_error = serde_json::from_str::<Value>(&body)
+        .ok()
+        .is_none_or(|value| value.get("error").is_some());
+    if is_error {
+        return upstream_body_failure(state, ctx, response_headers, body.to_string());
+    }
+    complete_json_response(state, raw_bytes, response_headers, ctx)
+}
+
+/// 读取 `reqwest::Response` 中的完整应答体；读取失败按网关失败收尾。
 async fn handle_successful_json(
     state: &AppState,
     upstream_resp: reqwest::Response,
-    mut ctx: SuccessContext<'_>,
+    ctx: SuccessContext<'_>,
 ) -> Response {
     let response_headers = serialize_headers(upstream_resp.headers());
     let raw_bytes = match upstream_resp.bytes().await {
-        Ok(b) => b,
+        Ok(bytes) => bytes,
         Err(e) => {
-            // 上游 200 但响应体读取失败：按网关失败处理，绝不返回空 body 的 200
-            let response_url = ctx.log_base.response_url.clone();
-            let round = ctx.log_base.round;
-            return build_failed_relay_response(
-                state,
-                FailedRelayContext {
-                    log_base: ctx.log_base,
-                    format: ctx.format,
-                    last_target_channel: ctx.channel.name.clone(),
-                    last_target_model: ctx.channel_model.name.clone(),
-                    last_response_url: response_url,
-                    last_response_headers: response_headers,
-                    last_status: StatusCode::BAD_GATEWAY,
-                    last_error_body: format!("读取上游响应体失败: {e}"),
-                    rounds: ctx.rounds,
-                    wait_time_ms: ctx.start_time.elapsed().as_millis() as i64,
-                    round,
-                    api_key_id: ctx.api_key_id,
-                },
-            );
+            return upstream_body_failure(state, ctx, response_headers, format!("读取上游响应体失败: {e}"));
         }
     };
+    complete_json_response(state, raw_bytes, response_headers, ctx)
+}
+
+/// 上游 HTTP 200 但响应体不可用（读取失败 / 错误信封 / 非法内容）时的收尾。
+///
+/// 统一走失败路径：状态码 502、错误信封按客户端协议构造，并落盘失败日志，
+/// 避免把上游塞进 200 的错误当作正常应答返回。
+fn upstream_body_failure(
+    state: &AppState,
+    ctx: SuccessContext<'_>,
+    response_headers: String,
+    message: String,
+) -> Response {
+    let log_base = ctx.log_base.clone();
+    build_failed_relay_response(
+        state,
+        FailedRelayContext {
+            log_base,
+            format: ctx.format,
+            last_target_channel: ctx.channel.name.clone(),
+            last_target_model: ctx.channel_model.name.clone(),
+            last_response_url: ctx.log_base.response_url.clone(),
+            last_response_headers: response_headers,
+            last_status: StatusCode::BAD_GATEWAY,
+            last_error_body: message,
+            rounds: ctx.rounds,
+            wait_time_ms: ctx.start_time.elapsed().as_millis() as i64,
+            round: ctx.log_base.round,
+            api_key_id: ctx.api_key_id,
+        },
+    )
+}
+
+/// 转换并按目标格式返回完整（非流式）应答体。
+fn complete_json_response(
+    state: &AppState,
+    raw_bytes: Bytes,
+    response_headers: String,
+    mut ctx: SuccessContext<'_>,
+) -> Response {
     let parsed = serde_json::from_slice::<serde_json::Value>(&raw_bytes).ok();
     // 跨格式：上游格式 → IR → 客户端格式；同格式直通
     let upstream_format = ir::channel_format(&ctx.channel.channel_type);
@@ -405,24 +470,11 @@ async fn handle_successful_json(
             Some(bytes) => Bytes::from(bytes),
             None => {
                 // 跨格式转换失败：透传会给客户端错误格式，按网关失败处理
-                let response_url = ctx.log_base.response_url.clone();
-                let round = ctx.log_base.round;
-                return build_failed_relay_response(
+                return upstream_body_failure(
                     state,
-                    FailedRelayContext {
-                        log_base: ctx.log_base,
-                        format: ctx.format,
-                        last_target_channel: ctx.channel.name.clone(),
-                        last_target_model: ctx.channel_model.name.clone(),
-                        last_response_url: response_url,
-                        last_response_headers: response_headers,
-                        last_status: StatusCode::BAD_GATEWAY,
-                        last_error_body: "跨格式转换失败：上游响应无法解析为目标格式".to_string(),
-                        rounds: ctx.rounds,
-                        wait_time_ms: ctx.start_time.elapsed().as_millis() as i64,
-                        round,
-                        api_key_id: ctx.api_key_id,
-                    },
+                    ctx,
+                    response_headers,
+                    "跨格式转换失败：上游响应无法解析为目标格式".to_string(),
                 );
             }
         }
@@ -988,7 +1040,7 @@ pub async fn forward_relay(
                     };
                     if metadata.stream {
                         relay_guard.defuse();
-                        return handle_successful_stream(&state, upstream_resp, ctx);
+                        return handle_successful_stream(&state, upstream_resp, ctx).await;
                     }
                     relay_guard.defuse();
                     return handle_successful_json(&state, upstream_resp, ctx).await;

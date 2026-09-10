@@ -480,4 +480,181 @@ mod tests {
         assert!(value.pointer("/error/code").is_none());
         let _ = std::fs::remove_file(db_path);
     }
+
+    /// 流式请求 + 上游 200 却是 JSON 错误体：不得产出“正常但为空”的流，
+    /// 必须返回 502 + 客户端协议错误信封（回归：上游错误曾被静默吞掉）。
+    #[tokio::test]
+    async fn stream_request_with_non_sse_error_body_fails_loudly() {
+        let (state, db_path) = test_support::setup_test_state("relay_nonsse_err").await;
+        let upstream = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::any())
+            .respond_with(wiremock::ResponseTemplate::new(200).set_body_raw(
+                r#"{"error":{"message":"upstream boom","type":"server_error"}}"#,
+                "application/json",
+            ))
+            .mount(&upstream)
+            .await;
+
+        let model = add_channel(&state, "ch", &upstream.uri(), "k1", "m-nonsse").await;
+        let mut group = crate::model::Group {
+            name: "m-nonsse".into(),
+            mode: crate::model::GroupMode::Failover,
+            items: vec![crate::model::GroupItem {
+                channel_model_id: model.id,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        op::group::create_group(&state, &mut group).await.unwrap();
+
+        let resp = forward_relay(
+            state.clone(),
+            test_auth(),
+            ApiFormat::AnthropicMessage,
+            None,
+            Uri::from_static("/v1/messages"),
+            HeaderMap::new(),
+            Bytes::from(
+                json!({
+                    "model": "m-nonsse",
+                    "max_tokens": 16,
+                    "stream": true,
+                    "messages": [{ "role": "user", "content": "hi" }]
+                })
+                .to_string(),
+            ),
+        )
+        .await;
+
+        assert_eq!(resp.status(), 502);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(value.get("type").unwrap(), "error");
+        assert_eq!(value.pointer("/error/message").unwrap(), "upstream boom");
+        let _ = std::fs::remove_file(db_path);
+    }
+
+    /// 上游忽略 stream 参数直接返回完整应答（200 + JSON）：按完整响应转换后返回，
+    /// 客户端仍拿到可解析的结果，而不是空流。
+    #[tokio::test]
+    async fn stream_request_with_json_completion_returns_completion() {
+        let (state, db_path) = test_support::setup_test_state("relay_nonsse_ok").await;
+        let upstream = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::any())
+            .respond_with(wiremock::ResponseTemplate::new(200).set_body_raw(
+                r#"{"id":"x","choices":[{"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}"#,
+                "application/json",
+            ))
+            .mount(&upstream)
+            .await;
+
+        let model = add_channel(&state, "ch", &upstream.uri(), "k1", "m-json").await;
+        let mut group = crate::model::Group {
+            name: "m-json".into(),
+            mode: crate::model::GroupMode::Failover,
+            items: vec![crate::model::GroupItem {
+                channel_model_id: model.id,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        op::group::create_group(&state, &mut group).await.unwrap();
+
+        let resp = forward_relay(
+            state.clone(),
+            test_auth(),
+            ApiFormat::AnthropicMessage,
+            None,
+            Uri::from_static("/v1/messages"),
+            HeaderMap::new(),
+            Bytes::from(
+                json!({
+                    "model": "m-json",
+                    "max_tokens": 16,
+                    "stream": true,
+                    "messages": [{ "role": "user", "content": "hi" }]
+                })
+                .to_string(),
+            ),
+        )
+        .await;
+
+        assert_eq!(resp.status(), 200);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(value.get("type").unwrap(), "message");
+        assert_eq!(value.pointer("/content/0/text").unwrap(), "ok");
+        let _ = std::fs::remove_file(db_path);
+    }
+
+    /// 跨格式流式端到端：Anthropic 客户端 ← OpenAI 兼容上游 SSE。
+    /// 覆盖 SSE 分流（content-type 判定不能被误伤）、翻译泵与用量提取。
+    #[tokio::test]
+    async fn anthropic_client_streams_from_chat_upstream() {
+        let (state, db_path) = test_support::setup_test_state("relay_stream_x").await;
+        let upstream = wiremock::MockServer::start().await;
+        let sse = concat!(
+            "data: {\"choices\":[{\"delta\":{\"role\":\"assistant\",\"content\":\"ok\"},\"finish_reason\":null}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":3,\"completion_tokens\":1,\"total_tokens\":4}}\n\n",
+            "data: [DONE]\n\n",
+        );
+        wiremock::Mock::given(wiremock::matchers::any())
+            .respond_with(wiremock::ResponseTemplate::new(200).set_body_raw(sse, "text/event-stream"))
+            .mount(&upstream)
+            .await;
+
+        let model = add_channel(&state, "ch", &upstream.uri(), "k1", "m-stream").await;
+        let mut group = crate::model::Group {
+            name: "m-stream".into(),
+            mode: crate::model::GroupMode::Failover,
+            items: vec![crate::model::GroupItem {
+                channel_model_id: model.id,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        op::group::create_group(&state, &mut group).await.unwrap();
+
+        let resp = forward_relay(
+            state.clone(),
+            test_auth(),
+            ApiFormat::AnthropicMessage,
+            None,
+            Uri::from_static("/v1/messages"),
+            HeaderMap::new(),
+            Bytes::from(
+                json!({
+                    "model": "m-stream",
+                    "max_tokens": 16,
+                    "stream": true,
+                    "messages": [{ "role": "user", "content": "hi" }]
+                })
+                .to_string(),
+            ),
+        )
+        .await;
+
+        assert_eq!(resp.status(), 200);
+        assert!(
+            resp.headers()
+                .get("content-type")
+                .is_some_and(|v| v.to_str().unwrap().contains("text/event-stream"))
+        );
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body = String::from_utf8_lossy(&body);
+        assert!(body.contains("event: message_start"));
+        assert!(body.contains("text_delta"));
+        assert!(body.contains("\"text\":\"ok\""));
+        assert!(body.contains("event: message_stop"));
+
+        let log = wait_finished_log(&state, 1).await;
+        assert_eq!(log.total_tokens, 4);
+        let _ = std::fs::remove_file(db_path);
+    }
 }
