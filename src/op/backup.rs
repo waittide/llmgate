@@ -50,6 +50,19 @@ pub async fn export_backup(state: &AppState) -> Result<BackupData> {
     })
 }
 
+/// 单表导入的记账：成功计数，单行失败仅记 warn（不中断其余行）。
+///
+/// 七张表的导入块差别只在 SQL 与 id 处理，这套记账逐字相同；宏只替换记账，
+/// SQL、id 逻辑与日志文案都留在各自调用点。
+macro_rules! tally {
+    ($count:ident, $warn:literal, $label:expr, $res:expr) => {
+        match &$res {
+            Ok(_) => $count += 1,
+            Err(e) => warn!($warn, $label, e),
+        }
+    };
+}
+
 /// 将备份数据合并导入当前库：按 id upsert（同 id 覆盖、无 id 追加），并非清空后还原。
 /// 单行失败不影响其余行，失败明细记 warn 日志，结果按表返回成功行数。
 pub async fn import_backup(state: &AppState, backup: BackupData) -> Result<DBImportResult> {
@@ -66,11 +79,7 @@ pub async fn import_backup(state: &AppState, backup: BackupData) -> Result<DBImp
         .bind(&s.value)
         .execute(&mut *tx)
         .await;
-        if let Err(e) = &res {
-            warn!("导入设置失败（key={}）: {}", s.key, e);
-        } else {
-            setting_count += 1;
-        }
+        tally!(setting_count, "导入设置失败（key={}）: {}", s.key, res);
     }
     rows_affected.insert("settings".to_string(), setting_count);
 
@@ -117,11 +126,7 @@ pub async fn import_backup(state: &AppState, backup: BackupData) -> Result<DBImp
             .await
         };
 
-        if let Err(e) = &res {
-            warn!("导入 API 密钥失败（name={}）: {}", key.name, e);
-        } else {
-            key_count += 1;
-        }
+        tally!(key_count, "导入 API 密钥失败（name={}）: {}", key.name, res);
     }
     rows_affected.insert("api_keys".to_string(), key_count);
 
@@ -192,11 +197,7 @@ pub async fn import_backup(state: &AppState, backup: BackupData) -> Result<DBImp
             (r, id)
         };
 
-        if let Err(e) = &res {
-            warn!("导入渠道失败（name={}）: {}", ch.name, e);
-        } else {
-            channel_count += 1;
-        }
+        tally!(channel_count, "导入渠道失败（name={}）: {}", ch.name, res);
 
         // 若存在内嵌渠道模型，同时插入并关联对应的 channel_id
         if inserted_id > 0 {
@@ -261,11 +262,7 @@ pub async fn import_backup(state: &AppState, backup: BackupData) -> Result<DBImp
             .execute(&mut *tx)
             .await
         };
-        if let Err(e) = &res {
-            warn!("导入渠道模型失败（name={}）: {}", cm.name, e);
-        } else {
-            cm_count += 1;
-        }
+        tally!(cm_count, "导入渠道模型失败（name={}）: {}", cm.name, res);
     }
     rows_affected.insert("channel_models".to_string(), cm_count);
 
@@ -305,11 +302,7 @@ pub async fn import_backup(state: &AppState, backup: BackupData) -> Result<DBImp
             (r, id)
         };
 
-        if let Err(e) = &res {
-            warn!("导入分组失败（name={}）: {}", grp.name, e);
-        } else {
-            group_count += 1;
-        }
+        tally!(group_count, "导入分组失败（name={}）: {}", grp.name, res);
 
         // 若存在内嵌分组成员，同时插入并关联对应的 group_id
         if inserted_id > 0 {
@@ -360,11 +353,12 @@ pub async fn import_backup(state: &AppState, backup: BackupData) -> Result<DBImp
             .execute(&mut *tx)
             .await
         };
-        if let Err(e) = &res {
-            warn!("导入分组成员失败（model_id={}）: {}", item.channel_model_id, e);
-        } else {
-            gi_count += 1;
-        }
+        tally!(
+            gi_count,
+            "导入分组成员失败（model_id={}）: {}",
+            item.channel_model_id,
+            res
+        );
     }
     rows_affected.insert("group_items".to_string(), gi_count);
 
@@ -390,11 +384,7 @@ pub async fn import_backup(state: &AppState, backup: BackupData) -> Result<DBImp
         .bind(info.price.cache_write)
         .execute(&mut *tx)
         .await;
-        if let Err(e) = &res {
-            warn!("导入模型价格失败（name={}）: {}", name_lower, e);
-        } else {
-            model_count += 1;
-        }
+        tally!(model_count, "导入模型价格失败（name={}）: {}", name_lower, res);
     }
     rows_affected.insert("model_infos".to_string(), model_count);
 
