@@ -73,14 +73,22 @@ pub fn build_client_error(format: ApiFormat, status: StatusCode, upstream_body: 
             }
         });
     let code = info.and_then(|info| info.code);
-    let value = match format {
-        ApiFormat::OpenaiCompletion | ApiFormat::OpenaiResponse => openai(status, &message, code),
-        ApiFormat::AnthropicMessage => anthropic(status, &message),
-        ApiFormat::GeminiGenerate => gemini(status, &message),
-    };
+    let value = envelope(format, status, &message, code);
     ClientError {
         body: Bytes::from(serde_json::to_vec(&value).unwrap_or_default()),
         message,
+    }
+}
+
+/// 按客户端协议构造错误信封。
+///
+/// HTTP 错误响应（`build_client_error`）与流内错误事件（上游 200 但事件体报错）共用，
+/// 保证同一个错误在两种路径下对客户端呈现一致。
+pub fn envelope(format: ApiFormat, status: StatusCode, message: &str, code: Option<Value>) -> Value {
+    match format {
+        ApiFormat::OpenaiCompletion | ApiFormat::OpenaiResponse => openai(status, message, code),
+        ApiFormat::AnthropicMessage => anthropic(status, message),
+        ApiFormat::GeminiGenerate => gemini(status, message),
     }
 }
 

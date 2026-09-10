@@ -700,4 +700,77 @@ mod tests {
         assert_eq!(body.as_ref(), upstream_body.as_bytes());
         let _ = std::fs::remove_file(db_path);
     }
+
+    /// 端到端：上游 200 + SSE 中途报错。客户端必须收到协议错误事件且连接终止，
+    /// 日志必须记为 stream_error——不能被当成一次成功的空回复计费。
+    #[tokio::test]
+    async fn stream_error_mid_flight_aborts_and_logs_stream_error() {
+        use futures::StreamExt as _;
+
+        let (state, db_path) = test_support::setup_test_state("relay_stream_err").await;
+        let upstream = wiremock::MockServer::start().await;
+        let sse = concat!(
+            "data: {\"choices\":[{\"delta\":{\"content\":\"partial\"}}]}\n\n",
+            "data: {\"error\":{\"message\":\"upstream exploded\",\"type\":\"server_error\"}}\n\n",
+        );
+        wiremock::Mock::given(wiremock::matchers::any())
+            .respond_with(wiremock::ResponseTemplate::new(200).set_body_raw(sse, "text/event-stream"))
+            .mount(&upstream)
+            .await;
+
+        let model = add_channel(&state, "ch", &upstream.uri(), "k1", "m-ser").await;
+        let mut group = crate::model::Group {
+            name: "m-ser".into(),
+            mode: crate::model::GroupMode::Failover,
+            items: vec![crate::model::GroupItem {
+                channel_model_id: model.id,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        op::group::create_group(&state, &mut group).await.unwrap();
+
+        let resp = forward_relay(
+            state.clone(),
+            test_auth(),
+            ApiFormat::AnthropicMessage,
+            None,
+            Uri::from_static("/v1/messages"),
+            HeaderMap::new(),
+            Bytes::from(
+                json!({
+                    "model": "m-ser",
+                    "max_tokens": 16,
+                    "stream": true,
+                    "messages": [{ "role": "user", "content": "hi" }]
+                })
+                .to_string(),
+            ),
+        )
+        .await;
+
+        let mut stream = resp.into_body().into_data_stream();
+        let mut received = Vec::new();
+        let mut aborted = false;
+        while let Some(item) = stream.next().await {
+            match item {
+                Ok(bytes) => received.extend_from_slice(&bytes),
+                Err(_) => {
+                    aborted = true;
+                    break;
+                }
+            }
+        }
+        let received = String::from_utf8_lossy(&received);
+        assert!(received.contains("partial"), "{received}");
+        assert!(received.contains("event: error"), "{received}");
+        assert!(received.contains("upstream exploded"), "{received}");
+        assert!(!received.contains("message_stop"), "错误流不得补正常结束: {received}");
+        assert!(aborted, "流内错误必须终止传输");
+
+        let log = wait_finished_log(&state, 1).await;
+        assert_eq!(log.status, crate::model::request_status::STREAM_ERROR);
+        assert!(log.error.unwrap_or_default().contains("upstream exploded"));
+        let _ = std::fs::remove_file(db_path);
+    }
 }

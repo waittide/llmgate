@@ -9,6 +9,7 @@ use std::{
     task::{Context, Poll},
 };
 
+use axum::http::StatusCode;
 use bytes::Bytes;
 use futures::Stream;
 use serde_json::{Value, json};
@@ -17,7 +18,11 @@ use super::{
     StopReason, anthropic_stop_reason, chat_finish_reason, gemini_call_id, gemini_finish_reason, responses_status,
     stop_reason_from_anthropic, stop_reason_from_chat, stop_reason_from_gemini,
 };
-use crate::relay::{SseBuffer, parse_sse_event, protocol::extract_usage_from_json, state::Usage};
+use crate::relay::{
+    SseBuffer, parse_sse_event,
+    protocol::{ApiFormat, extract_usage_from_json},
+    state::Usage,
+};
 
 /// 流式事件的中间定义。
 #[derive(Debug, Clone)]
@@ -42,6 +47,30 @@ pub enum StreamEvent {
     Finish {
         reason: StopReason,
     },
+    /// 上游流内错误（HTTP 200 但事件体是错误信封）：sink 先向客户端发出协议错误事件，
+    /// 泵随后以 Err 终止传输——绝不能把它当成正常结束，否则客户端会拿到「空但成功」的结果。
+    Error {
+        message: String,
+    },
+}
+
+/// 事件体是错误信封时取出可读消息。
+///
+/// 只认顶层 `error`（四种协议的错误信封形状一致：OpenAI/Anthropic/Gemini 均为
+/// `{"error": {...}}`，Anthropic 另有 `type: "error"`），避免把正常事件里
+/// 恰好同名的字段误判为错误。
+fn stream_error_message(value: &Value) -> Option<String> {
+    let error = value.get("error")?;
+    if error.is_null() {
+        return None;
+    }
+    let message = error
+        .get("message")
+        .and_then(Value::as_str)
+        .or_else(|| error.as_str())
+        .map(str::trim)
+        .filter(|message| !message.is_empty());
+    Some(message.unwrap_or("上游流内错误").to_string())
 }
 
 /// 上游 SSE 事件 → IR 事件。
@@ -121,6 +150,11 @@ impl EventParser for ChatEventParser {
             let Ok(value) = serde_json::from_str::<Value>(data) else {
                 continue;
             };
+            if let Some(message) = stream_error_message(&value) {
+                self.finished = true;
+                events.push(StreamEvent::Error { message });
+                break;
+            }
             if let Some(usage) = extract_usage_from_json(&value) {
                 events.push(StreamEvent::Usage(usage));
             }
@@ -208,6 +242,10 @@ impl EventParser for ResponsesEventParser {
         let Ok(value) = serde_json::from_str::<Value>(&data) else {
             return Vec::new();
         };
+        if let Some(message) = stream_error_message(&value) {
+            self.finished = true;
+            return vec![StreamEvent::Error { message }];
+        }
         match event_type {
             "response.output_text.delta" => value
                 .get("delta")
@@ -309,6 +347,10 @@ impl EventParser for AnthropicEventParser {
         let Ok(value) = serde_json::from_str::<Value>(&data) else {
             return Vec::new();
         };
+        if let Some(message) = stream_error_message(&value) {
+            self.finished = true;
+            return vec![StreamEvent::Error { message }];
+        }
         match event_type {
             "message_start" => extract_usage_from_json(&value)
                 .map(StreamEvent::Usage)
@@ -403,6 +445,10 @@ impl EventParser for GeminiEventParser {
         let Ok(value) = serde_json::from_str::<Value>(data) else {
             return Vec::new();
         };
+        if let Some(message) = stream_error_message(&value) {
+            self.finished = true;
+            return vec![StreamEvent::Error { message }];
+        }
         let mut events = Vec::new();
         let parts = value
             .pointer("/candidates/0/content/parts")
@@ -592,6 +638,11 @@ impl EventSink for ChatChunkSink {
                 merge_usage(&mut self.usage, usage.clone());
                 Vec::new()
             }
+            StreamEvent::Error { message } => {
+                self.finished = true;
+                // 不发 [DONE]：连接随即被中止，客户端据 error 字段报错而非当作正常结束
+                vec![chunk_bytes(&error_envelope(ApiFormat::OpenaiCompletion, message))]
+            }
             StreamEvent::Finish { reason } => self.emit_finish(reason),
         }
     }
@@ -599,6 +650,11 @@ impl EventSink for ChatChunkSink {
     fn finish(&mut self) -> Vec<Bytes> {
         self.emit_finish(&StopReason::Stop)
     }
+}
+
+/// 流内错误的客户端信封：与 HTTP 错误路径共用同一份构造逻辑。
+fn error_envelope(format: ApiFormat, message: &str) -> Value {
+    crate::relay::error::envelope(format, StatusCode::BAD_GATEWAY, message, None)
 }
 
 /// OpenAI Responses SSE 流。
@@ -972,6 +1028,17 @@ impl EventSink for ResponsesSink {
             StreamEvent::Usage(usage) => {
                 merge_usage(&mut self.usage, usage.clone());
             }
+            StreamEvent::Error { message } => {
+                self.completed = true;
+                let mut data = error_envelope(ApiFormat::OpenaiResponse, message);
+                if let Some(obj) = data.as_object_mut() {
+                    obj.insert("type".to_string(), Value::String("response.failed".to_string()));
+                    obj.insert("sequence_number".to_string(), json!(self.sequence));
+                }
+                self.sequence += 1;
+                self.pending
+                    .push_back(event_bytes("response.failed", &data));
+            }
             StreamEvent::Finish { reason } => self.complete(reason),
         }
         self.pending.drain(..).collect()
@@ -1154,6 +1221,14 @@ impl EventSink for AnthropicSink {
             StreamEvent::Usage(usage) => {
                 merge_usage(&mut self.usage, usage.clone());
             }
+            StreamEvent::Error { message } => {
+                self.completed = true;
+                // Anthropic 的流内错误事件形状：event: error + type: "error" 信封
+                self.pending.push_back(event_bytes(
+                    "error",
+                    &error_envelope(ApiFormat::AnthropicMessage, message),
+                ));
+            }
             StreamEvent::Finish { reason } => self.complete(reason),
         }
         self.pending.drain(..).collect()
@@ -1256,6 +1331,10 @@ impl EventSink for GeminiSink {
                 merge_usage(&mut self.usage, usage.clone());
             }
             StreamEvent::Finish { reason } => self.emit_final(gemini_finish_reason(reason)),
+            StreamEvent::Error { message } => {
+                self.completed = true;
+                self.push(error_envelope(ApiFormat::GeminiGenerate, message));
+            }
             // ThinkingDelta 在 Gemini 请求目标无对应形态，丢弃（与既有行为一致）
             StreamEvent::ThinkingDelta { .. } => {}
         }
@@ -1279,6 +1358,8 @@ pub struct StreamTranslate<S, P: EventParser, K: EventSink> {
     sink:     K,
     pending:  VecDeque<Bytes>,
     finished: bool,
+    /// 上游流内错误消息；帧已交付后在下一轮 poll 终止传输
+    failed:   Option<String>,
 }
 
 impl<S, P: EventParser, K: EventSink> StreamTranslate<S, P, K> {
@@ -1290,6 +1371,7 @@ impl<S, P: EventParser, K: EventSink> StreamTranslate<S, P, K> {
             sink,
             pending: VecDeque::new(),
             finished: false,
+            failed: None,
         }
     }
 }
@@ -1308,6 +1390,11 @@ where
             if let Some(chunk) = this.pending.pop_front() {
                 return Poll::Ready(Some(Ok(chunk)));
             }
+            // 流内错误帧已交付，此时才终止传输：先让客户端读到错误再断开
+            if let Some(message) = this.failed.take() {
+                this.finished = true;
+                return Poll::Ready(Some(Err(std::io::Error::other(message))));
+            }
             if this.finished {
                 return Poll::Ready(None);
             }
@@ -1316,7 +1403,14 @@ where
                     this.sse.feed(&bytes);
                     while let Some(event) = this.sse.next_event() {
                         for ev in this.parser.parse(&event) {
+                            if let StreamEvent::Error { message } = &ev {
+                                this.failed = Some(message.clone());
+                            }
                             this.pending.extend(this.sink.handle(&ev));
+                        }
+                        if this.failed.is_some() {
+                            // 上游已报错：其后的事件一律不再处理
+                            break;
                         }
                     }
                 }
@@ -1459,6 +1553,33 @@ mod tests {
         )
         .await;
         assert!(out.contains("tail"));
+    }
+
+    /// 跨格式翻译整流：返回（已发出的字节，传输错误消息）。
+    /// 与 `run` 的差别只在于不 panic——流内错误必须以 Err 终止传输。
+    async fn run_checked(
+        upstream: ApiFormat,
+        client: ApiFormat,
+        chunks: Vec<impl AsRef<str>>,
+    ) -> (String, Option<String>) {
+        let chunks: Vec<String> = chunks.into_iter().map(|c| c.as_ref().to_owned()).collect();
+        let stream = stream::iter(
+            chunks
+                .into_iter()
+                .map(|c| Ok::<Bytes, std::io::Error>(Bytes::from(c))),
+        );
+        let mut out = String::new();
+        let mut error = None;
+        for item in translate(stream, upstream, client, "m".to_string())
+            .collect::<Vec<_>>()
+            .await
+        {
+            match item {
+                Ok(chunk) => out.push_str(&String::from_utf8_lossy(&chunk)),
+                Err(e) => error = Some(e.to_string()),
+            }
+        }
+        (out, error)
     }
 
     #[tokio::test]
@@ -1791,5 +1912,61 @@ mod tests {
         assert!(out.contains("\"index\":0"));
         assert!(out.contains("\"index\":1"));
         assert!(!out.contains("\"index\":2"));
+    }
+
+    /// 上游 200 但流中途发错误事件：必须向客户端发出协议错误事件并以 Err 终止传输，
+    /// 绝不能补一个「正常结束」（客户端会把空结果当成模型没话说）。
+    #[tokio::test]
+    async fn chat_stream_error_reaches_anthropic_client_and_terminates() {
+        let (out, error) = run_checked(
+            ApiFormat::OpenaiCompletion,
+            ApiFormat::AnthropicMessage,
+            vec![
+                "data: {\"choices\":[{\"delta\":{\"content\":\"partial\"}}]}\n\n",
+                "data: {\"error\":{\"message\":\"upstream exploded\",\"type\":\"server_error\"}}\n\n",
+                "data: {\"choices\":[{\"delta\":{\"content\":\"never\"},\"finish_reason\":\"stop\"}]}\n\n",
+            ],
+        )
+        .await;
+        assert!(out.contains("partial"), "错误前的增量应已送达: {out}");
+        assert!(out.contains("event: error"), "必须发出 Anthropic 错误事件: {out}");
+        assert!(out.contains("upstream exploded"), "错误消息必须透出: {out}");
+        assert!(!out.contains("never"), "错误之后的事件不得再处理: {out}");
+        assert!(!out.contains("message_stop"), "错误流不得补正常结束: {out}");
+        assert_eq!(error.as_deref(), Some("upstream exploded"));
+    }
+
+    /// 同一场景下 Chat 客户端拿到 OpenAI 信封，且不发 [DONE]。
+    #[tokio::test]
+    async fn chat_stream_error_reaches_chat_client_without_done() {
+        let (out, error) = run_checked(
+            ApiFormat::GeminiGenerate,
+            ApiFormat::OpenaiCompletion,
+            vec![
+                "data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"hi\"}]}}]}\n\n",
+                "data: {\"error\":{\"code\":429,\"message\":\"quota exceeded\"}}\n\n",
+            ],
+        )
+        .await;
+        assert!(out.contains("hi"));
+        assert!(out.contains("quota exceeded"));
+        assert!(out.contains("\"error\""));
+        assert!(!out.contains("[DONE]"), "错误流不得发 [DONE]: {out}");
+        assert_eq!(error.as_deref(), Some("quota exceeded"));
+    }
+
+    /// Responses 客户端收到 response.failed 事件。
+    #[tokio::test]
+    async fn stream_error_reaches_responses_client_as_failed_event() {
+        let (out, error) = run_checked(
+            ApiFormat::OpenaiCompletion,
+            ApiFormat::OpenaiResponse,
+            vec!["data: {\"error\":{\"message\":\"boom\"}}\n\n"],
+        )
+        .await;
+        assert!(out.contains("event: response.failed"), "{out}");
+        assert!(out.contains("boom"));
+        assert!(!out.contains("response.completed"));
+        assert_eq!(error.as_deref(), Some("boom"));
     }
 }
