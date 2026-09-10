@@ -1357,40 +1357,95 @@ impl EventSink for GeminiSink {
 }
 
 // ---------- 泵 ----------
+//
+// sans-IO 分层：`Translation` 是纯协议机（零 I/O、零定时器、零异步），
+// `StreamTranslate` 是薄驱动器，只负责 poll 内层流与把错误转成传输错误。
 
-/// 将上游 SSE 字节流解析为 IR 事件再发射为客户端格式字节流。
+/// SSE 协议翻译机：只有状态，没有 I/O。
+///
+/// `feed` 接收任意分片的上游字节并返回此刻应发给客户端的字节，`end` 处理上游
+/// 结束。流内错误仅作为**事实**记录在 `failed` 里——协议层不决定传输怎么结束，
+/// 那是驱动器的职责。
+struct Translation<P: EventParser, K: EventSink> {
+    parser: P,
+    sink:   K,
+    sse:    SseBuffer,
+    failed: Option<String>,
+}
+
+impl<P: EventParser, K: EventSink> Translation<P, K> {
+    fn new(parser: P, sink: K) -> Self {
+        Self {
+            parser,
+            sink,
+            sse: SseBuffer::default(),
+            failed: None,
+        }
+    }
+
+    /// 喂入上游字节（可为任意分片），返回本次可发送的字节。
+    fn feed(&mut self, bytes: &[u8]) -> Vec<Bytes> {
+        self.sse.feed(bytes);
+        let mut out = Vec::new();
+        while let Some(event) = self.sse.next_event() {
+            self.dispatch(&event, &mut out);
+            if self.failed.is_some() {
+                // 上游已报错：其后的事件一律不再处理
+                break;
+            }
+        }
+        out
+    }
+
+    /// 上游结束：冲掉缺空行收尾的残留事件，未报错时补发正常终态。
+    fn end(&mut self) -> Vec<Bytes> {
+        let mut out = Vec::new();
+        if let Some(tail) = self.sse.flush() {
+            self.dispatch(&tail, &mut out);
+        }
+        // 残留事件本身是错误帧：不补正常结束，交给驱动器以 Err 终止传输
+        if self.failed.is_some() {
+            return out;
+        }
+        if !self.parser.finished() {
+            out.extend(self.sink.handle(&StreamEvent::Finish {
+                reason: StopReason::Stop,
+            }));
+        }
+        out.extend(self.sink.finish());
+        out
+    }
+
+    fn dispatch(&mut self, event: &str, out: &mut Vec<Bytes>) {
+        for ev in self.parser.parse(event) {
+            if let StreamEvent::Error { message } = &ev {
+                self.failed = Some(message.clone());
+            }
+            out.extend(self.sink.handle(&ev));
+        }
+    }
+
+    /// 取出已发现的流内错误（清空标记）。
+    fn take_failure(&mut self) -> Option<String> {
+        self.failed.take()
+    }
+}
+
+/// 驱动器：把内层字节流喂给协议机，并在协议机报错后以 Err 终止传输。
 pub struct StreamTranslate<S, P: EventParser, K: EventSink> {
-    inner:    S,
-    sse:      SseBuffer,
-    parser:   P,
-    sink:     K,
-    pending:  VecDeque<Bytes>,
-    finished: bool,
-    /// 上游流内错误消息；帧已交付后在下一轮 poll 终止传输
-    failed:   Option<String>,
+    inner:       S,
+    translation: Translation<P, K>,
+    pending:     VecDeque<Bytes>,
+    finished:    bool,
 }
 
 impl<S, P: EventParser, K: EventSink> StreamTranslate<S, P, K> {
     pub fn new(inner: S, parser: P, sink: K) -> Self {
         Self {
             inner,
-            sse: SseBuffer::default(),
-            parser,
-            sink,
+            translation: Translation::new(parser, sink),
             pending: VecDeque::new(),
             finished: false,
-            failed: None,
-        }
-    }
-
-    /// 解析一个 SSE 事件并送入 sink；错误帧登记为待终止原因，
-    /// 使调用方能在交付错误事件后以 Err 结束传输。
-    fn dispatch(&mut self, event: &str) {
-        for ev in self.parser.parse(event) {
-            if let StreamEvent::Error { message } = &ev {
-                self.failed = Some(message.clone());
-            }
-            self.pending.extend(self.sink.handle(&ev));
         }
     }
 }
@@ -1410,7 +1465,7 @@ where
                 return Poll::Ready(Some(Ok(chunk)));
             }
             // 流内错误帧已交付，此时才终止传输：先让客户端读到错误再断开
-            if let Some(message) = this.failed.take() {
+            if let Some(message) = this.translation.take_failure() {
                 this.finished = true;
                 return Poll::Ready(Some(Err(std::io::Error::other(message))));
             }
@@ -1419,35 +1474,14 @@ where
             }
             match Pin::new(&mut this.inner).poll_next(cx) {
                 Poll::Ready(Some(Ok(bytes))) => {
-                    this.sse.feed(&bytes);
-                    while let Some(event) = this.sse.next_event() {
-                        this.dispatch(&event);
-                        if this.failed.is_some() {
-                            // 上游已报错：其后的事件一律不再处理
-                            break;
-                        }
-                    }
+                    let out = this.translation.feed(&bytes);
+                    this.pending.extend(out);
                 }
                 Poll::Ready(Some(Err(error))) => return Poll::Ready(Some(Err(error))),
                 Poll::Ready(None) => {
                     this.finished = true;
-                    // 上游在最后一个事件后直接断流（缺空行）时，残留字节仍是事件，
-                    // 通常是承载 finish 与 usage 的那一个，不能当作空。
-                    if let Some(tail) = this.sse.flush() {
-                        this.dispatch(&tail);
-                    }
-                    // 残留事件本身是错误帧：交给循环顶部先交付错误事件再以 Err 终止，
-                    // 不得再补正常结束（否则客户端把错误当空应答）。
-                    if this.failed.is_none() {
-                        if !this.parser.finished() {
-                            let tail = this.sink.handle(&StreamEvent::Finish {
-                                reason: StopReason::Stop,
-                            });
-                            this.pending.extend(tail);
-                        }
-                        let tail = this.sink.finish();
-                        this.pending.extend(tail);
-                    }
+                    let out = this.translation.end();
+                    this.pending.extend(out);
                 }
                 Poll::Pending => return Poll::Pending,
             }
@@ -1569,6 +1603,55 @@ mod tests {
         )
         .await;
         assert!(out.contains("tail"));
+    }
+
+    /// 协议机是纯的：无需异步运行时、无需内层流，直接以字节驱动。
+    ///
+    /// 同时验证分片无关性——上游怎么切分字节不得影响产出的字节序列。
+    #[test]
+    fn translation_machine_is_pure_and_split_invariant() {
+        let events = "data: {\"choices\":[{\"delta\":{\"content\":\"你好\"}}]}\n\ndata: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n";
+        // Gemini sink 的产出完全确定（无随机 id、无时间戳），可逐字节比对
+        let machine = || {
+            Translation::new(
+                ChatEventParser::default(),
+                DynSink::Gemini(GeminiSink::new("m".to_string())),
+            )
+        };
+
+        let mut whole = machine();
+        let mut whole_out = whole.feed(events.as_bytes());
+        whole_out.extend(whole.end());
+
+        let mut split = machine();
+        let mut split_out = Vec::new();
+        for byte in events.as_bytes() {
+            split_out.extend(split.feed(std::slice::from_ref(byte)));
+        }
+        split_out.extend(split.end());
+
+        assert_eq!(whole_out, split_out, "上游分片方式不得影响协议机输出");
+        let text: String = whole_out
+            .iter()
+            .map(|b| String::from_utf8_lossy(b))
+            .collect();
+        assert!(text.contains("你好"));
+        assert!(text.contains("\"finishReason\":\"STOP\""));
+    }
+
+    /// 流内错误只是协议机记录的事实，不构成「传输该怎么结束」的决定：
+    /// 错误帧照常产出，且此后不再补发正常终态。
+    #[test]
+    fn machine_records_failure_without_deciding_transport_end() {
+        let mut machine = Translation::new(
+            ChatEventParser::default(),
+            DynSink::Gemini(GeminiSink::new("m".to_string())),
+        );
+        let out = machine.feed(b"data: {\"error\":{\"message\":\"boom\"}}\n\n");
+        assert!(!out.is_empty(), "错误事件必须产出字节交给客户端");
+        assert!(String::from_utf8_lossy(&out[0]).contains("boom"), "错误消息必须透出");
+        assert!(machine.end().is_empty(), "错误流不得补正常结束");
+        assert_eq!(machine.take_failure().as_deref(), Some("boom"));
     }
 
     /// 跨格式翻译整流：返回（已发出的字节，传输错误消息）。
