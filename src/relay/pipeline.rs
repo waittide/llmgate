@@ -446,6 +446,20 @@ fn complete_json_response(
     mut ctx: SuccessContext<'_>,
 ) -> Response {
     let parsed = serde_json::from_slice::<serde_json::Value>(&raw_bytes).ok();
+    // 上游把错误塞进 200：四种协议的错误体都包在顶层 error 里。跨格式解析会把
+    // `{"error": ...}` 解析成空内容（parse_* 不校验载荷），客户端于是收到
+    // 200 + 空应答、上游错误被静默吞掉，故此处显式判失败。
+    if parsed
+        .as_ref()
+        .is_some_and(|value| value.get("error").is_some_and(|e| !e.is_null()))
+    {
+        return upstream_body_failure(
+            state,
+            ctx,
+            response_headers,
+            String::from_utf8_lossy(&raw_bytes).to_string(),
+        );
+    }
     // 跨格式：上游格式 → IR → 客户端格式；同格式直通
     let upstream_format = ir::channel_format(&ctx.channel.channel_type);
     let converted = if ctx.format == upstream_format {

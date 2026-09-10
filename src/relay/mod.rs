@@ -320,6 +320,65 @@ mod tests {
         let _ = std::fs::remove_file(db_path);
     }
 
+    /// 上游 200 + 错误信封、且需要跨格式转换时，必须按网关失败返回而不是
+    /// 合成一个空应答（回归：parse_* 对缺载荷的响应不报错，误差被静默吞掉）。
+    #[tokio::test]
+    async fn non_stream_200_error_envelope_is_not_swallowed() {
+        let (state, db_path) = test_support::setup_test_state("relay_200_error").await;
+        let upstream = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::any())
+            .respond_with(wiremock::ResponseTemplate::new(200).set_body_string(
+                r#"{"type":"error","error":{"type":"invalid_request_error","message":"input too long"}}"#,
+            ))
+            .mount(&upstream)
+            .await;
+
+        // 上游是 Anthropic、客户端发的是 Chat：跨格式路径才会走到 parse/emit
+        let mut ch = crate::model::Channel {
+            name: "ch200".into(),
+            channel_type: crate::model::ChannelProvider::Anthropic,
+            enabled: true,
+            base_url: upstream.uri(),
+            key: "k1".into(),
+            models: vec![crate::model::ChannelModel {
+                name: "m-200err".into(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        op::channel::create_channel(&state, &mut ch).await.unwrap();
+        let mut group = crate::model::Group {
+            name: "m-200err".into(),
+            mode: crate::model::GroupMode::Failover,
+            items: vec![crate::model::GroupItem {
+                channel_model_id: ch.models[0].id,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        op::group::create_group(&state, &mut group).await.unwrap();
+
+        let resp = forward_relay(
+            state.clone(),
+            test_auth(),
+            ApiFormat::OpenaiCompletion,
+            None,
+            Uri::from_static("/v1/chat/completions"),
+            HeaderMap::new(),
+            chat_body("m-200err").await,
+        )
+        .await;
+        assert!(!resp.status().is_success(), "不得以 2xx 返回上游错误");
+        let bytes = axum::body::to_bytes(resp.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let body = String::from_utf8_lossy(&bytes);
+        assert!(body.contains("input too long"), "错误详情必须透出: {body}");
+        assert_eq!(wait_finished_log(&state, 1).await.status, "failed");
+
+        let _ = std::fs::remove_file(db_path);
+    }
+
     #[tokio::test]
     async fn failover_to_next_channel_on_500() {
         let (state, db_path) = test_support::setup_test_state("failover_500").await;
