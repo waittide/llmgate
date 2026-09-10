@@ -1115,7 +1115,11 @@ impl EventSink for AnthropicSink {
                     }),
                 );
             }
-            StreamEvent::ToolCallStart { call_id, name, .. } => {
+            StreamEvent::ToolCallStart {
+                call_id,
+                name,
+                arguments,
+            } => {
                 let block_index = self.next_block_index;
                 self.next_block_index += 1;
                 self.tools.insert(call_id.clone(), block_index);
@@ -1123,6 +1127,17 @@ impl EventSink for AnthropicSink {
                     block_index,
                     json!({ "type": "tool_use", "id": call_id, "name": name, "input": {} }),
                 );
+                // 首个 delta 可能已带参数（有上游一次性下发完整 arguments）；
+                // 丢弃它们会让客户端拿到 input 为空的 tool_use，按空参数调用工具
+                if !arguments.is_empty() {
+                    self.push(
+                        "content_block_delta",
+                        json!({
+                            "index": block_index,
+                            "delta": { "type": "input_json_delta", "partial_json": arguments }
+                        }),
+                    );
+                }
             }
             StreamEvent::ToolCallDelta { call_id, arguments } => {
                 let Some(block_index) = self.tools.get(call_id).copied() else {
@@ -1579,6 +1594,25 @@ mod tests {
         .await;
         assert!(out.contains("\"index\":0"));
         assert!(out.contains("\"index\":1"));
+    }
+
+    /// 上游在首个 tool_call delta 里就带上了参数（部分上游一次性下发完整 JSON）：
+    /// 这些参数必须送达 Anthropic 客户端，否则 tool_use 的 input 为空、工具被错误调用。
+    #[tokio::test]
+    async fn chat_tool_arguments_in_first_delta_reach_anthropic_client() {
+        let out = run(
+            ApiFormat::OpenaiCompletion,
+            ApiFormat::AnthropicMessage,
+            vec![
+                "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"function\":{\"name\":\"calc\",\"arguments\":\"{\\\"x\\\":1}\"}}]}}]}\n\n",
+                "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\n",
+            ],
+        )
+        .await;
+        assert!(out.contains("input_json_delta"));
+        assert!(out.contains("partial_json"));
+        // 参数原文必须完整出现（SSE JSON 里转义为 {\"x\":1}）
+        assert!(out.contains("{\\\"x\\\":1}"), "首个 delta 的参数必须原样送达: {out}");
     }
 
     #[tokio::test]
