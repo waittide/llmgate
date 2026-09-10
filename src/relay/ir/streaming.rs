@@ -1058,6 +1058,7 @@ pub struct AnthropicSink {
     model:            String,
     message_id:       String,
     text_started:     bool,
+    text_block:       usize,
     thinking_started: bool,
     thinking_block:   usize,
     next_block_index: usize,
@@ -1073,6 +1074,7 @@ impl AnthropicSink {
             model,
             message_id: format!("msg_{}", nanoid::nanoid!(24)),
             text_started: false,
+            text_block: 0,
             thinking_started: false,
             thinking_block: 0,
             next_block_index: 0,
@@ -1126,7 +1128,7 @@ impl AnthropicSink {
             self.push("content_block_stop", json!({ "index": self.thinking_block }));
         }
         if self.text_started {
-            self.push("content_block_stop", json!({ "index": 0 }));
+            self.push("content_block_stop", json!({ "index": self.text_block }));
         }
         let mut tool_indexes: Vec<usize> = self.tools.values().copied().collect();
         tool_indexes.sort_unstable();
@@ -1153,12 +1155,14 @@ impl EventSink for AnthropicSink {
             StreamEvent::TextDelta { text } => {
                 if !self.text_started {
                     self.text_started = true;
-                    self.next_block_index = 1;
-                    self.start_block(0, json!({ "type": "text", "text": "" }));
+                    // 与思考块共用递增分配器：思考先行时它已占 0，正文不能硬编码 0
+                    self.text_block = self.next_block_index;
+                    self.next_block_index += 1;
+                    self.start_block(self.text_block, json!({ "type": "text", "text": "" }));
                 }
                 self.push(
                     "content_block_delta",
-                    json!({ "index": 0, "delta": { "type": "text_delta", "text": text } }),
+                    json!({ "index": self.text_block, "delta": { "type": "text_delta", "text": text } }),
                 );
             }
             StreamEvent::ThinkingDelta { text } => {
@@ -1763,6 +1767,39 @@ mod tests {
         assert!(out.contains("\"signature\":\"\""));
         assert!(out.contains("signature_delta"));
         assert!(out.contains("\"thinking\":\"想一下\""));
+    }
+
+    /// 思考块先行时正文块不得复用 index 0：两个 content_block_start 撞同一索引、
+    /// 且该索引上收到两次 content_block_stop，客户端解析会串块或直接报错。
+    #[tokio::test]
+    async fn anthropic_thinking_first_does_not_collide_with_text_block_index() {
+        let out = run(
+            ApiFormat::OpenaiCompletion,
+            ApiFormat::AnthropicMessage,
+            vec![
+                "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"想\"}}]}\n\n",
+                "data: {\"choices\":[{\"delta\":{\"content\":\"答\"},\"finish_reason\":\"stop\"}]}\n\n",
+            ],
+        )
+        .await;
+        // 思考块 0，正文块 1：块起始索引互不相同
+        assert!(
+            out.contains("\"content_block\":{\"signature\":\"\",\"thinking\":\"\",\"type\":\"thinking\"},\"index\":0"),
+            "{out}"
+        );
+        assert!(
+            out.contains("\"content_block\":{\"text\":\"\",\"type\":\"text\"},\"index\":1"),
+            "{out}"
+        );
+        // 每个索引恰好一次 content_block_stop
+        for index in [0, 1] {
+            assert_eq!(
+                out.matches(&format!("\"index\":{index},\"type\":\"content_block_stop\""))
+                    .count(),
+                1,
+                "index {index} 的 content_block_stop 次数不为 1: {out}"
+            );
+        }
     }
 
     #[tokio::test]
