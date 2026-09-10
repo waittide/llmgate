@@ -92,6 +92,9 @@ pub async fn fetch_catalog_from_models_dev() -> Result<()> {
 }
 
 /// 确保仅指定的渠道模型在数据库中拥有对应的目录参考价格。
+///
+/// 入参可含重复（同一模型名被多条渠道模型共用）与大小写差异：这里按归一化后的
+/// 名字去重，重复项只查一次目录、只写一次库。
 pub async fn ensure_model_prices(state: &AppState, model_names: &[String]) -> Result<()> {
     if GLOBAL_CATALOG_PRICES.is_empty()
         && let Err(e) = fetch_catalog_from_models_dev().await
@@ -99,9 +102,13 @@ pub async fn ensure_model_prices(state: &AppState, model_names: &[String]) -> Re
         warn!("获取 models.dev 价格目录失败: {}", e);
     }
 
+    let mut seen = std::collections::HashSet::new();
     let mut new_infos = Vec::new();
     for name in model_names {
         let lower = name.to_lowercase();
+        if !seen.insert(lower.clone()) {
+            continue;
+        }
         let price = get_catalog_price(&lower).unwrap_or_default();
         new_infos.push(ModelInfo { name: lower, price });
     }
