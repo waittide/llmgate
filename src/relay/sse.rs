@@ -80,7 +80,7 @@ pub(crate) fn extract_usage_from_sse_buffer(buffer: &mut Vec<u8>, usage: &mut Op
                     {
                         // 跨事件合并 Token 计数（例如 Anthropic 的 message_start 提供 input_tokens，
                         // 而 message_delta 提供 output_tokens）。
-                        let merged = match usage {
+                        let mut merged = match usage {
                             Some(existing) => Usage {
                                 prompt_tokens:      if existing.prompt_tokens > 0 {
                                     existing.prompt_tokens
@@ -110,6 +110,7 @@ pub(crate) fn extract_usage_from_sse_buffer(buffer: &mut Vec<u8>, usage: &mut Op
                             },
                             None => u,
                         };
+                        merged.normalize_total();
                         *usage = Some(merged);
                     }
                 }

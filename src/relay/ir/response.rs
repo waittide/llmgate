@@ -3,8 +3,8 @@
 use serde_json::{Value, json};
 
 use super::{
-    ContentPart, RelayResponse, anthropic_stop_reason, anthropic_usage, chat_finish_reason, chat_usage,
-    gemini_call_id, gemini_finish_reason, gemini_usage, responses_status, responses_usage, stop_reason_from_anthropic,
+    ContentPart, RelayResponse, anthropic_stop_reason, anthropic_usage, chat_finish_reason, chat_usage, gemini_call_id,
+    gemini_finish_reason, gemini_usage, responses_status, responses_usage, stop_reason_from_anthropic,
     stop_reason_from_chat, stop_reason_from_gemini, stop_reason_from_responses,
 };
 use crate::relay::{protocol::extract_usage_from_json, state::Usage};

@@ -90,7 +90,7 @@ pub trait EventSink {
 
 /// 字段级合并用量：非零值优先（例如 Anthropic 的 input/output 分属两个事件）。
 fn merge_usage(existing: &mut Option<Usage>, incoming: Usage) {
-    let merged = match existing.take() {
+    let mut merged = match existing.take() {
         Some(old) => Usage {
             prompt_tokens:      if old.prompt_tokens > 0 {
                 old.prompt_tokens
@@ -120,6 +120,7 @@ fn merge_usage(existing: &mut Option<Usage>, incoming: Usage) {
         },
         None => incoming,
     };
+    merged.normalize_total();
     *existing = Some(merged);
 }
 
@@ -1770,6 +1771,26 @@ mod tests {
         assert!(out.contains("\"signature\":\"\""));
         assert!(out.contains("signature_delta"));
         assert!(out.contains("\"thinking\":\"想一下\""));
+    }
+
+    /// 用量分阶段上报时 total 必须自洽：Anthropic 的 input 在 message_start、
+    /// output 在 message_delta，合并后 total 不能停留在只含 input 的陈旧值。
+    #[tokio::test]
+    async fn staged_usage_merge_keeps_total_consistent() {
+        let out = run(
+            ApiFormat::AnthropicMessage,
+            ApiFormat::OpenaiCompletion,
+            vec![
+                "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"m\",\"usage\":{\"input_tokens\":42,\"output_tokens\":0}}}\n\n",
+                "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"ok\"}}\n\n",
+                "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":9}}\n\n",
+                "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
+            ],
+        )
+        .await;
+        assert!(out.contains("\"prompt_tokens\":42"), "{out}");
+        assert!(out.contains("\"completion_tokens\":9"), "{out}");
+        assert!(out.contains("\"total_tokens\":51"), "total 必须为分项之和: {out}");
     }
 
     /// 思考块先行时正文块不得复用 index 0：两个 content_block_start 撞同一索引、

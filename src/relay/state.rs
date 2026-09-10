@@ -18,6 +18,20 @@ pub struct Usage {
     pub cache_write_tokens: i64,
 }
 
+impl Usage {
+    /// 分阶段用量合并后的自洽化。
+    ///
+    /// total 小于分项之和，说明它是上一阶段事件的陈旧值（Anthropic 的 input 与 output
+    /// 分属 message_start 与 message_delta，先到的 total 只含 input），以分项之和为准；
+    /// 反之（如 Gemini 把思考 token 计入 totalTokenCount 却不单列）保留上游口径。
+    pub fn normalize_total(&mut self) {
+        let sum = self.prompt_tokens + self.completion_tokens;
+        if self.total_tokens < sum {
+            self.total_tokens = sum;
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct RequestOverview {
