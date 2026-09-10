@@ -1117,6 +1117,9 @@ pub async fn forward_relay(
         }
     }
 
+    // 失败终态由下面这处统一落盘：必须先解除兜底 guard，否则它的 Drop 会在
+    // 同一 request_id 上再写一条 INTERRUPTED（覆盖 FAILED，且顺序随异步落盘漂移）。
+    relay_guard.defuse();
     build_failed_relay_response(
         &state,
         FailedRelayContext {

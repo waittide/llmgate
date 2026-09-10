@@ -603,6 +603,60 @@ mod tests {
         let _ = std::fs::remove_file(db_path);
     }
 
+    /// 转发以失败告终时，最终日志必须停在 failed。
+    ///
+    /// 回归：兜底注销的 RelayGuard 在失败路径上未被 defuse，其 Drop 会在同一个
+    /// request_id 上再写一条 INTERRUPTED，覆盖正常收尾写下的失败终态（两条异步
+    /// 落盘的先后不定，存档状态随机器而异）。
+    #[tokio::test]
+    async fn failed_relay_log_is_not_overwritten_by_the_guard() {
+        let (state, db_path) = test_support::setup_test_state("relay_failed_status").await;
+        let upstream = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::any())
+            .respond_with(wiremock::ResponseTemplate::new(400).set_body_string("bad request"))
+            .mount(&upstream)
+            .await;
+
+        let model = add_channel(&state, "bad", &upstream.uri(), "k", "m-status").await;
+        let mut group = crate::model::Group {
+            name: "m-status".into(),
+            mode: crate::model::GroupMode::Failover,
+            items: vec![crate::model::GroupItem {
+                channel_model_id: model.id,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        op::group::create_group(&state, &mut group).await.unwrap();
+
+        let resp = forward_relay(
+            state.clone(),
+            test_auth(),
+            ApiFormat::OpenaiCompletion,
+            None,
+            Uri::from_static("/v1/chat/completions"),
+            HeaderMap::new(),
+            chat_body("m-status").await,
+        )
+        .await;
+        assert_eq!(resp.status(), 400);
+
+        let log_id = 1;
+        assert_eq!(
+            wait_finished_log(&state, log_id).await.status,
+            crate::model::request_status::FAILED
+        );
+        // 兜底注销写在另一个任务里：留出落地时间，再确认终态没有被改写
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        let settled = op::log::get_request_log(&state, log_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(settled.status, crate::model::request_status::FAILED);
+
+        let _ = std::fs::remove_file(db_path);
+    }
+
     /// Anthropic 客户端打到 OpenAI 兼容上游：上游的错误体不得原样透传，
     /// 必须改写为 Anthropic 错误信封（否则 SDK 只能报“未知错误”）。
     #[tokio::test]
