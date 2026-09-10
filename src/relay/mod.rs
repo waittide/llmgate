@@ -657,4 +657,47 @@ mod tests {
         assert_eq!(log.total_tokens, 4);
         let _ = std::fs::remove_file(db_path);
     }
+
+    /// 同格式非流式响应必须原样透传上游字节：重新序列化会按 key 排序重排、
+    /// 改变数值书写形式，对大响应还多花一次序列化。
+    #[tokio::test]
+    async fn same_format_json_response_is_byte_identical() {
+        let (state, db_path) = test_support::setup_test_state("relay_same_fmt").await;
+        // key 顺序刻意非字典序，且带一个浮点值：回炉序列化会被重排
+        let upstream_body = r#"{"zzz":1,"choices":[{"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2,"cost":1.5}}"#;
+        let upstream = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::any())
+            .respond_with(wiremock::ResponseTemplate::new(200).set_body_string(upstream_body))
+            .mount(&upstream)
+            .await;
+
+        let model = add_channel(&state, "ch", &upstream.uri(), "k1", "m-same").await;
+        let mut group = crate::model::Group {
+            name: "m-same".into(),
+            mode: crate::model::GroupMode::Failover,
+            items: vec![crate::model::GroupItem {
+                channel_model_id: model.id,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        op::group::create_group(&state, &mut group).await.unwrap();
+
+        let resp = forward_relay(
+            state.clone(),
+            test_auth(),
+            ApiFormat::OpenaiCompletion,
+            None,
+            Uri::from_static("/v1/chat/completions"),
+            HeaderMap::new(),
+            chat_body("m-same").await,
+        )
+        .await;
+        assert_eq!(resp.status(), 200);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert_eq!(body.as_ref(), upstream_body.as_bytes());
+        let _ = std::fs::remove_file(db_path);
+    }
 }

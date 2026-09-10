@@ -449,7 +449,9 @@ fn complete_json_response(
     // 跨格式：上游格式 → IR → 客户端格式；同格式直通
     let upstream_format = ir::channel_format(&ctx.channel.channel_type);
     let converted = if ctx.format == upstream_format {
-        parsed.clone()
+        // 同格式直通：不回炉序列化。重新序列化会按 Map 排序重排 key（serde_json 默认
+        // BTreeMap）、改变数值书写形式，且对大响应白白多花一次序列化；用量仍取自 parsed。
+        None
     } else {
         parsed.as_ref().and_then(|val| {
             let resp = ir::parse_response(upstream_format, val, &ctx.log_base.model)?;
@@ -457,11 +459,7 @@ fn complete_json_response(
         })
     };
     let resp_bytes = if ctx.format == upstream_format {
-        converted
-            .as_ref()
-            .and_then(|val| serde_json::to_vec(val).ok())
-            .map(Bytes::from)
-            .unwrap_or(raw_bytes)
+        raw_bytes
     } else {
         match converted
             .as_ref()
