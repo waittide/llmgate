@@ -171,10 +171,29 @@ fn rollover_daily_if_needed(state: &AppState, now_date: &str) {
         persist_rollover(state, prev_daily, prev_hourlies);
     }
 }
+/// 按固定列序绑定指标七元组：`input_token / output_token / input_cost /
+/// output_cost / wait_time / request_success / request_failed`。
+///
+/// 六处统计写入（日、小时、总计、API Key、渠道、渠道模型）共用这一份绑定顺序，
+/// 新增指标只需改本宏与各 SQL 的列清单——原先六份逐字重复的绑定链正是漏改的来源。
+macro_rules! bind_metrics {
+    ($query:expr, $metrics:expr) => {
+        $query
+            .bind($metrics.input_token)
+            .bind($metrics.output_token)
+            .bind($metrics.input_cost)
+            .bind($metrics.output_cost)
+            .bind($metrics.wait_time)
+            .bind($metrics.request_success)
+            .bind($metrics.request_failed)
+    };
+}
+
 /// 日统计 upsert：跨天结转与定时落盘共用同一份语句，列集不漂移。
 async fn upsert_daily_stats(conn: &mut sqlx::SqliteConnection, daily: &StatsDaily) -> sqlx::Result<()> {
-    sqlx::query(
-        r#"
+    bind_metrics!(
+        sqlx::query(
+            r#"
         INSERT INTO stats_dailies (date, input_token, output_token, input_cost, output_cost, wait_time, request_success, request_failed)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(date) DO UPDATE SET
@@ -186,15 +205,10 @@ async fn upsert_daily_stats(conn: &mut sqlx::SqliteConnection, daily: &StatsDail
             request_success = excluded.request_success,
             request_failed = excluded.request_failed
         "#,
+        )
+        .bind(&daily.date),
+        &daily.metrics
     )
-    .bind(&daily.date)
-    .bind(daily.metrics.input_token)
-    .bind(daily.metrics.output_token)
-    .bind(daily.metrics.input_cost)
-    .bind(daily.metrics.output_cost)
-    .bind(daily.metrics.wait_time)
-    .bind(daily.metrics.request_success)
-    .bind(daily.metrics.request_failed)
     .execute(conn)
     .await?;
     Ok(())
@@ -202,8 +216,9 @@ async fn upsert_daily_stats(conn: &mut sqlx::SqliteConnection, daily: &StatsDail
 
 /// 小时统计 upsert（同上）。
 async fn upsert_hourly_stats(conn: &mut sqlx::SqliteConnection, hourly: &StatsHourly) -> sqlx::Result<()> {
-    sqlx::query(
-        r#"
+    bind_metrics!(
+        sqlx::query(
+            r#"
         INSERT INTO stats_hourlies (hour, date, input_token, output_token, input_cost, output_cost, wait_time, request_success, request_failed)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(hour, date) DO UPDATE SET
@@ -215,16 +230,11 @@ async fn upsert_hourly_stats(conn: &mut sqlx::SqliteConnection, hourly: &StatsHo
             request_success = excluded.request_success,
             request_failed = excluded.request_failed
         "#,
+        )
+        .bind(hourly.hour)
+        .bind(&hourly.date),
+        &hourly.metrics
     )
-    .bind(hourly.hour)
-    .bind(&hourly.date)
-    .bind(hourly.metrics.input_token)
-    .bind(hourly.metrics.output_token)
-    .bind(hourly.metrics.input_cost)
-    .bind(hourly.metrics.output_cost)
-    .bind(hourly.metrics.wait_time)
-    .bind(hourly.metrics.request_success)
-    .bind(hourly.metrics.request_failed)
     .execute(conn)
     .await?;
     Ok(())
@@ -245,14 +255,7 @@ async fn upsert_owner_metrics(
     id: i64,
     m: &StatsMetrics,
 ) -> sqlx::Result<()> {
-    sqlx::query(sql)
-        .bind(m.input_token)
-        .bind(m.output_token)
-        .bind(m.input_cost)
-        .bind(m.output_cost)
-        .bind(m.wait_time)
-        .bind(m.request_success)
-        .bind(m.request_failed)
+    bind_metrics!(sqlx::query(sql), m)
         .bind(id)
         .execute(conn)
         .await?;
@@ -362,8 +365,9 @@ pub async fn flush_stats_to_db(state: &AppState) -> Result<()> {
         let s = state.stats.read();
         (s.total.clone(), s.daily.clone(), s.hourly.clone())
     };
-    sqlx::query(
-        r#"
+    bind_metrics!(
+        sqlx::query(
+            r#"
         INSERT INTO stats_totals (id, input_token, output_token, input_cost, output_cost, wait_time, request_success, request_failed)
         VALUES (1, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(id) DO UPDATE SET
@@ -375,14 +379,9 @@ pub async fn flush_stats_to_db(state: &AppState) -> Result<()> {
             request_success = excluded.request_success,
             request_failed = excluded.request_failed
         "#,
+        ),
+        &total.metrics
     )
-    .bind(total.metrics.input_token)
-    .bind(total.metrics.output_token)
-    .bind(total.metrics.input_cost)
-    .bind(total.metrics.output_cost)
-    .bind(total.metrics.wait_time)
-    .bind(total.metrics.request_success)
-    .bind(total.metrics.request_failed)
     .execute(&mut *tx)
     .await?;
 
@@ -397,8 +396,9 @@ pub async fn flush_stats_to_db(state: &AppState) -> Result<()> {
     // 4. 落盘各 API Key 统计
     for entry in state.stats_api_keys.iter() {
         let k = entry.value();
-        sqlx::query(
-            r#"
+        bind_metrics!(
+            sqlx::query(
+                r#"
             INSERT INTO stats_api_keys (api_key_id, input_token, output_token, input_cost, output_cost, wait_time, request_success, request_failed)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(api_key_id) DO UPDATE SET
@@ -410,15 +410,10 @@ pub async fn flush_stats_to_db(state: &AppState) -> Result<()> {
                 request_success = excluded.request_success,
                 request_failed = excluded.request_failed
             "#,
+            )
+            .bind(k.api_key_id),
+            &k.metrics
         )
-        .bind(k.api_key_id)
-        .bind(k.metrics.input_token)
-        .bind(k.metrics.output_token)
-        .bind(k.metrics.input_cost)
-        .bind(k.metrics.output_cost)
-        .bind(k.metrics.wait_time)
-        .bind(k.metrics.request_success)
-        .bind(k.metrics.request_failed)
         .execute(&mut *tx)
         .await?;
     }
