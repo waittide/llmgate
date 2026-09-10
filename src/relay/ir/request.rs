@@ -112,7 +112,8 @@ pub(super) fn parse_chat(val: &Value) -> Option<RelayRequest> {
     if let Some(messages) = obj.get("messages").and_then(Value::as_array) {
         for msg in messages {
             let role_str = as_str(msg.get("role")).unwrap_or("user");
-            if role_str == "system" {
+            // developer 是 OpenAI 新版模型对 system 的替代写法，同样承载顶层指令
+            if role_str == "system" || role_str == "developer" {
                 push_system_text(&mut req.system, msg.get("content"));
                 continue;
             }
@@ -342,6 +343,8 @@ pub(super) fn parse_responses(val: &Value) -> Option<RelayRequest> {
 
     // 生成的 call_id 栈：function_call_output 缺失 call_id 时按序回退复用
     let mut call_lookup: Vec<String> = Vec::new();
+    // call_id → 函数名：function_call_output 只带 call_id，Gemini functionResponse 需要函数名
+    let mut call_names: HashMap<String, String> = HashMap::new();
 
     // 连续 assistant 输出项（文本 + 函数调用）聚合为单条消息
     let mut pending_assistant: Option<Message> = None;
@@ -352,13 +355,15 @@ pub(super) fn parse_responses(val: &Value) -> Option<RelayRequest> {
                     .or_else(|| owned_str(item.get("id")))
                     .unwrap_or_else(|| format!("call_{}", nanoid::nanoid!(20)));
                 call_lookup.push(call_id.clone());
+                let name = owned_str(item.get("name")).unwrap_or_default();
+                call_names.insert(call_id.clone(), name.clone());
                 let message = pending_assistant.get_or_insert_with(|| Message {
                     role:    Role::Assistant,
                     content: Vec::new(),
                 });
                 message.content.push(ContentPart::ToolCall {
-                    id:        call_id,
-                    name:      owned_str(item.get("name")).unwrap_or_default(),
+                    id: call_id,
+                    name,
                     arguments: arguments_from_string(item.get("arguments")),
                 });
             }
@@ -375,19 +380,21 @@ pub(super) fn parse_responses(val: &Value) -> Option<RelayRequest> {
                     Some(other) => Value::String(serde_json::to_string(other).unwrap_or_default()),
                     None => Value::String(String::new()),
                 };
+                let name = call_names.get(&call_id).cloned();
                 req.messages.push(Message {
                     role:    Role::Tool,
-                    content: vec![ContentPart::ToolResult {
-                        call_id,
-                        name: None,
-                        content,
-                    }],
+                    content: vec![ContentPart::ToolResult { call_id, name, content }],
                 });
             }
             // reasoning / web_search_call 等无法映射的项跳过，避免空 user 消息污染上下文
             "reasoning" => {}
             "message" | "" => {
                 let role_str = as_str(item.get("role")).unwrap_or("user");
+                // developer / system 项承载顶层指令，不进消息序列
+                if role_str == "system" || role_str == "developer" {
+                    push_system_text(&mut req.system, item.get("content"));
+                    continue;
+                }
                 let role = if role_str == "assistant" {
                     Role::Assistant
                 } else {
@@ -1238,8 +1245,17 @@ pub(super) fn emit_anthropic(req: &RelayRequest) -> Value {
 }
 
 /// 渲染消息内容：纯文本（含空）折叠为字符串，其余渲染为块数组。
+/// 带 cache_control 的文本块承载缓存断点，折叠会丢掉它，必须走块数组。
 fn render_anthropic_content(parts: &[ContentPart]) -> Value {
-    if parts.iter().all(|p| matches!(p, ContentPart::Text { .. })) {
+    if parts.iter().all(|p| {
+        matches!(
+            p,
+            ContentPart::Text {
+                cache_control: None,
+                ..
+            }
+        )
+    }) {
         let joined: String = parts
             .iter()
             .map(|p| match p {
@@ -2282,5 +2298,71 @@ mod tests {
             "safety_identifier 不得进入 Chat Completions"
         );
         assert_eq!(out.get("model").and_then(Value::as_str), Some("glm-5.3-flash"));
+    }
+
+    /// Responses 的 function_call_output 只带 call_id：转 Gemini 时名称必须由
+    /// 前序 function_call 回填，空名称会被 Gemini 上游直接判 400。
+    #[test]
+    fn responses_tool_output_keeps_name_for_gemini() {
+        let responses = json!({
+            "model": "m",
+            "input": [
+                { "type": "function_call", "call_id": "r1", "name": "get_weather", "arguments": "{\"city\":\"Paris\"}" },
+                { "type": "function_call_output", "call_id": "r1", "output": "23C" }
+            ],
+            "tools": [{ "type": "function", "name": "get_weather", "parameters": { "type": "object" } }]
+        });
+        let gemini = convert(ApiFormat::OpenaiResponse, &responses, ApiFormat::GeminiGenerate);
+        let contents = gemini.get("contents").unwrap().as_array().unwrap();
+        let response = contents
+            .iter()
+            .find_map(|c| c.pointer("/parts/0/functionResponse"))
+            .expect("缺少 functionResponse");
+        assert_eq!(response.get("name").unwrap(), "get_weather");
+    }
+
+    /// 带 cache_control 的纯文本消息承载 Anthropic 缓存断点，不能被折叠成字符串丢弃。
+    #[test]
+    fn anthropic_cache_control_survives_text_fold() {
+        let chat = json!({
+            "model": "m",
+            "messages": [{
+                "role": "user",
+                "content": [{ "type": "text", "text": "长上下文", "cache_control": { "type": "ephemeral" } }]
+            }]
+        });
+        let anthropic = convert(ApiFormat::OpenaiCompletion, &chat, ApiFormat::AnthropicMessage);
+        let content = anthropic.pointer("/messages/0/content").unwrap();
+        assert!(content.is_array(), "缓存断点必须保留块数组形式: {content}");
+        assert_eq!(content.pointer("/0/cache_control/type").unwrap(), "ephemeral");
+    }
+
+    /// developer 是 OpenAI 新版模型承载顶层指令的角色，与 system 等同处理；
+    /// 当成 user 消息会把系统指令混入对话上下文。
+    #[test]
+    fn chat_developer_role_becomes_system_instruction() {
+        let chat = json!({
+            "model": "m",
+            "messages": [
+                { "role": "developer", "content": "只输出 JSON" },
+                { "role": "user", "content": "hi" }
+            ]
+        });
+        let anthropic = convert(ApiFormat::OpenaiCompletion, &chat, ApiFormat::AnthropicMessage);
+        assert_eq!(anthropic.pointer("/system").unwrap(), "只输出 JSON");
+        assert_eq!(anthropic.get("messages").unwrap().as_array().unwrap().len(), 1);
+
+        let responses = json!({
+            "model": "m",
+            "input": [
+                { "type": "message", "role": "developer", "content": [{ "type": "input_text", "text": "只输出 JSON" }] },
+                { "type": "message", "role": "user", "content": [{ "type": "input_text", "text": "hi" }] }
+            ]
+        });
+        let gemini = convert(ApiFormat::OpenaiResponse, &responses, ApiFormat::GeminiGenerate);
+        assert_eq!(
+            gemini.pointer("/system_instruction/parts/0/text").unwrap(),
+            "只输出 JSON"
+        );
     }
 }
