@@ -59,6 +59,8 @@ pub struct AppState {
     pub route_manager:  Arc<RouteManager>,
     pub key_pool:       Arc<KeyPool>,
     pub in_flight:      Arc<InFlightRegistry>,
+    /// 渠道 / 渠道模型指标的脏标记：落盘只写变动过的行（见 op::stats::StatsDirty）
+    pub stats_dirty:    Arc<stats::StatsDirty>,
     /// JWT 签名密钥：首次启动生成高熵随机值并持久化到 settings 表（见
     /// op::user::ensure_jwt_secret），跨重启稳定，与账号密码解耦。
     pub jwt_secret:     Arc<RwLock<String>>,
@@ -95,6 +97,7 @@ impl AppState {
             stats_api_keys: Arc::new(DashMap::new()),
             route_manager:  Arc::new(RouteManager::new()),
             in_flight:      Arc::new(InFlightRegistry::new()),
+            stats_dirty:    Arc::new(stats::StatsDirty::default()),
             key_pool:       Arc::new(KeyPool::new()),
             jwt_secret:     Arc::new(RwLock::new("llmgate-jwt-secret-default".to_string())),
         };

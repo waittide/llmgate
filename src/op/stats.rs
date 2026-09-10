@@ -262,6 +262,41 @@ async fn upsert_owner_metrics(
     Ok(())
 }
 
+/// 指标落盘的脏标记：只写变动过的渠道 / 渠道模型。
+///
+/// 落盘周期（默认 10s）固定遍历全部渠道与模型时，绝大多数行的值自上一轮起并未
+/// 变化，却每条都产生一次 UPDATE——纯写放大，且都落在 SQLite 唯一的写路径上。
+/// 由写入侧标记、落盘侧消费。
+#[derive(Default)]
+pub struct StatsDirty {
+    channels:       parking_lot::Mutex<std::collections::HashSet<i64>>,
+    channel_models: parking_lot::Mutex<std::collections::HashSet<i64>>,
+}
+
+impl StatsDirty {
+    pub fn mark_channel(&self, id: i64) {
+        self.channels.lock().insert(id);
+    }
+
+    pub fn mark_channel_model(&self, id: i64) {
+        self.channel_models.lock().insert(id);
+    }
+
+    /// 取走当前待落盘的两个集合。
+    ///
+    /// 顺序是先取走、后读值：取走后发生的更新会重新入集、留待下一轮（不丢），
+    /// 而本轮读到的值必定不早于标记时刻（不旧）。
+    fn take(&self) -> (Vec<i64>, Vec<i64>) {
+        let channels = std::mem::take(&mut *self.channels.lock())
+            .into_iter()
+            .collect();
+        let channel_models = std::mem::take(&mut *self.channel_models.lock())
+            .into_iter()
+            .collect();
+        (channels, channel_models)
+    }
+}
+
 pub fn record_metrics(state: &AppState, api_key_id: i64, channel_id: i64, channel_model_id: i64, delta: &StatsMetrics) {
     let now = chrono::Local::now();
     let now_date = now.format("%Y%m%d").to_string();
@@ -292,12 +327,25 @@ pub fn record_metrics(state: &AppState, api_key_id: i64, channel_id: i64, channe
             .add(delta);
     }
 
-    // 3. 更新渠道及渠道模型内存指标
-    if let Some(mut ch) = state.channels.get_mut(&channel_id) {
+    // 3. 更新渠道及渠道模型内存指标，并标记为待落盘（只有它们变动过）
+    let touched_channel = if let Some(mut ch) = state.channels.get_mut(&channel_id) {
         ch.metrics.add(delta);
+        true
+    } else {
+        false
+    };
+    if touched_channel {
+        state.stats_dirty.mark_channel(channel_id);
     }
-    if let Some(mut cm) = state.channel_models.get_mut(&channel_model_id) {
+
+    let touched_model = if let Some(mut cm) = state.channel_models.get_mut(&channel_model_id) {
         cm.metrics.add(delta);
+        true
+    } else {
+        false
+    };
+    if touched_model {
+        state.stats_dirty.mark_channel_model(channel_model_id);
     }
 }
 
@@ -394,8 +442,13 @@ pub async fn flush_stats_to_db(state: &AppState) -> Result<()> {
     }
 
     // 4. 落盘各 API Key 统计
-    for entry in state.stats_api_keys.iter() {
-        let k = entry.value();
+    // 先取快照再写库：DashMap 的迭代守卫不跨 await 持有，避免写库期间占着分片锁
+    let api_key_stats: Vec<(i64, StatsMetrics)> = state
+        .stats_api_keys
+        .iter()
+        .map(|entry| (entry.api_key_id, entry.metrics.clone()))
+        .collect();
+    for (api_key_id, metrics) in api_key_stats {
         bind_metrics!(
             sqlx::query(
                 r#"
@@ -411,26 +464,67 @@ pub async fn flush_stats_to_db(state: &AppState) -> Result<()> {
                 request_failed = excluded.request_failed
             "#,
             )
-            .bind(k.api_key_id),
-            &k.metrics
+            .bind(api_key_id),
+            &metrics
         )
         .execute(&mut *tx)
         .await?;
     }
 
-    // 5. 落盘渠道与渠道模型指标
-    for entry in state.channels.iter() {
-        let ch = entry.value();
-        upsert_owner_metrics(&mut tx, UPDATE_CHANNEL_METRICS, ch.id, &ch.metrics).await?;
-    }
-
-    for entry in state.channel_models.iter() {
-        let cm = entry.value();
-        upsert_owner_metrics(&mut tx, UPDATE_CHANNEL_MODEL_METRICS, cm.id, &cm.metrics).await?;
-    }
+    // 5. 落盘渠道与渠道模型指标：只写自上一轮起变动过的行
+    flush_owner_metrics(state, &mut tx).await?;
 
     tx.commit().await?;
     Ok(())
+}
+
+/// 落盘自上一轮起变动过的渠道 / 渠道模型指标。
+///
+/// 失败时把标记还回去：本轮事务已回滚，这些行仍是脏的，下一轮必须重试——
+/// 否则一次瞬时写失败会让它们的落盘值一直停在变化之前。
+async fn flush_owner_metrics(state: &AppState, conn: &mut sqlx::SqliteConnection) -> Result<()> {
+    let (channels, channel_models) = state.stats_dirty.take();
+
+    // 指标先克隆出来再写库：DashMap 的读守卫不跨 await 持有
+    let channel_rows: Vec<(i64, StatsMetrics)> = channels
+        .iter()
+        .filter_map(|id| state.channels.get(id).map(|ch| (ch.id, ch.metrics.clone())))
+        .collect();
+    let model_rows: Vec<(i64, StatsMetrics)> = channel_models
+        .iter()
+        .filter_map(|id| {
+            state
+                .channel_models
+                .get(id)
+                .map(|cm| (cm.id, cm.metrics.clone()))
+        })
+        .collect();
+
+    let mut result = Ok(());
+    for (id, metrics) in &channel_rows {
+        if let Err(e) = upsert_owner_metrics(conn, UPDATE_CHANNEL_METRICS, *id, metrics).await {
+            result = Err(e.into());
+            break;
+        }
+    }
+    if result.is_ok() {
+        for (id, metrics) in &model_rows {
+            if let Err(e) = upsert_owner_metrics(conn, UPDATE_CHANNEL_MODEL_METRICS, *id, metrics).await {
+                result = Err(e.into());
+                break;
+            }
+        }
+    }
+
+    if result.is_err() {
+        for id in channels {
+            state.stats_dirty.mark_channel(id);
+        }
+        for id in channel_models {
+            state.stats_dirty.mark_channel_model(id);
+        }
+    }
+    result
 }
 
 #[cfg(test)]
@@ -498,6 +592,55 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(daily, (7, 3));
+
+        let _ = std::fs::remove_file(db_path);
+    }
+
+    /// 脏标记被落盘消费后，其后的新增指标必须仍能进入下一轮落盘。
+    /// 回归：若消费后不再重新标记（或标记只在建缓存时打），第二次增量会永远
+    /// 停在内存里，数据库停在上一轮的值。
+    #[tokio::test]
+    async fn metrics_recorded_after_a_flush_are_persisted_by_the_next_one() {
+        let (state, db_path) = setup_test_state("stats_dirty_cycle").await;
+
+        let ch_id =
+            sqlx::query("INSERT INTO channels (name, type, base_url, key) VALUES ('c', 'openai', 'https://x', 'k')")
+                .execute(&state.db)
+                .await
+                .unwrap()
+                .last_insert_rowid();
+        let cm_id = sqlx::query("INSERT INTO channel_models (channel_id, name) VALUES (?, 'm')")
+            .bind(ch_id)
+            .execute(&state.db)
+            .await
+            .unwrap()
+            .last_insert_rowid();
+        crate::op::channel::refresh_channel_cache(&state)
+            .await
+            .unwrap();
+
+        let delta = StatsMetrics {
+            input_token: 7,
+            request_success: 1,
+            ..Default::default()
+        };
+        for _ in 0..2 {
+            record_metrics(&state, 0, ch_id, cm_id, &delta);
+            flush_stats_to_db(&state).await.unwrap();
+        }
+
+        let ch_input: (i64,) = sqlx::query_as("SELECT input_token FROM channels WHERE id = ?")
+            .bind(ch_id)
+            .fetch_one(&state.db)
+            .await
+            .unwrap();
+        assert_eq!(ch_input.0, 14, "第二轮增量也必须落盘");
+        let cm_input: (i64,) = sqlx::query_as("SELECT input_token FROM channel_models WHERE id = ?")
+            .bind(cm_id)
+            .fetch_one(&state.db)
+            .await
+            .unwrap();
+        assert_eq!(cm_input.0, 14);
 
         let _ = std::fs::remove_file(db_path);
     }
