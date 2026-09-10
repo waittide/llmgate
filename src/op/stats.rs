@@ -135,66 +135,21 @@ fn rollover_daily_if_needed(state: &AppState, now_date: &str) {
             }
         };
 
-        let res = sqlx::query(
-            r#"
-            INSERT INTO stats_dailies (date, input_token, output_token, input_cost, output_cost, wait_time, request_success, request_failed)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(date) DO UPDATE SET
-                input_token = excluded.input_token,
-                output_token = excluded.output_token,
-                input_cost = excluded.input_cost,
-                output_cost = excluded.output_cost,
-                wait_time = excluded.wait_time,
-                request_success = excluded.request_success,
-                request_failed = excluded.request_failed
-            "#,
-        )
-        .bind(&prev_daily.date)
-        .bind(prev_daily.metrics.input_token)
-        .bind(prev_daily.metrics.output_token)
-        .bind(prev_daily.metrics.input_cost)
-        .bind(prev_daily.metrics.output_cost)
-        .bind(prev_daily.metrics.wait_time)
-        .bind(prev_daily.metrics.request_success)
-        .bind(prev_daily.metrics.request_failed)
-        .execute(&mut *tx)
-        .await;
-
-        if let Err(e) = res {
+        // 单条写入失败即中止整个结转事务（tx drop 自动回滚），
+        // 避免部分写入被提交造成统计静默损坏
+        if let Err(e) = upsert_daily_stats(&mut tx, &prev_daily).await {
             tracing::error!("写入结转的每日统计失败: {}", e);
             return;
         }
 
         for h in prev_hourlies {
-            if let Err(e) = sqlx::query(
-                r#"
-                INSERT INTO stats_hourlies (hour, date, input_token, output_token, input_cost, output_cost, wait_time, request_success, request_failed)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(hour, date) DO UPDATE SET
-                    input_token = excluded.input_token,
-                    output_token = excluded.output_token,
-                    input_cost = excluded.input_cost,
-                    output_cost = excluded.output_cost,
-                    wait_time = excluded.wait_time,
-                    request_success = excluded.request_success,
-                    request_failed = excluded.request_failed
-                "#,
-            )
-            .bind(h.hour)
-            .bind(&h.date)
-            .bind(h.metrics.input_token)
-            .bind(h.metrics.output_token)
-            .bind(h.metrics.input_cost)
-            .bind(h.metrics.output_cost)
-            .bind(h.metrics.wait_time)
-            .bind(h.metrics.request_success)
-            .bind(h.metrics.request_failed)
-            .execute(&mut *tx)
-            .await
-            {
-                // 单条小时写入失败即中止整个结转事务（tx drop 自动回滚），
-                // 避免部分写入被提交造成统计静默损坏
-                tracing::error!("写入结转的小时统计失败（hour={} date={}），事务已回滚: {}", h.hour, h.date, e);
+            if let Err(e) = upsert_hourly_stats(&mut tx, &h).await {
+                tracing::error!(
+                    "写入结转的小时统计失败（hour={} date={}），事务已回滚: {}",
+                    h.hour,
+                    h.date,
+                    e
+                );
                 return;
             }
         }
@@ -204,6 +159,94 @@ fn rollover_daily_if_needed(state: &AppState, now_date: &str) {
         }
     });
 }
+/// 日统计 upsert：跨天结转与定时落盘共用同一份语句，列集不漂移。
+async fn upsert_daily_stats(conn: &mut sqlx::SqliteConnection, daily: &StatsDaily) -> sqlx::Result<()> {
+    sqlx::query(
+        r#"
+        INSERT INTO stats_dailies (date, input_token, output_token, input_cost, output_cost, wait_time, request_success, request_failed)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(date) DO UPDATE SET
+            input_token = excluded.input_token,
+            output_token = excluded.output_token,
+            input_cost = excluded.input_cost,
+            output_cost = excluded.output_cost,
+            wait_time = excluded.wait_time,
+            request_success = excluded.request_success,
+            request_failed = excluded.request_failed
+        "#,
+    )
+    .bind(&daily.date)
+    .bind(daily.metrics.input_token)
+    .bind(daily.metrics.output_token)
+    .bind(daily.metrics.input_cost)
+    .bind(daily.metrics.output_cost)
+    .bind(daily.metrics.wait_time)
+    .bind(daily.metrics.request_success)
+    .bind(daily.metrics.request_failed)
+    .execute(conn)
+    .await?;
+    Ok(())
+}
+
+/// 小时统计 upsert（同上）。
+async fn upsert_hourly_stats(conn: &mut sqlx::SqliteConnection, hourly: &StatsHourly) -> sqlx::Result<()> {
+    sqlx::query(
+        r#"
+        INSERT INTO stats_hourlies (hour, date, input_token, output_token, input_cost, output_cost, wait_time, request_success, request_failed)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(hour, date) DO UPDATE SET
+            input_token = excluded.input_token,
+            output_token = excluded.output_token,
+            input_cost = excluded.input_cost,
+            output_cost = excluded.output_cost,
+            wait_time = excluded.wait_time,
+            request_success = excluded.request_success,
+            request_failed = excluded.request_failed
+        "#,
+    )
+    .bind(hourly.hour)
+    .bind(&hourly.date)
+    .bind(hourly.metrics.input_token)
+    .bind(hourly.metrics.output_token)
+    .bind(hourly.metrics.input_cost)
+    .bind(hourly.metrics.output_cost)
+    .bind(hourly.metrics.wait_time)
+    .bind(hourly.metrics.request_success)
+    .bind(hourly.metrics.request_failed)
+    .execute(conn)
+    .await?;
+    Ok(())
+}
+
+/// 渠道指标的落盘 SQL（渠道与渠道模型列名、语义完全一致，仅表名不同）。
+const UPDATE_CHANNEL_METRICS: &str = "UPDATE channels SET input_token = ?, output_token = ?, input_cost = ?, \
+     output_cost = ?, wait_time = ?, request_success = ?, request_failed = ? WHERE id = ?";
+
+/// 渠道模型指标的落盘 SQL。
+const UPDATE_CHANNEL_MODEL_METRICS: &str = "UPDATE channel_models SET input_token = ?, output_token = ?, \
+     input_cost = ?, output_cost = ?, wait_time = ?, request_success = ?, request_failed = ? WHERE id = ?";
+
+/// 渠道 / 渠道模型指标落盘（语句由调用方以常量给出，不接受运行时拼接）。
+async fn upsert_owner_metrics(
+    conn: &mut sqlx::SqliteConnection,
+    sql: &'static str,
+    id: i64,
+    m: &StatsMetrics,
+) -> sqlx::Result<()> {
+    sqlx::query(sql)
+        .bind(m.input_token)
+        .bind(m.output_token)
+        .bind(m.input_cost)
+        .bind(m.output_cost)
+        .bind(m.wait_time)
+        .bind(m.request_success)
+        .bind(m.request_failed)
+        .bind(id)
+        .execute(conn)
+        .await?;
+    Ok(())
+}
+
 pub fn record_metrics(state: &AppState, api_key_id: i64, channel_id: i64, channel_model_id: i64, delta: &StatsMetrics) {
     let now_date = today_date();
     let current_hour = chrono::Local::now()
@@ -340,58 +383,11 @@ pub async fn flush_stats_to_db(state: &AppState) -> Result<()> {
     .await?;
 
     // 2. 落盘今日统计
-    sqlx::query(
-        r#"
-        INSERT INTO stats_dailies (date, input_token, output_token, input_cost, output_cost, wait_time, request_success, request_failed)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT(date) DO UPDATE SET
-            input_token = excluded.input_token,
-            output_token = excluded.output_token,
-            input_cost = excluded.input_cost,
-            output_cost = excluded.output_cost,
-            wait_time = excluded.wait_time,
-            request_success = excluded.request_success,
-            request_failed = excluded.request_failed
-        "#,
-    )
-    .bind(&daily.date)
-    .bind(daily.metrics.input_token)
-    .bind(daily.metrics.output_token)
-    .bind(daily.metrics.input_cost)
-    .bind(daily.metrics.output_cost)
-    .bind(daily.metrics.wait_time)
-    .bind(daily.metrics.request_success)
-    .bind(daily.metrics.request_failed)
-    .execute(&mut *tx)
-    .await?;
+    upsert_daily_stats(&mut tx, &daily).await?;
 
     // 3. 落盘每小时统计
     for h in &hourlies {
-        sqlx::query(
-            r#"
-            INSERT INTO stats_hourlies (hour, date, input_token, output_token, input_cost, output_cost, wait_time, request_success, request_failed)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(hour, date) DO UPDATE SET
-                input_token = excluded.input_token,
-                output_token = excluded.output_token,
-                input_cost = excluded.input_cost,
-                output_cost = excluded.output_cost,
-                wait_time = excluded.wait_time,
-                request_success = excluded.request_success,
-                request_failed = excluded.request_failed
-            "#,
-        )
-        .bind(h.hour)
-        .bind(&h.date)
-        .bind(h.metrics.input_token)
-        .bind(h.metrics.output_token)
-        .bind(h.metrics.input_cost)
-        .bind(h.metrics.output_cost)
-        .bind(h.metrics.wait_time)
-        .bind(h.metrics.request_success)
-        .bind(h.metrics.request_failed)
-        .execute(&mut *tx)
-        .await?;
+        upsert_hourly_stats(&mut tx, h).await?;
     }
 
     // 4. 落盘各 API Key 统计
@@ -426,46 +422,12 @@ pub async fn flush_stats_to_db(state: &AppState) -> Result<()> {
     // 5. 落盘渠道与渠道模型指标
     for entry in state.channels.iter() {
         let ch = entry.value();
-        sqlx::query(
-            r#"
-            UPDATE channels SET
-                input_token = ?, output_token = ?, input_cost = ?, output_cost = ?,
-                wait_time = ?, request_success = ?, request_failed = ?
-            WHERE id = ?
-            "#,
-        )
-        .bind(ch.metrics.input_token)
-        .bind(ch.metrics.output_token)
-        .bind(ch.metrics.input_cost)
-        .bind(ch.metrics.output_cost)
-        .bind(ch.metrics.wait_time)
-        .bind(ch.metrics.request_success)
-        .bind(ch.metrics.request_failed)
-        .bind(ch.id)
-        .execute(&mut *tx)
-        .await?;
+        upsert_owner_metrics(&mut tx, UPDATE_CHANNEL_METRICS, ch.id, &ch.metrics).await?;
     }
 
     for entry in state.channel_models.iter() {
         let cm = entry.value();
-        sqlx::query(
-            r#"
-            UPDATE channel_models SET
-                input_token = ?, output_token = ?, input_cost = ?, output_cost = ?,
-                wait_time = ?, request_success = ?, request_failed = ?
-            WHERE id = ?
-            "#,
-        )
-        .bind(cm.metrics.input_token)
-        .bind(cm.metrics.output_token)
-        .bind(cm.metrics.input_cost)
-        .bind(cm.metrics.output_cost)
-        .bind(cm.metrics.wait_time)
-        .bind(cm.metrics.request_success)
-        .bind(cm.metrics.request_failed)
-        .bind(cm.id)
-        .execute(&mut *tx)
-        .await?;
+        upsert_owner_metrics(&mut tx, UPDATE_CHANNEL_MODEL_METRICS, cm.id, &cm.metrics).await?;
     }
 
     tx.commit().await?;
@@ -476,6 +438,70 @@ pub async fn flush_stats_to_db(state: &AppState) -> Result<()> {
 mod tests {
     use super::*;
     use crate::test_support::setup_test_state;
+
+    /// 落盘必须把内存中的渠道与渠道模型指标写进各自的表：
+    /// 两个 UPDATE 语句列集不同，写错会静默丢字段。
+    #[tokio::test]
+    async fn flush_persists_channel_and_model_metrics() {
+        let (state, db_path) = setup_test_state("stats_flush").await;
+
+        let ch_id =
+            sqlx::query("INSERT INTO channels (name, type, base_url, key) VALUES ('c', 'openai', 'https://x', 'k')")
+                .execute(&state.db)
+                .await
+                .unwrap()
+                .last_insert_rowid();
+        let cm_id = sqlx::query("INSERT INTO channel_models (channel_id, name) VALUES (?, 'm')")
+            .bind(ch_id)
+            .execute(&state.db)
+            .await
+            .unwrap()
+            .last_insert_rowid();
+        crate::op::channel::refresh_channel_cache(&state)
+            .await
+            .unwrap();
+
+        let delta = StatsMetrics {
+            input_token:     7,
+            output_token:    3,
+            input_cost:      0.5,
+            output_cost:     1.5,
+            wait_time:       12,
+            request_success: 1,
+            request_failed:  0,
+        };
+        record_metrics(&state, 0, ch_id, cm_id, &delta);
+        flush_stats_to_db(&state).await.unwrap();
+
+        let ch_row: (i64, i64, f64, f64, i64, i64, i64) = sqlx::query_as(
+            "SELECT input_token, output_token, input_cost, output_cost, wait_time, request_success, request_failed FROM channels WHERE id = ?",
+        )
+        .bind(ch_id)
+        .fetch_one(&state.db)
+        .await
+        .unwrap();
+        assert_eq!(ch_row, (7, 3, 0.5, 1.5, 12, 1, 0));
+
+        let cm_row: (i64, i64, f64, i64) = sqlx::query_as(
+            "SELECT input_token, output_token, output_cost, request_success FROM channel_models WHERE id = ?",
+        )
+        .bind(cm_id)
+        .fetch_one(&state.db)
+        .await
+        .unwrap();
+        assert_eq!(cm_row, (7, 3, 1.5, 1));
+
+        // 今日与当前小时统计同样落盘（内存值即数据库值）
+        let today = state.stats.read().daily.date.clone();
+        let daily: (i64, i64) = sqlx::query_as("SELECT input_token, output_token FROM stats_dailies WHERE date = ?")
+            .bind(&today)
+            .fetch_one(&state.db)
+            .await
+            .unwrap();
+        assert_eq!(daily, (7, 3));
+
+        let _ = std::fs::remove_file(db_path);
+    }
 
     #[tokio::test]
     async fn test_cross_day_stats_rollover_persists_previous_day() {
