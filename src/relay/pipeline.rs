@@ -891,13 +891,12 @@ pub async fn forward_relay(
         round += 1;
         let round_start_time = Instant::now();
 
-        // key 选择: 冷却机制自动轮换(失败的 key 已冷却); 全部试过则换渠道
-        let key_idx = state.key_pool.pick(ch_ref.id, key_pool.len());
-        if keys_tried.contains(&key_idx) {
+        // key 选择: 冷却与「本轮已试过」共同决定；无可用 key 则换渠道
+        let Some(key_idx) = state.key_pool.pick(ch_ref.id, key_pool.len(), &keys_tried) else {
             // 该渠道所有 key 均已尝试: 弃用此渠道, 换下一个
             item = None;
             continue;
-        }
+        };
         keys_tried.insert(key_idx);
 
         // 本轮请求头使用本轮实际选中的 key

@@ -773,4 +773,56 @@ mod tests {
         assert!(log.error.unwrap_or_default().contains("upstream exploded"));
         let _ = std::fs::remove_file(db_path);
     }
+
+    /// key 轮换不得依赖冷却窗口：cooldown_seconds = 0（等于不冷却）时，
+    /// pick 每次都会返回 index 0，旧逻辑据此判定「该渠道 key 已试完」而放弃渠道，
+    /// 导致第二个 key 永远用不上。
+    #[tokio::test]
+    async fn key_rotation_works_with_zero_cooldown() {
+        let (state, db_path) = test_support::setup_test_state("relay_keyrot0").await;
+        let server = wiremock::MockServer::start().await;
+
+        wiremock::Mock::given(wiremock::matchers::header("authorization", "Bearer k1"))
+            .respond_with(wiremock::ResponseTemplate::new(401).set_body_string("bad key"))
+            .up_to_n_times(1)
+            .expect(1)
+            .mount(&server)
+            .await;
+        wiremock::Mock::given(wiremock::matchers::header("authorization", "Bearer k2"))
+            .respond_with(wiremock::ResponseTemplate::new(200).set_body_string(CHAT_OK_BODY))
+            .up_to_n_times(1)
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let model = add_channel(&state, "ch", &server.uri(), "k1\nk2", "m-keyrot0").await;
+        let mut group = crate::model::Group {
+            name: "m-keyrot0".into(),
+            mode: crate::model::GroupMode::Failover,
+            relay_config: crate::model::GroupRelayConfig {
+                cooldown_seconds: 0,
+                ..Default::default()
+            },
+            items: vec![crate::model::GroupItem {
+                channel_model_id: model.id,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        op::group::create_group(&state, &mut group).await.unwrap();
+
+        let resp = forward_relay(
+            state.clone(),
+            test_auth(),
+            ApiFormat::OpenaiCompletion,
+            None,
+            Uri::from_static("/v1/chat/completions"),
+            HeaderMap::new(),
+            chat_body("m-keyrot0").await,
+        )
+        .await;
+        assert_eq!(resp.status(), 200, "第二个 key 必须被尝试");
+        server.verify().await;
+        let _ = std::fs::remove_file(db_path);
+    }
 }
