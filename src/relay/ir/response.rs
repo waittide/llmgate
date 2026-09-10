@@ -2,7 +2,10 @@
 
 use serde_json::{Value, json};
 
-use super::{ContentPart, RelayResponse, StopReason};
+use super::{
+    ContentPart, RelayResponse, StopReason, anthropic_stop_reason, chat_finish_reason, gemini_call_id,
+    gemini_finish_reason, stop_reason_from_anthropic, stop_reason_from_chat, stop_reason_from_gemini,
+};
 use crate::relay::{protocol::extract_usage_from_json, state::Usage};
 
 fn as_str(v: Option<&Value>) -> Option<&str> {
@@ -24,16 +27,6 @@ fn arguments_from_string(v: Option<&Value>) -> Value {
 
 fn usage_of(val: &Value) -> Usage {
     extract_usage_from_json(val).unwrap_or_default()
-}
-
-fn stop_reason_of(reason: Option<&str>) -> StopReason {
-    match reason {
-        Some("length") => StopReason::Length,
-        Some("tool_calls") => StopReason::ToolUse,
-        Some("content_filter") => StopReason::ContentFilter,
-        Some("stop") | None => StopReason::Stop,
-        Some(other) => StopReason::Other(other.to_string()),
-    }
 }
 
 // ---------- Parsers ----------
@@ -63,7 +56,7 @@ pub(super) fn parse_chat(val: &Value, model_fallback: &str) -> Option<RelayRespo
             });
         }
     }
-    let stop_reason = stop_reason_of(as_str(val.pointer("/choices/0/finish_reason")));
+    let stop_reason = stop_reason_from_chat(as_str(val.pointer("/choices/0/finish_reason")));
     Some(RelayResponse {
         model: owned_str(val.get("model")).unwrap_or_else(|| model_fallback.to_string()),
         content,
@@ -175,12 +168,7 @@ pub(super) fn parse_anthropic(val: &Value, model_fallback: &str) -> Option<Relay
             }
         }
     }
-    let stop_reason = match as_str(val.get("stop_reason")) {
-        Some("max_tokens") => StopReason::Length,
-        Some("tool_use") => StopReason::ToolUse,
-        // end_turn / stop_sequence / refusal 等统一视为正常结束（与既有映射一致）
-        _ => StopReason::Stop,
-    };
+    let stop_reason = stop_reason_from_anthropic(as_str(val.get("stop_reason")));
     Some(RelayResponse {
         model: owned_str(val.get("model")).unwrap_or_else(|| model_fallback.to_string()),
         content,
@@ -207,15 +195,7 @@ pub(super) fn parse_gemini(val: &Value, model_fallback: &str) -> Option<RelayRes
         {
             let arguments = call.get("args").cloned().unwrap_or_else(|| json!({}));
             // (name, args) 哈希确定性生成 id，跨转换可复现
-            let call_id = {
-                use std::hash::{Hash, Hasher};
-                let mut hasher = std::collections::hash_map::DefaultHasher::new();
-                name.hash(&mut hasher);
-                serde_json::to_string(&arguments)
-                    .unwrap_or_default()
-                    .hash(&mut hasher);
-                format!("call_{:016x}", hasher.finish())
-            };
+            let call_id = gemini_call_id(&name, &serde_json::to_string(&arguments).unwrap_or_default());
             content.push(ContentPart::ToolCall {
                 id: call_id,
                 name,
@@ -223,13 +203,7 @@ pub(super) fn parse_gemini(val: &Value, model_fallback: &str) -> Option<RelayRes
             });
         }
     }
-    let stop_reason = match as_str(val.pointer("/candidates/0/finishReason")) {
-        Some("MAX_TOKENS") => StopReason::Length,
-        // 安全过滤 / 违禁词 / 复述拦截等阻断场景
-        Some("SAFETY" | "BLOCKLIST" | "PROHIBITED_CONTENT" | "SPII" | "RECITATION") => StopReason::ContentFilter,
-        // STOP / MALFORMED_FUNCTION_CALL / 未知 → 正常结束（与既有映射一致）
-        _ => StopReason::Stop,
-    };
+    let stop_reason = stop_reason_from_gemini(as_str(val.pointer("/candidates/0/finishReason")));
     Some(RelayResponse {
         model: owned_str(val.get("modelVersion")).unwrap_or_else(|| model_fallback.to_string()),
         content,
@@ -239,16 +213,6 @@ pub(super) fn parse_gemini(val: &Value, model_fallback: &str) -> Option<RelayRes
 }
 
 // ---------- Emitters ----------
-
-fn stop_reason_to_chat(reason: &StopReason) -> String {
-    match reason {
-        StopReason::Stop => "stop".to_string(),
-        StopReason::Length => "length".to_string(),
-        StopReason::ToolUse => "tool_calls".to_string(),
-        StopReason::ContentFilter => "content_filter".to_string(),
-        StopReason::Other(s) => s.clone(),
-    }
-}
 
 pub(super) fn emit_chat(resp: &RelayResponse) -> Value {
     let mut text = String::new();
@@ -282,12 +246,7 @@ pub(super) fn emit_chat(resp: &RelayResponse) -> Value {
     if !thinking.is_empty() {
         message["reasoning_content"] = Value::String(thinking);
     }
-    // 工具调用优先于正常停止（与既有映射一致）
-    let finish_reason = if resp.stop_reason == StopReason::Stop && !tool_calls.is_empty() {
-        "tool_calls".to_string()
-    } else {
-        stop_reason_to_chat(&resp.stop_reason)
-    };
+    let finish_reason = chat_finish_reason(&resp.stop_reason, !tool_calls.is_empty());
     let usage = &resp.usage;
     json!({
         "id": format!("chatcmpl-{}", nanoid::nanoid!(24)),
@@ -398,11 +357,11 @@ pub(super) fn emit_anthropic(resp: &RelayResponse) -> Value {
     if content.is_empty() {
         content.push(json!({ "type": "text", "text": "" }));
     }
-    let stop_reason = match resp.stop_reason {
-        StopReason::Length => "max_tokens",
-        StopReason::ToolUse => "tool_use",
-        _ => "end_turn",
-    };
+    let has_tool_calls = resp
+        .content
+        .iter()
+        .any(|part| matches!(part, ContentPart::ToolCall { .. }));
+    let stop_reason = anthropic_stop_reason(&resp.stop_reason, has_tool_calls);
     let usage = &resp.usage;
     json!({
         "id": format!("msg_{}", nanoid::nanoid!(24)),
@@ -435,11 +394,7 @@ pub(super) fn emit_gemini(resp: &RelayResponse) -> Value {
     if parts.is_empty() {
         parts.push(json!({ "text": "" }));
     }
-    let finish_reason = match resp.stop_reason {
-        StopReason::Length => "MAX_TOKENS",
-        StopReason::ContentFilter => "SAFETY",
-        _ => "STOP",
-    };
+    let finish_reason = gemini_finish_reason(&resp.stop_reason);
     let usage = &resp.usage;
     json!({
         "candidates": [{

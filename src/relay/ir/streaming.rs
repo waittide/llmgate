@@ -13,7 +13,10 @@ use bytes::Bytes;
 use futures::Stream;
 use serde_json::{Value, json};
 
-use super::StopReason;
+use super::{
+    StopReason, anthropic_stop_reason, chat_finish_reason, gemini_call_id, gemini_finish_reason,
+    stop_reason_from_anthropic, stop_reason_from_chat, stop_reason_from_gemini,
+};
 use crate::relay::{SseBuffer, parse_sse_event, protocol::extract_usage_from_json, state::Usage};
 
 /// 流式事件的中间定义。
@@ -88,16 +91,6 @@ fn merge_usage(existing: &mut Option<Usage>, incoming: Usage) {
         None => incoming,
     };
     *existing = Some(merged);
-}
-
-fn chat_finish_reason(reason: Option<&str>) -> StopReason {
-    match reason {
-        Some("length") => StopReason::Length,
-        Some("tool_calls") => StopReason::ToolUse,
-        Some("content_filter") => StopReason::ContentFilter,
-        Some("stop") | None => StopReason::Stop,
-        Some(other) => StopReason::Other(other.to_string()),
-    }
 }
 
 // ---------- 上游 Parsers ----------
@@ -187,7 +180,7 @@ impl EventParser for ChatEventParser {
             if finishing && !self.finished {
                 self.finished = true;
                 events.push(StreamEvent::Finish {
-                    reason: chat_finish_reason(choice.get("finish_reason").and_then(Value::as_str)),
+                    reason: stop_reason_from_chat(choice.get("finish_reason").and_then(Value::as_str)),
                 });
             }
         }
@@ -373,11 +366,7 @@ impl EventParser for AnthropicEventParser {
                 }
                 self.finished = true;
                 events.push(StreamEvent::Finish {
-                    reason: match value.pointer("/delta/stop_reason").and_then(Value::as_str) {
-                        Some("tool_use") => StopReason::ToolUse,
-                        Some("max_tokens") => StopReason::Length,
-                        _ => StopReason::Stop,
-                    },
+                    reason: stop_reason_from_anthropic(value.pointer("/delta/stop_reason").and_then(Value::as_str)),
                 });
                 events
             }
@@ -437,14 +426,7 @@ impl EventParser for GeminiEventParser {
             };
             let arguments = call.get("args").cloned().unwrap_or_else(|| json!({}));
             let arguments_json = serde_json::to_string(&arguments).unwrap_or_else(|_| "{}".to_string());
-            // (name, args) 确定性 id：同一调用跨 chunk 重复下发时幂等
-            let call_id = {
-                use std::hash::{Hash, Hasher};
-                let mut hasher = std::collections::hash_map::DefaultHasher::new();
-                name.hash(&mut hasher);
-                arguments_json.hash(&mut hasher);
-                format!("call_{:016x}", hasher.finish())
-            };
+            let call_id = gemini_call_id(name, &arguments_json);
             if !self.seen.insert(call_id.clone()) {
                 continue;
             }
@@ -463,11 +445,7 @@ impl EventParser for GeminiEventParser {
         {
             self.finished = true;
             events.push(StreamEvent::Finish {
-                reason: match finish {
-                    "MAX_TOKENS" => StopReason::Length,
-                    "SAFETY" | "BLOCKLIST" | "PROHIBITED_CONTENT" | "SPII" | "RECITATION" => StopReason::ContentFilter,
-                    _ => StopReason::Stop,
-                },
+                reason: stop_reason_from_gemini(Some(finish)),
             });
         }
         events
@@ -526,18 +504,7 @@ impl ChatChunkSink {
             return Vec::new();
         }
         self.finished = true;
-        let finish_reason = if *reason == StopReason::Stop && !self.tool_calls.is_empty() {
-            "tool_calls"
-        } else {
-            match reason {
-                StopReason::Length => "length",
-                StopReason::ToolUse => "tool_calls",
-                StopReason::ContentFilter => "content_filter",
-                StopReason::Other(s) => return self.finish_chunk(s.clone()),
-                StopReason::Stop => "stop",
-            }
-        };
-        self.finish_chunk(finish_reason.to_string())
+        self.finish_chunk(chat_finish_reason(reason, !self.tool_calls.is_empty()))
     }
 
     fn finish_chunk(&mut self, finish_reason: String) -> Vec<Bytes> {
@@ -1089,13 +1056,7 @@ impl AnthropicSink {
         for index in tool_indexes {
             self.push("content_block_stop", json!({ "index": index }));
         }
-        let stop_reason = if !self.tools.is_empty() || *reason == StopReason::ToolUse {
-            "tool_use"
-        } else if *reason == StopReason::Length {
-            "max_tokens"
-        } else {
-            "end_turn"
-        };
+        let stop_reason = anthropic_stop_reason(reason, !self.tools.is_empty());
         // message_start 里的 input_tokens 恒为 0（构造时尚未知）；在此补发真实值
         let (input_tokens, output_tokens) = self
             .usage
@@ -1267,14 +1228,7 @@ impl EventSink for GeminiSink {
             StreamEvent::Usage(usage) => {
                 merge_usage(&mut self.usage, usage.clone());
             }
-            StreamEvent::Finish { reason } => {
-                let mapped = match reason {
-                    StopReason::Length => "MAX_TOKENS",
-                    StopReason::ContentFilter => "SAFETY",
-                    _ => "STOP",
-                };
-                self.emit_final(mapped);
-            }
+            StreamEvent::Finish { reason } => self.emit_final(gemini_finish_reason(reason)),
             // ThinkingDelta 在 Gemini 请求目标无对应形态，丢弃（与既有行为一致）
             StreamEvent::ThinkingDelta { .. } => {}
         }

@@ -135,6 +135,88 @@ pub enum StopReason {
     Other(String),
 }
 
+// ---------- 终止原因与调用 ID 的协议语义 ----------
+//
+// 解析方向（上游 → IR）与发射方向（IR → 客户端）共用同一份映射：同一语义在
+// 两处各写一遍，流式与非流式就会各自漂移，出现“同一个上游响应、两种终止原因”。
+
+/// Chat `finish_reason` → `StopReason`；未知原因透传给客户端。
+pub fn stop_reason_from_chat(reason: Option<&str>) -> StopReason {
+    match reason {
+        Some("length") => StopReason::Length,
+        Some("tool_calls") => StopReason::ToolUse,
+        Some("content_filter") => StopReason::ContentFilter,
+        Some("stop") | None => StopReason::Stop,
+        Some(other) => StopReason::Other(other.to_string()),
+    }
+}
+
+/// `StopReason` → Chat `finish_reason`；存在工具调用时优先 `tool_calls`。
+pub fn chat_finish_reason(reason: &StopReason, has_tool_calls: bool) -> String {
+    if *reason == StopReason::Stop && has_tool_calls {
+        return "tool_calls".to_string();
+    }
+    match reason {
+        StopReason::Stop => "stop".to_string(),
+        StopReason::Length => "length".to_string(),
+        StopReason::ToolUse => "tool_calls".to_string(),
+        StopReason::ContentFilter => "content_filter".to_string(),
+        StopReason::Other(other) => other.clone(),
+    }
+}
+
+/// Anthropic `stop_reason` → `StopReason`；
+/// `end_turn` / `stop_sequence` / `refusal` 等统一视为正常结束。
+pub fn stop_reason_from_anthropic(reason: Option<&str>) -> StopReason {
+    match reason {
+        Some("max_tokens") => StopReason::Length,
+        Some("tool_use") => StopReason::ToolUse,
+        _ => StopReason::Stop,
+    }
+}
+
+/// `StopReason` → Anthropic `stop_reason`；存在工具调用时（`has_tool_calls`）必须报 `tool_use`。
+pub fn anthropic_stop_reason(reason: &StopReason, has_tool_calls: bool) -> &'static str {
+    if has_tool_calls {
+        return "tool_use";
+    }
+    match reason {
+        StopReason::Length => "max_tokens",
+        StopReason::ToolUse => "tool_use",
+        _ => "end_turn",
+    }
+}
+
+/// Gemini `finishReason` → `StopReason`；
+/// `STOP` / `MALFORMED_FUNCTION_CALL` / 未知原因统一视为正常结束。
+pub fn stop_reason_from_gemini(reason: Option<&str>) -> StopReason {
+    match reason {
+        Some("MAX_TOKENS") => StopReason::Length,
+        // 安全过滤 / 违禁词 / 复述拦截等阻断场景
+        Some("SAFETY" | "BLOCKLIST" | "PROHIBITED_CONTENT" | "SPII" | "RECITATION") => StopReason::ContentFilter,
+        _ => StopReason::Stop,
+    }
+}
+
+/// `StopReason` → Gemini `finishReason`（仅安全过滤可区分，其余归为 STOP）。
+pub fn gemini_finish_reason(reason: &StopReason) -> &'static str {
+    match reason {
+        StopReason::Length => "MAX_TOKENS",
+        StopReason::ContentFilter => "SAFETY",
+        _ => "STOP",
+    }
+}
+
+/// Gemini functionCall 的确定性调用 ID：同一调用跨 chunk 重复下发时幂等。
+pub fn gemini_call_id(name: &str, arguments_json: &str) -> String {
+    use std::hash::{Hash, Hasher};
+
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    name.hash(&mut hasher);
+    arguments_json.hash(&mut hasher);
+    format!("call_{:016x}", hasher.finish())
+}
+
 /// 非流式响应的中间定义。
 #[derive(Debug, Clone, Default)]
 pub struct RelayResponse {
