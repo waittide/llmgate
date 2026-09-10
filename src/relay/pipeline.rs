@@ -260,7 +260,8 @@ struct SuccessContext<'a> {
     channel:          &'a Channel,
     channel_model:    &'a ChannelModel,
     api_key_id:       i64,
-    body_str:         &'a str,
+    /// 输入 token 估算值（上游未上报用量时的兜底口径）
+    prompt_tokens:    i64,
     round_start_time: Instant,
     start_time:       Instant,
     price_opt:        Option<ModelPrice>,
@@ -295,15 +296,14 @@ async fn handle_successful_stream(
     let mut log_template = ctx.log_base.clone();
     log_template.response_headers = serialize_headers(upstream_resp.headers());
 
-    let raw_stream = upstream_resp.bytes_stream();
-    let mapped_stream = raw_stream.map(move |chunk_res| match chunk_res {
-        Ok(bytes) => Ok::<Bytes, std::io::Error>(bytes),
-        Err(e) => Err(std::io::Error::other(e)),
-    });
-
-    let prompt_tokens = estimate_tokens(ctx.body_str);
-
     // 跨格式：上游 SSE → IR 事件 → 客户端 SSE；同格式直通
+    let mapped_stream = upstream_resp
+        .bytes_stream()
+        .map(move |chunk_res| match chunk_res {
+            Ok(bytes) => Ok::<Bytes, std::io::Error>(bytes),
+            Err(e) => Err(std::io::Error::other(e)),
+        });
+
     let upstream_format = ir::channel_format(&ctx.channel.channel_type);
     let output_stream = if ctx.format == upstream_format {
         mapped_stream.boxed()
@@ -318,7 +318,7 @@ async fn handle_successful_stream(
         channel_id: ctx.channel.id,
         channel_model_id: ctx.channel_model.id,
         price: ctx.price_opt,
-        prompt_tokens,
+        prompt_tokens: ctx.prompt_tokens,
         buffer: Vec::new(),
         output_bytes: 0,
         usage: None,
@@ -484,11 +484,14 @@ fn complete_json_response(
         .as_ref()
         .or(parsed.as_ref())
         .and_then(extract_usage_from_json)
-        .unwrap_or_else(|| Usage {
-            prompt_tokens: estimate_tokens(ctx.body_str),
-            completion_tokens: estimate_tokens(&resp_str),
-            total_tokens: estimate_tokens(ctx.body_str) + estimate_tokens(&resp_str),
-            ..Default::default()
+        .unwrap_or_else(|| {
+            let completion_tokens = estimate_tokens(&resp_str);
+            Usage {
+                prompt_tokens: ctx.prompt_tokens,
+                completion_tokens,
+                total_tokens: ctx.prompt_tokens + completion_tokens,
+                ..Default::default()
+            }
         });
 
     let cost = calculate_cost(
@@ -704,10 +707,11 @@ pub async fn forward_relay(
         metadata.stream = uri.path().contains(":streamGenerateContent");
     }
 
-    let body_str = String::from_utf8_lossy(&body_bytes).to_string();
     let request_url = uri.path().to_string();
     let request_headers = serialize_headers(&headers);
-    let request_body = body_str.clone();
+    let request_body = String::from_utf8_lossy(&body_bytes).to_string();
+    // 输入 token 估算只与请求体有关，只算一次；失败兜底路径会复用同一结果
+    let prompt_tokens = estimate_tokens(&request_body);
     let started_at = chrono::Utc::now().timestamp_millis();
     let start_time = Instant::now();
 
@@ -772,33 +776,15 @@ pub async fn forward_relay(
     let mut rounds: Vec<crate::model::RoundLog> = Vec::new();
     let mut attempted_items = HashSet::new();
 
-    // 渠道级上下文: 同渠道轮换 key 时复用, 换渠道时重建
-    let mut current_group = match group::get_group_by_name(&state, &metadata.model) {
-        Ok(g) => g,
-        Err(_) => {
-            return build_failed_relay_response(
-                &state,
-                FailedRelayContext {
-                    log_base: log_base.clone(),
-                    format,
-                    last_target_channel: String::new(),
-                    last_target_model: String::new(),
-                    last_response_url: String::new(),
-                    last_response_headers: String::new(),
-                    last_status: StatusCode::NOT_FOUND,
-                    last_error_body: "分组不存在".to_string(),
-                    rounds: Vec::new(),
-                    wait_time_ms: 0,
-                    round: 0,
-                    api_key_id: auth_ctx.api_key.id,
-                },
-            );
-        }
-    };
+    // 渠道级上下文: 同渠道轮换 key 时复用, 换渠道时重建。分组配置取自请求开始时的
+    // 校验快照, 同一请求内不因中途改分组而漂移。
+    let current_group = group_obj;
     let mut channel_model: Option<crate::model::ChannelModel> = None;
     let mut ch: Option<crate::model::Channel> = None;
     let mut target_endpoint = String::new();
-    let mut final_body = Vec::new();
+    let mut final_body = Bytes::new();
+    // 本轮请求体（已改写 model/参数）的字符串视图，供日志记录复用
+    let mut rewritten_body_str = String::new();
     let mut key_pool: Vec<String> = Vec::new();
 
     while items_tried < max_attempts {
@@ -810,10 +796,6 @@ pub async fn forward_relay(
 
         // 需要新渠道时(item 为空): 选择下一个可用渠道项(计一次渠道尝试)
         if item.is_none() {
-            current_group = match group::get_group_by_name(&state, &metadata.model) {
-                Ok(g) => g,
-                Err(_) => break,
-            };
             let picked =
                 match state
                     .route_manager
@@ -883,7 +865,8 @@ pub async fn forward_relay(
             key_pool = channel.key_pool();
             ch = Some(channel);
             target_endpoint = endpoint;
-            final_body = body;
+            final_body = body.into();
+            rewritten_body_str = String::from_utf8_lossy(&final_body).to_string();
         }
 
         let ch_ref = ch.as_ref().unwrap();
@@ -905,7 +888,6 @@ pub async fn forward_relay(
             super::upstream::build_upstream_headers(ch_ref, key_pool[key_idx].as_str(), Some(&headers))
                 .map(|h| serialize_headers(&h))
                 .unwrap_or_else(|_| request_headers.clone());
-        let rewritten_body_str = String::from_utf8_lossy(&final_body).to_string();
         state.in_flight.broadcast(RequestOverview {
             id: request_id,
             status: request_status::RUNNING.to_string(),
@@ -936,7 +918,7 @@ pub async fn forward_relay(
             ch_ref,
             &key_pool[key_idx],
             &target_endpoint,
-            Some(Bytes::from(final_body.clone())),
+            Some(final_body.clone()),
             timeout_secs,
             Some(&headers),
         ) {
@@ -1028,7 +1010,7 @@ pub async fn forward_relay(
                         channel: ch_ref,
                         channel_model: cm_ref,
                         api_key_id: auth_ctx.api_key.id,
-                        body_str: &body_str,
+                        prompt_tokens,
                         round_start_time,
                         start_time,
                         price_opt,
