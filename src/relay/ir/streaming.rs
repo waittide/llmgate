@@ -656,19 +656,21 @@ fn error_envelope(format: ApiFormat, message: &str) -> Value {
 
 /// OpenAI Responses SSE 流。
 pub struct ResponsesSink {
-    response_id: String,
-    model:       String,
-    created_at:  i64,
-    sequence:    u64,
-    started:     bool,
-    reasoning:   Option<OutputItem>,
-    message:     Option<OutputItem>,
-    text:        String,
-    tools:       std::collections::BTreeMap<String, PendingToolCall>,
-    next_output: usize,
-    usage:       Option<Usage>,
-    completed:   bool,
-    pending:     VecDeque<Bytes>,
+    response_id:    String,
+    model:          String,
+    created_at:     i64,
+    sequence:       u64,
+    started:        bool,
+    reasoning:      Option<OutputItem>,
+    /// 已发出的推理摘要文本：终态对象的 summary 必须与 summary_text.delta 一致
+    reasoning_text: String,
+    message:        Option<OutputItem>,
+    text:           String,
+    tools:          std::collections::BTreeMap<String, PendingToolCall>,
+    next_output:    usize,
+    usage:          Option<Usage>,
+    completed:      bool,
+    pending:        VecDeque<Bytes>,
 }
 
 /// 已开始的 Responses 输出项（输出索引按开始顺序从 0 分配）。
@@ -695,6 +697,7 @@ impl ResponsesSink {
             sequence: 0,
             started: false,
             reasoning: None,
+            reasoning_text: String::new(),
             message: None,
             text: String::new(),
             tools: std::collections::BTreeMap::new(),
@@ -813,16 +816,24 @@ impl ResponsesSink {
             return;
         }
         self.completed = true;
-        let mut output = Vec::new();
+        // 终态 output 按 output_index 排序，与增量事件的顺序一致
+        let mut items: Vec<(usize, Value)> = Vec::new();
 
-        if let Some(OutputItem { item_id, output_index }) = &self.reasoning {
+        if let Some(OutputItem { item_id, output_index }) = self.reasoning.clone() {
+            let item = json!({
+                "id": item_id,
+                "type": "reasoning",
+                "status": "completed",
+                "summary": [{
+                    "type": "summary_text",
+                    "text": self.reasoning_text
+                }]
+            });
             self.push_event(
                 "response.output_item.done",
-                json!({
-                    "output_index": output_index,
-                    "item": { "id": item_id, "type": "reasoning", "status": "completed", "summary": [] }
-                }),
+                json!({ "output_index": output_index, "item": item }),
             );
+            items.push((output_index, item));
         }
 
         if let Some(OutputItem { item_id, output_index }) = self.message.clone() {
@@ -856,7 +867,7 @@ impl ResponsesSink {
                 "response.output_item.done",
                 json!({ "output_index": output_index, "item": message }),
             );
-            output.push(message);
+            items.push((output_index, message));
         }
 
         let tool_keys: Vec<String> = self.tools.keys().cloned().collect();
@@ -887,9 +898,11 @@ impl ResponsesSink {
                 "response.output_item.done",
                 json!({ "output_index": output_index, "item": item }),
             );
-            output.push(item);
+            items.push((output_index, item));
         }
 
+        items.sort_by_key(|(index, _)| *index);
+        let output: Vec<Value> = items.into_iter().map(|(_, item)| item).collect();
         let usage = self.usage.clone().unwrap_or_default();
         let (status, incomplete_details) = responses_status(reason);
         self.push_event(
@@ -941,6 +954,7 @@ impl EventSink for ResponsesSink {
                 let Some(OutputItem { item_id, output_index }) = self.reasoning.clone() else {
                     return Vec::new();
                 };
+                self.reasoning_text.push_str(text);
                 self.push_event(
                     "response.reasoning_summary_text.delta",
                     json!({
@@ -1986,5 +2000,36 @@ mod tests {
         assert!(out.contains("\"input_tokens\":30"), "input 只含未命中部分: {out}");
         assert!(out.contains("\"cache_read_input_tokens\":80"), "{out}");
         assert!(out.contains("\"output_tokens\":5"), "{out}");
+    }
+
+    /// Responses 终态对象必须与增量事件自洽：推理摘要不能是空的（增量里发过文本），
+    /// 且 reasoning 项要出现在 output[] 里（缺项会让客户端回看时丢失思考链）。
+    #[tokio::test]
+    async fn chat_reasoning_to_responses_keeps_summary_in_final_object() {
+        let out = run(
+            ApiFormat::OpenaiCompletion,
+            ApiFormat::OpenaiResponse,
+            vec![
+                "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"先想一想\"}}]}\n\n",
+                "data: {\"choices\":[{\"delta\":{\"content\":\"答案\"},\"finish_reason\":\"stop\"}]}\n\n",
+            ],
+        )
+        .await;
+        assert!(out.contains("\"type\":\"summary_text\""), "{out}");
+        assert!(out.contains("\"text\":\"先想一想\""), "{out}");
+        // reasoning 项进入终态 output，且排在 message 之前（output_index 顺序）
+        let completed = out
+            .lines()
+            .find(|line| line.contains("\"object\":\"response\"") && line.contains("\"status\":\"completed\""))
+            .expect("缺少 response.completed");
+        let value: Value = serde_json::from_str(completed.trim_start_matches("data: ")).unwrap();
+        let output = value
+            .pointer("/response/output")
+            .unwrap()
+            .as_array()
+            .unwrap();
+        assert_eq!(output[0].get("type").unwrap(), "reasoning");
+        assert_eq!(output[1].get("type").unwrap(), "message");
+        assert_eq!(output[0].pointer("/summary/0/text").unwrap(), "先想一想");
     }
 }
