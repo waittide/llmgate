@@ -1,4 +1,7 @@
-use std::sync::atomic::{AtomicI64, Ordering};
+use std::{
+    collections::HashSet,
+    sync::atomic::{AtomicI64, Ordering},
+};
 
 use anyhow::Result;
 use serde_json::Value;
@@ -61,50 +64,77 @@ pub async fn sync_all_channel_models(state: &AppState) -> Result<()> {
             continue;
         }
 
-        match fetch_upstream_models(&ch).await {
-            Ok(fetched) => {
-                let mut manual_names = std::collections::HashSet::new();
-                let mut existing_models = Vec::new();
-
-                for m in &ch.models {
-                    if m.source == ChannelModelSource::Manual {
-                        manual_names.insert(m.name.clone());
-                        existing_models.push(m.clone());
-                    }
-                }
-
-                for f in fetched {
-                    if !manual_names.contains(&f) {
-                        all_added_models.push(f.clone());
-                        existing_models.push(ChannelModel {
-                            id:         0,
-                            channel_id: ch.id,
-                            name:       f,
-                            source:     ChannelModelSource::Auto,
-                            metrics:    Default::default(),
-                        });
-                    }
-                }
-
-                let update_req = crate::model::ChannelUpdateRequest {
-                    id:             ch.id,
-                    name:           None,
-                    channel_type:   None,
-                    enabled:        None,
-                    base_url:       None,
-                    key:            None,
-                    models:         Some(existing_models),
-                    auto_sync:      None,
-                    custom_header:  None,
-                    param_override: None,
-                };
-                if let Err(e) = channel::update_channel(state, &update_req).await {
-                    warn!("渠道 {} 同步结果写回失败: {}", ch.name, e);
-                }
-            }
+        let fetched = match fetch_upstream_models(&ch).await {
+            Ok(fetched) => fetched,
             Err(e) => {
                 warn!("渠道 {} 自动同步失败: {}", ch.name, e);
+                continue;
             }
+        };
+
+        // 手工模型不受同步影响：它们既不被上游结果覆盖，也不算作新增
+        let manual_names: HashSet<&str> = ch
+            .models
+            .iter()
+            .filter(|m| m.source == ChannelModelSource::Manual)
+            .map(|m| m.name.as_str())
+            .collect();
+        let current_auto: HashSet<&str> = ch
+            .models
+            .iter()
+            .filter(|m| m.source == ChannelModelSource::Auto)
+            .map(|m| m.name.as_str())
+            .collect();
+        let mut desired_auto: Vec<&str> = Vec::new();
+        let mut seen: HashSet<&str> = HashSet::new();
+        for name in &fetched {
+            let name = name.as_str();
+            if manual_names.contains(name) || !seen.insert(name) {
+                continue;
+            }
+            desired_auto.push(name);
+        }
+
+        // 上游返回的模型集合与库中一致时跳过写回：update_channel 会连带重载渠道与
+        // 分组两份全量缓存，没有变化就没有必要付出这份代价（每轮同步、每个渠道都会走到）。
+        // 比较用集合语义：顺序差异不值得写一次库。
+        if desired_auto.len() == current_auto.len() && desired_auto.iter().all(|name| current_auto.contains(name)) {
+            continue;
+        }
+
+        let mut existing_models: Vec<ChannelModel> = ch
+            .models
+            .iter()
+            .filter(|m| m.source == ChannelModelSource::Manual)
+            .cloned()
+            .collect();
+        for name in desired_auto {
+            if !current_auto.contains(name) {
+                all_added_models.push(name.to_string());
+            }
+            existing_models.push(ChannelModel {
+                id:         0,
+                channel_id: ch.id,
+                name:       name.to_string(),
+                source:     ChannelModelSource::Auto,
+                metrics:    Default::default(),
+            });
+        }
+
+        let update_req = crate::model::ChannelUpdateRequest {
+            id:             ch.id,
+            name:           None,
+            channel_type:   None,
+            enabled:        None,
+            base_url:       None,
+            key:            None,
+            models:         Some(existing_models),
+            auto_sync:      None,
+            custom_header:  None,
+            param_override: None,
+        };
+        if let Err(e) = channel::update_channel(state, &update_req).await {
+            warn!("渠道 {} 同步结果写回失败: {}", ch.name, e);
         }
     }
 
