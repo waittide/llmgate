@@ -190,8 +190,11 @@ fn prepare_upstream_payload(
     Ok((endpoint, body))
 }
 
-struct RoundFailure<'a> {
+/// 单轮转发的固定上下文：选定渠道与 key 后，本轮这些字段不再变化。
+/// 三种失败收尾（构建请求失败 / 上游非 2xx / 连接层失败）共用它，各自只提供结果。
+struct RoundCtx<'a> {
     round:               i64,
+    /// 客户端请求的模型名（日志的 model 列）
     model:               &'a str,
     started_at:          &'a str,
     channel_name:        &'a str,
@@ -199,58 +202,67 @@ struct RoundFailure<'a> {
     target_req_url:      &'a str,
     channel_req_headers: &'a str,
     rewritten_body_str:  &'a str,
-    response_headers:    &'a str,
-    status:              u16,
-    duration_ms:         i64,
-    err_body:            &'a str,
-    should_cooldown:     bool,
+    /// 本轮所属分组与渠道项：失败冷却按它记账
+    group_id:            i64,
+    item_id:             i64,
     key_index:           usize,
 }
-fn record_round_failure(
-    state: &AppState,
-    group_id: i64,
-    item_id: i64,
-    cooldown_seconds: i64,
-    req_id: u64,
-    rounds: &mut Vec<crate::model::RoundLog>,
-    fail: RoundFailure<'_>,
-) {
-    let round_log = crate::model::RoundLog {
-        round:            fail.round,
-        channel_name:     fail.channel_name.to_string(),
-        model_name:       fail.model_name.to_string(),
-        request_url:      fail.target_req_url.to_string(),
-        request_headers:  fail.channel_req_headers.to_string(),
-        request_body:     fail.rewritten_body_str.to_string(),
-        response_url:     fail.target_req_url.to_string(),
-        response_headers: fail.response_headers.to_string(),
-        response_body:    fail.err_body.to_string(),
-        status:           fail.status,
-        duration_ms:      fail.duration_ms,
-        error:            Some(fail.err_body.to_string()),
-        key_index:        Some(fail.key_index),
-    };
-    rounds.push(round_log.clone());
-    // 客户端错误不触发冷却；该轮连同错误详情已记录在请求日志中，不再输出到终端
-    if fail.should_cooldown {
-        state
-            .route_manager
-            .report_failure(group_id, item_id, cooldown_seconds);
-    }
 
-    state.in_flight.broadcast(RequestOverview {
-        id: req_id,
-        status: request_status::RUNNING.to_string(),
-        started_at: fail.started_at.to_string(),
-        duration: fail.duration_ms,
-        model: fail.model.to_string(),
-        round: fail.round,
-        target_channel: fail.channel_name.to_string(),
-        target_model: fail.model_name.to_string(),
-        error: Some(fail.err_body.to_string()),
-        rounds: rounds.clone(),
-        ..Default::default()
-    });
+/// 本轮失败的差异部分。
+struct RoundOutcome<'a> {
+    response_headers: &'a str,
+    status:           u16,
+    duration_ms:      i64,
+    err_body:         &'a str,
+    should_cooldown:  bool,
+}
+
+impl RoundCtx<'_> {
+    fn record_failure(
+        &self,
+        state: &AppState,
+        cooldown_seconds: i64,
+        req_id: u64,
+        rounds: &mut Vec<crate::model::RoundLog>,
+        outcome: RoundOutcome<'_>,
+    ) {
+        let round_log = crate::model::RoundLog {
+            round:            self.round,
+            channel_name:     self.channel_name.to_string(),
+            model_name:       self.model_name.to_string(),
+            request_url:      self.target_req_url.to_string(),
+            request_headers:  self.channel_req_headers.to_string(),
+            request_body:     self.rewritten_body_str.to_string(),
+            response_url:     self.target_req_url.to_string(),
+            response_headers: outcome.response_headers.to_string(),
+            response_body:    outcome.err_body.to_string(),
+            status:           outcome.status,
+            duration_ms:      outcome.duration_ms,
+            error:            Some(outcome.err_body.to_string()),
+            key_index:        Some(self.key_index),
+        };
+        rounds.push(round_log.clone());
+        // 客户端错误不触发冷却；该轮连同错误详情已记录在请求日志中，不再输出到终端
+        if outcome.should_cooldown {
+            state
+                .route_manager
+                .report_failure(self.group_id, self.item_id, cooldown_seconds);
+        }
+
+        state.in_flight.broadcast(RequestOverview {
+            id: req_id,
+            status: request_status::RUNNING.to_string(),
+            started_at: self.started_at.to_string(),
+            duration: outcome.duration_ms,
+            model: self.model.to_string(),
+            round: self.round,
+            target_channel: self.channel_name.to_string(),
+            target_model: self.model_name.to_string(),
+            error: Some(outcome.err_body.to_string()),
+            rounds: rounds.clone(),
+            ..Default::default()
+        });
+    }
 }
 
 struct SuccessContext<'a> {
@@ -842,6 +854,20 @@ pub async fn forward_relay(
             super::upstream::build_upstream_headers(ch_ref, key_pool[key_idx].as_str(), Some(&headers))
                 .map(|h| serialize_headers(&h))
                 .unwrap_or_else(|_| request_headers.clone());
+        // 本轮上下文一次算定：item 后续会因换渠道被置空，冷却记账必须用此刻的 item_id
+        let round_ctx = RoundCtx {
+            round,
+            model: &metadata.model,
+            started_at: &started_at_rfc3339,
+            channel_name: &ch_ref.name,
+            model_name: &cm_ref.name,
+            target_req_url: &target_req_url,
+            channel_req_headers: &channel_req_headers,
+            rewritten_body_str: &rewritten_body_str,
+            group_id: current_group.id,
+            item_id: item.as_ref().map(|i| i.id).unwrap_or(0),
+            key_index: key_idx,
+        };
         state.in_flight.broadcast(RequestOverview {
             id: request_id,
             status: request_status::RUNNING.to_string(),
@@ -882,28 +908,17 @@ pub async fn forward_relay(
                 last_target_model = cm_ref.name.clone();
                 last_error_body = format!("构建渠道 {} 请求失败: {}", ch_ref.name, e);
                 last_status = StatusCode::BAD_GATEWAY;
-                record_round_failure(
+                round_ctx.record_failure(
                     &state,
-                    current_group.id,
-                    item.as_ref().map(|i| i.id).unwrap_or(0),
                     current_group.relay_config.cooldown_seconds,
                     request_id,
                     &mut rounds,
-                    RoundFailure {
-                        round,
-                        model: &metadata.model,
-                        started_at: &started_at_rfc3339,
-                        channel_name: &ch_ref.name,
-                        model_name: &cm_ref.name,
-                        target_req_url: &target_req_url,
-                        channel_req_headers: &channel_req_headers,
-                        rewritten_body_str: &rewritten_body_str,
+                    RoundOutcome {
                         response_headers: "",
-                        status: 502,
-                        duration_ms: round_start_time.elapsed().as_millis() as i64,
-                        err_body: &last_error_body,
-                        should_cooldown: true,
-                        key_index: key_idx,
+                        status:           502,
+                        duration_ms:      round_start_time.elapsed().as_millis() as i64,
+                        err_body:         &last_error_body,
+                        should_cooldown:  true,
                     },
                 );
                 item = None;
@@ -945,7 +960,7 @@ pub async fn forward_relay(
                 if status.is_success() {
                     state
                         .route_manager
-                        .report_success(current_group.id, item.as_ref().map(|i| i.id).unwrap_or(0));
+                        .report_success(round_ctx.group_id, round_ctx.item_id);
                     state.key_pool.report_success(ch_ref.id, key_idx);
                     let price_opt = model::get_model_price(&state, &cm_ref.name);
 
@@ -997,28 +1012,17 @@ pub async fn forward_relay(
                 keys_tried.insert(key_idx);
 
                 let is_client = is_client_error(status);
-                record_round_failure(
+                round_ctx.record_failure(
                     &state,
-                    current_group.id,
-                    item.as_ref().map(|i| i.id).unwrap_or(0),
                     current_group.relay_config.cooldown_seconds,
                     request_id,
                     &mut rounds,
-                    RoundFailure {
-                        round,
-                        model: &metadata.model,
-                        started_at: &started_at_rfc3339,
-                        channel_name: &ch_ref.name,
-                        model_name: &cm_ref.name,
-                        target_req_url: &target_req_url,
-                        channel_req_headers: &channel_req_headers,
-                        rewritten_body_str: &rewritten_body_str,
+                    RoundOutcome {
                         response_headers: &resp_headers,
-                        status: status.as_u16(),
-                        duration_ms: round_duration_ms,
-                        err_body: &err_body,
-                        should_cooldown: !is_client,
-                        key_index: key_idx,
+                        status:           status.as_u16(),
+                        duration_ms:      round_duration_ms,
+                        err_body:         &err_body,
+                        should_cooldown:  !is_client,
                     },
                 );
 
@@ -1052,28 +1056,17 @@ pub async fn forward_relay(
                     item = None;
                 }
 
-                record_round_failure(
+                round_ctx.record_failure(
                     &state,
-                    current_group.id,
-                    item.as_ref().map(|i| i.id).unwrap_or(0),
                     current_group.relay_config.cooldown_seconds,
                     request_id,
                     &mut rounds,
-                    RoundFailure {
-                        round,
-                        model: &metadata.model,
-                        started_at: &started_at_rfc3339,
-                        channel_name: &ch_ref.name,
-                        model_name: &cm_ref.name,
-                        target_req_url: &target_req_url,
-                        channel_req_headers: &channel_req_headers,
-                        rewritten_body_str: &rewritten_body_str,
+                    RoundOutcome {
                         response_headers: "",
-                        status: 502,
-                        duration_ms: round_duration_ms,
-                        err_body: &err_msg,
-                        should_cooldown: true,
-                        key_index: key_idx,
+                        status:           502,
+                        duration_ms:      round_duration_ms,
+                        err_body:         &err_msg,
+                        should_cooldown:  true,
                     },
                 );
             }

@@ -1002,4 +1002,58 @@ mod tests {
         server.verify().await;
         let _ = std::fs::remove_file(db_path);
     }
+
+    /// 连接层失败（渠道不可达）必须把冷却记在**该渠道项**上。
+    /// 回归：计数器曾在 `item` 被置空之后才求 item_id，冷却落到不存在的 item 0，
+    /// 真正失败的渠道不进冷却、下一次请求立刻再撞一次。
+    #[tokio::test]
+    async fn connection_failure_cools_the_channel_item() {
+        let (state, db_path) = test_support::setup_test_state("relay_conn_cooldown").await;
+        // 指向一个必然拒绝连接的端口
+        let model = add_channel(&state, "ch-dead", "http://127.0.0.1:1", "k1", "m-dead").await;
+        let mut group = crate::model::Group {
+            name: "m-dead".into(),
+            mode: crate::model::GroupMode::Failover,
+            relay_config: crate::model::GroupRelayConfig {
+                // 冷却窗口拉长，便于断言；重试间隔归零以免测试空等
+                cooldown_seconds: 3600,
+                retry_interval_seconds: 0,
+                stream_first_event_timeout_seconds: 5,
+                ..Default::default()
+            },
+            items: vec![crate::model::GroupItem {
+                channel_model_id: model.id,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        op::group::create_group(&state, &mut group).await.unwrap();
+        let item_id = group.items[0].id;
+
+        let resp = forward_relay(
+            state.clone(),
+            test_auth(),
+            ApiFormat::OpenaiCompletion,
+            None,
+            Uri::from_static("/v1/chat/completions"),
+            HeaderMap::new(),
+            chat_body("m-dead").await,
+        )
+        .await;
+        assert!(!resp.status().is_success());
+
+        let cooled: Vec<i64> = state
+            .route_manager
+            .get_snapshot()
+            .into_iter()
+            .flat_map(|route| route.cooldowns.into_keys().collect::<Vec<_>>())
+            .collect();
+        assert!(
+            cooled.contains(&item_id),
+            "失败渠道项必须进入冷却，实际冷却项: {cooled:?} (item_id={item_id})"
+        );
+        assert!(!cooled.contains(&0), "不得为不存在的 item 0 记冷却: {cooled:?}");
+
+        let _ = std::fs::remove_file(db_path);
+    }
 }
