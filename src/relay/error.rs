@@ -59,6 +59,15 @@ pub fn extract(body: &str) -> Option<ErrorInfo> {
     Some(ErrorInfo { message, code })
 }
 
+/// 响应体是否为错误信封。
+///
+/// 四个协议的错误体都包在顶层 `error` 里（Anthropic 另有 `type: "error"`），
+/// 成功体也可能带 `"error": null`——Responses 的成功终态对象正是如此。因此
+/// 判据是「error 存在且非 null」，按字段是否存在判断会把成功响应误判为失败。
+pub fn is_error_envelope(value: &Value) -> bool {
+    value.get("error").is_some_and(|error| !error.is_null())
+}
+
 /// 构造面向客户端的错误响应。
 pub fn build_client_error(format: ApiFormat, status: StatusCode, upstream_body: &str) -> ClientError {
     let info = extract(upstream_body);
@@ -164,6 +173,17 @@ mod tests {
     fn body_of(format: ApiFormat, status: StatusCode, upstream: &str) -> Value {
         let built = build_client_error(format, status, upstream);
         serde_json::from_slice(&built.body).unwrap()
+    }
+
+    #[test]
+    fn error_envelope_predicate_ignores_null_error() {
+        // 真错误信封
+        assert!(is_error_envelope(&json!({"error": {"message": "x"}})));
+        assert!(is_error_envelope(&json!({"error": "boom"})));
+        assert!(is_error_envelope(&json!({"error": 429})));
+        // 成功体：Responses 的终态对象带 `"error": null`，不能据此判失败
+        assert!(!is_error_envelope(&json!({"error": null})));
+        assert!(!is_error_envelope(&json!({"object": "response", "output": []})));
     }
 
     #[test]

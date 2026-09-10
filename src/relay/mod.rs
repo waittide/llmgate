@@ -379,6 +379,75 @@ mod tests {
         let _ = std::fs::remove_file(db_path);
     }
 
+    /// OpenAI Responses 的成功终态对象带 `"error": null`。流式请求遇到这种
+    /// 非 SSE 完整应答时必须按完整应答返回，不能因「存在 error 字段」判成错误。
+    #[tokio::test]
+    async fn responses_success_with_null_error_is_not_treated_as_failure() {
+        let (state, db_path) = test_support::setup_test_state("relay_error_null").await;
+        let upstream = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::any())
+            .respond_with(wiremock::ResponseTemplate::new(200).set_body_raw(
+                r#"{"id":"resp_1","object":"response","status":"completed","model":"m","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"ok"}]}],"error":null,"incomplete_details":null,"usage":{"input_tokens":2,"output_tokens":3,"total_tokens":5}}"#,
+                "application/json",
+            ))
+            .mount(&upstream)
+            .await;
+
+        let mut ch = crate::model::Channel {
+            name: "ch-respnull".into(),
+            channel_type: crate::model::ChannelProvider::OpenaiResponses,
+            enabled: true,
+            base_url: upstream.uri(),
+            key: "k1".into(),
+            models: vec![crate::model::ChannelModel {
+                name: "m-respnull".into(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        op::channel::create_channel(&state, &mut ch).await.unwrap();
+        let mut group = crate::model::Group {
+            name: "m-respnull".into(),
+            mode: crate::model::GroupMode::Failover,
+            items: vec![crate::model::GroupItem {
+                channel_model_id: ch.models[0].id,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        op::group::create_group(&state, &mut group).await.unwrap();
+
+        let resp = forward_relay(
+            state.clone(),
+            test_auth(),
+            ApiFormat::OpenaiResponse,
+            None,
+            Uri::from_static("/v1/responses"),
+            HeaderMap::new(),
+            Bytes::from(
+                json!({
+                    "model": "m-respnull",
+                    "stream": true,
+                    "input": [{ "type": "message", "role": "user",
+                                "content": [{ "type": "input_text", "text": "hi" }] }]
+                })
+                .to_string(),
+            ),
+        )
+        .await;
+
+        assert_eq!(resp.status(), 200, "带 error:null 的成功应答不得判为失败");
+        let bytes = axum::body::to_bytes(resp.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        assert!(String::from_utf8_lossy(&bytes).contains("\"text\":\"ok\""));
+        let log = wait_finished_log(&state, 1).await;
+        assert_eq!(log.status, crate::model::request_status::SUCCESS);
+        assert_eq!(log.completion_tokens, 3);
+
+        let _ = std::fs::remove_file(db_path);
+    }
+
     #[tokio::test]
     async fn failover_to_next_channel_on_500() {
         let (state, db_path) = test_support::setup_test_state("failover_500").await;

@@ -20,7 +20,9 @@ use super::{
     stop_reason_from_chat, stop_reason_from_gemini, stop_reason_from_responses,
 };
 use crate::relay::{
-    SseBuffer, parse_sse_event,
+    SseBuffer,
+    error::is_error_envelope,
+    parse_sse_event,
     protocol::{ApiFormat, extract_usage_from_json},
     state::Usage,
 };
@@ -61,10 +63,10 @@ pub enum StreamEvent {
 /// `{"error": {...}}`，Anthropic 另有 `type: "error"`），避免把正常事件里
 /// 恰好同名的字段误判为错误。
 fn stream_error_message(value: &Value) -> Option<String> {
-    let error = value.get("error")?;
-    if error.is_null() {
+    if !is_error_envelope(value) {
         return None;
     }
+    let error = value.get("error")?;
     let message = error
         .get("message")
         .and_then(Value::as_str)

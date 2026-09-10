@@ -19,7 +19,7 @@ use crate::{
     model::{Channel, ChannelModel, ChannelProvider, Group, ModelPrice, RequestLog, StatsMetrics, request_status},
     op::{AppState, channel, group, log, model, stats},
     relay::{
-        error::build_client_error,
+        error::{build_client_error, is_error_envelope},
         finalizer::{RESPONSE_CAPTURE_LIMIT, StreamFinalizer},
         ir,
         protocol::{
@@ -381,10 +381,10 @@ async fn handle_non_sse_body(state: &AppState, upstream_resp: reqwest::Response,
         }
     };
     let body = String::from_utf8_lossy(&raw_bytes);
-    // 四种协议的错误体都包在顶层 error 里；非 JSON（HTML 错误页、纯文本）同样不是可用应答
+    // 非 JSON（HTML 错误页、纯文本）同样不是可用应答
     let is_error = serde_json::from_str::<Value>(&body)
         .ok()
-        .is_none_or(|value| value.get("error").is_some());
+        .is_none_or(|value| is_error_envelope(&value));
     if is_error {
         return upstream_body_failure(state, ctx, response_headers, body.to_string());
     }
@@ -448,10 +448,7 @@ fn complete_json_response(
     // 上游把错误塞进 200：四种协议的错误体都包在顶层 error 里。跨格式解析会把
     // `{"error": ...}` 解析成空内容（parse_* 不校验载荷），客户端于是收到
     // 200 + 空应答、上游错误被静默吞掉，故此处显式判失败。
-    if parsed
-        .as_ref()
-        .is_some_and(|value| value.get("error").is_some_and(|e| !e.is_null()))
-    {
+    if parsed.as_ref().is_some_and(is_error_envelope) {
         return upstream_body_failure(
             state,
             ctx,
