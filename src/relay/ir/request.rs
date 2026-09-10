@@ -4,7 +4,7 @@ use std::collections::HashMap;
 
 use serde_json::{Value, json};
 
-use super::{ContentPart, ImageSource, Message, RelayRequest, Role, Sampling, Tool, ToolChoice};
+use super::{ContentPart, ImageSource, Message, RelayRequest, Role, Sampling, Tool, ToolChoice, arguments_json_string};
 
 // ---------- 通用小工具 ----------
 
@@ -911,7 +911,7 @@ pub(super) fn emit_chat(req: &RelayRequest) -> Value {
                                 "type": "function",
                                 "function": {
                                     "name": name,
-                                    "arguments": serde_json::to_string(arguments).unwrap_or_else(|_| "{}".to_string())
+                                    "arguments": arguments_json_string(arguments)
                                 }
                             }));
                         }
@@ -1088,7 +1088,7 @@ pub(super) fn emit_responses(req: &RelayRequest) -> Value {
                                 "type": "function_call",
                                 "call_id": id,
                                 "name": name,
-                                "arguments": serde_json::to_string(arguments).unwrap_or_else(|_| "{}".to_string())
+                                "arguments": arguments_json_string(arguments)
                             }));
                         }
                     }
@@ -2364,5 +2364,45 @@ mod tests {
             gemini.pointer("/system_instruction/parts/0/text").unwrap(),
             "只输出 JSON"
         );
+    }
+
+    /// 工具参数在源格式里是字符串但内容不是合法 JSON 时，必须原样透出：
+    /// 再序列化会套上一层引号，客户端拿到的是带引号的字符串而非原始参数。
+    #[test]
+    fn non_json_arguments_are_passed_through_unchanged() {
+        // Anthropic 的 input 是对象 → Chat 的 arguments 是序列化后的字符串
+        let anthropic = json!({
+            "model": "m", "max_tokens": 64,
+            "messages": [{ "role": "assistant", "content": [
+                { "type": "tool_use", "id": "t1", "name": "f", "input": { "city": "Paris" } }
+            ]}]
+        });
+        let chat = convert(ApiFormat::AnthropicMessage, &anthropic, ApiFormat::OpenaiCompletion);
+        assert_eq!(
+            chat.pointer("/messages/0/tool_calls/0/function/arguments")
+                .unwrap(),
+            "{\"city\":\"Paris\"}"
+        );
+
+        // 上一步的产物回炉成 IR 时 arguments 已是字符串 → 再发射仍是同一串，不加引号
+        let back = convert(ApiFormat::OpenaiCompletion, &chat, ApiFormat::AnthropicMessage);
+        assert_eq!(back.pointer("/messages/0/content/0/input/city").unwrap(), "Paris");
+
+        // 直接构造非 JSON 参数：原样透出，不额外转义
+        let responses = json!({
+            "model": "m",
+            "input": [
+                { "type": "function_call", "call_id": "r1", "name": "f", "arguments": "not json" }
+            ]
+        });
+        let chat = convert(ApiFormat::OpenaiResponse, &responses, ApiFormat::OpenaiCompletion);
+        assert_eq!(
+            chat.pointer("/messages/0/tool_calls/0/function/arguments")
+                .unwrap(),
+            "not json"
+        );
+
+        let responses_back = convert(ApiFormat::OpenaiCompletion, &chat, ApiFormat::OpenaiResponse);
+        assert_eq!(responses_back.pointer("/input/0/arguments").unwrap(), "not json");
     }
 }

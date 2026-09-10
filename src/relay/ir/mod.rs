@@ -307,6 +307,18 @@ pub fn gemini_usage(usage: &Usage) -> Value {
     value
 }
 
+/// IR 的 `ToolCall.arguments` → 目标格式要求的 JSON 字符串。
+///
+/// Chat / Responses 的 `arguments` 是**字符串**字段：对象/数组序列化即可；但源格式
+/// 给的就是字符串时（解析时原样保留了无法解析为 JSON 的参数）必须直接透出——
+/// 再序列化会把它套上一层引号，客户端解析出的是带引号的字符串而非原始参数。
+pub fn arguments_json_string(arguments: &Value) -> String {
+    match arguments {
+        Value::String(s) => s.clone(),
+        other => serde_json::to_string(other).unwrap_or_else(|_| "{}".to_string()),
+    }
+}
+
 /// Gemini functionCall 的确定性调用 ID：同一调用跨 chunk 重复下发时幂等。
 pub fn gemini_call_id(name: &str, arguments_json: &str) -> String {
     use std::hash::{Hash, Hasher};

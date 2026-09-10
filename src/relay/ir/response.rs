@@ -3,9 +3,9 @@
 use serde_json::{Value, json};
 
 use super::{
-    ContentPart, RelayResponse, anthropic_stop_reason, anthropic_usage, chat_finish_reason, chat_usage, gemini_call_id,
-    gemini_finish_reason, gemini_usage, responses_status, responses_usage, stop_reason_from_anthropic,
-    stop_reason_from_chat, stop_reason_from_gemini, stop_reason_from_responses,
+    ContentPart, RelayResponse, anthropic_stop_reason, anthropic_usage, arguments_json_string, chat_finish_reason,
+    chat_usage, gemini_call_id, gemini_finish_reason, gemini_usage, responses_status, responses_usage,
+    stop_reason_from_anthropic, stop_reason_from_chat, stop_reason_from_gemini, stop_reason_from_responses,
 };
 use crate::relay::{protocol::extract_usage_from_json, state::Usage};
 
@@ -228,7 +228,7 @@ pub(super) fn emit_chat(resp: &RelayResponse) -> Value {
                 "type": "function",
                 "function": {
                     "name": name,
-                    "arguments": serde_json::to_string(arguments).unwrap_or_else(|_| "{}".to_string())
+                    "arguments": arguments_json_string(arguments)
                 }
             })),
             _ => {}
@@ -287,7 +287,7 @@ pub(super) fn emit_responses(resp: &RelayResponse) -> Value {
                     "status": "completed",
                     "call_id": id,
                     "name": name,
-                    "arguments": serde_json::to_string(arguments).unwrap_or_else(|_| "{}".to_string())
+                    "arguments": arguments_json_string(arguments)
                 }));
             }
             _ => {}
