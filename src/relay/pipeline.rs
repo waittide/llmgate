@@ -81,11 +81,6 @@ fn validate_chat_tool_pairing(body: &Value) -> Result<(), String> {
     Ok(())
 }
 
-/// 判断上游返回的 HTTP 状态码是否属于客户端语法或格式错误。
-///
-/// 鉴权失败 (401/403)、上游缺少模型 (404)、限流超额 (429) 或服务端故障 (5xx) 属于渠道问题，
-/// 必须触发该渠道进入冷却并自动故障转移至其他健康渠道。
-/// 仅 400 Bad Request 与 422 Unprocessable Entity 视为不可重试的客户端请求错误。
 /// 将 HTTP HeaderMap 序列化为 JSON 字符串对象：header名 -> 逗号分隔的值列表。
 pub(crate) fn serialize_headers(headers: &HeaderMap) -> String {
     let mut map: std::collections::BTreeMap<String, Vec<String>> = Default::default();
@@ -101,6 +96,11 @@ pub(crate) fn serialize_headers(headers: &HeaderMap) -> String {
     serde_json::to_string(&serde_json::Value::Object(obj)).unwrap_or_default()
 }
 
+/// 判断上游返回的 HTTP 状态码是否属于客户端语法或格式错误。
+///
+/// 鉴权失败 (401/403)、上游缺少模型 (404)、限流超额 (429) 或服务端故障 (5xx) 属于渠道问题，
+/// 必须触发该渠道进入冷却并自动故障转移至其他健康渠道。
+/// 仅 400 Bad Request 与 422 Unprocessable Entity 视为不可重试的客户端请求错误。
 pub(crate) fn is_client_error(status: StatusCode) -> bool {
     matches!(status, StatusCode::BAD_REQUEST | StatusCode::UNPROCESSABLE_ENTITY)
 }
