@@ -21,35 +21,32 @@ pub struct AuthContext {
 }
 
 /// 按 RFC 6750 提取 Bearer token；scheme 大小写不敏感（部分客户端发送小写 `bearer`）。
-fn strip_bearer_token(auth_str: &str) -> Option<String> {
+fn strip_bearer_token(auth_str: &str) -> Option<&str> {
     let (scheme, rest) = auth_str.split_once(' ')?;
     if !scheme.eq_ignore_ascii_case("Bearer") {
         return None;
     }
     let trimmed = rest.trim();
-    if trimmed.is_empty() {
-        None
-    } else {
-        Some(trimmed.to_string())
-    }
+    (!trimmed.is_empty()).then_some(trimmed)
 }
 
 /// 从 Authorization 头提取 JWT（token 仅经请求头传输）。
-fn extract_admin_token(headers: &HeaderMap) -> Option<String> {
+fn extract_admin_token(headers: &HeaderMap) -> Option<&str> {
     let auth_header = headers.get(header::AUTHORIZATION)?;
-    let auth_str = auth_header.to_str().ok()?;
-    strip_bearer_token(auth_str)
+    strip_bearer_token(auth_header.to_str().ok()?)
 }
 
 /// 从请求中提取 API Key，优先级：x-api-key > Authorization Bearer >
 /// x-goog-api-key（Gemini 原生头）> key 查询参数（Gemini 原生 ?key=）。
 /// 返回 (密钥, 是否 Anthropic x-api-key 头)。
-fn extract_api_key(headers: &HeaderMap, query: Option<&str>) -> Option<(String, bool)> {
+///
+/// 返回值借用自请求头/查询串，鉴权命中与否都不分配：无效密钥本就常来常往。
+fn extract_api_key<'a>(headers: &'a HeaderMap, query: Option<&'a str>) -> Option<(&'a str, bool)> {
     if let Some(x_key) = headers.get("x-api-key")
         && let Ok(key) = x_key.to_str()
         && !key.trim().is_empty()
     {
-        return Some((key.trim().to_string(), true));
+        return Some((key.trim(), true));
     }
 
     if let Some(auth_header) = headers.get(header::AUTHORIZATION)
@@ -63,30 +60,33 @@ fn extract_api_key(headers: &HeaderMap, query: Option<&str>) -> Option<(String, 
         && let Ok(key) = goog_key.to_str()
         && !key.trim().is_empty()
     {
-        return Some((key.trim().to_string(), false));
+        return Some((key.trim(), false));
     }
 
     query.and_then(extract_query_key).map(|key| (key, false))
 }
 
 /// 从查询串中取 `key` 参数值。
-fn extract_query_key(query: &str) -> Option<String> {
+fn extract_query_key(query: &str) -> Option<&str> {
     query
         .split('&')
         .find_map(|pair| match pair.split_once('=') {
-            Some(("key", value)) if !value.trim().is_empty() => Some(value.trim().to_string()),
+            Some(("key", value)) if !value.trim().is_empty() => Some(value.trim()),
             _ => None,
         })
 }
 
 pub async fn admin_auth_middleware(State(state): State<AppState>, mut req: Request, next: Next) -> Response {
-    let token = match extract_admin_token(req.headers()) {
-        Some(t) => t,
-        None => return error(StatusCode::UNAUTHORIZED, "鉴权失败"),
+    let Some(token) = extract_admin_token(req.headers()) else {
+        return error(StatusCode::UNAUTHORIZED, "鉴权失败");
     };
 
-    let secret = state.jwt_secret.read().clone();
-    match verify_jwt(&token, &secret) {
+    // 读锁内直接校验：secret 仅在此借用，不做每请求的 String 克隆
+    let verified = {
+        let secret = state.jwt_secret.read();
+        verify_jwt(token, secret.as_str())
+    };
+    match verified {
         Ok(claims) => {
             req.extensions_mut().insert(claims);
             next.run(req).await
@@ -100,7 +100,7 @@ pub async fn api_key_auth_middleware(State(state): State<AppState>, mut req: Req
         return error(StatusCode::UNAUTHORIZED, "鉴权失败");
     };
 
-    let api_key_obj = match get_api_key_by_key(&state, &api_key_str) {
+    let api_key_obj = match get_api_key_by_key(&state, api_key_str) {
         Ok(k) => k,
         Err(_) => return error(StatusCode::UNAUTHORIZED, "鉴权失败"),
     };
@@ -151,7 +151,7 @@ mod tests {
     fn test_extract_admin_token_from_header() {
         let mut headers = HeaderMap::new();
         headers.insert(header::AUTHORIZATION, HeaderValue::from_static("Bearer jwt-token"));
-        assert_eq!(extract_admin_token(&headers), Some("jwt-token".to_string()));
+        assert_eq!(extract_admin_token(&headers), Some("jwt-token"));
     }
 
     #[test]
@@ -170,7 +170,7 @@ mod tests {
         headers.insert("x-goog-api-key", HeaderValue::from_static("goog-key"));
         assert_eq!(
             extract_api_key(&headers, Some("key=query-key")),
-            Some(("sk-anthropic".to_string(), true))
+            Some(("sk-anthropic", true))
         );
 
         let mut headers = HeaderMap::new();
@@ -178,14 +178,14 @@ mod tests {
         headers.insert("x-goog-api-key", HeaderValue::from_static("goog-key"));
         assert_eq!(
             extract_api_key(&headers, Some("key=query-key")),
-            Some(("sk-bearer".to_string(), false))
+            Some(("sk-bearer", false))
         );
 
         let mut headers = HeaderMap::new();
         headers.insert("x-goog-api-key", HeaderValue::from_static(" goog-key "));
         assert_eq!(
             extract_api_key(&headers, Some("key=query-key")),
-            Some(("goog-key".to_string(), false))
+            Some(("goog-key", false))
         );
     }
 
@@ -193,11 +193,11 @@ mod tests {
     fn test_extract_api_key_gemini_query_param() {
         assert_eq!(
             extract_api_key(&HeaderMap::new(), Some("key=abc123")),
-            Some(("abc123".to_string(), false))
+            Some(("abc123", false))
         );
         assert_eq!(
             extract_api_key(&HeaderMap::new(), Some("alt=sse&key=abc123")),
-            Some(("abc123".to_string(), false))
+            Some(("abc123", false))
         );
         assert_eq!(extract_api_key(&HeaderMap::new(), None), None);
         assert_eq!(extract_api_key(&HeaderMap::new(), Some("alt=sse")), None);

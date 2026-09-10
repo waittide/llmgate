@@ -12,8 +12,12 @@ use crate::{
 pub async fn login(State(state): State<AppState>, Json(payload): Json<UserLogin>) -> Response {
     match user::verify_user(&state, &payload.username, &payload.password).await {
         Ok(true) => {
-            let secret = state.jwt_secret.read().clone();
-            match generate_jwt(&payload.username, &secret, payload.expire) {
+            // 读锁内直接签发：secret 仅在此借用，不做每次登录的 String 克隆
+            let issued = {
+                let secret = state.jwt_secret.read();
+                generate_jwt(&payload.username, secret.as_str(), payload.expire)
+            };
+            match issued {
                 Ok((token, max_age)) => {
                     let data = serde_json::json!({
                         "token": token,
