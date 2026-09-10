@@ -9,14 +9,13 @@ use rust_embed::RustEmbed;
 struct Asset;
 
 pub async fn serve_static(uri: Uri) -> Response<Body> {
-    let mut path = uri.path().trim_start_matches('/').to_string();
-    if path.is_empty() {
-        path = "index.html".to_string();
-    }
+    // 全程以 &str 借用路径：静态资源请求量最大，这里不必为每个请求分配一个 String
+    let path = uri.path().trim_start_matches('/');
+    let path = if path.is_empty() { "index.html" } else { path };
 
-    match Asset::get(&path) {
+    match Asset::get(path) {
         Some(content) => {
-            let mime = guess_mime_type(&path);
+            let mime = guess_mime_type(path);
             let mut response = Response::builder()
                 .status(StatusCode::OK)
                 .header(header::CONTENT_TYPE, HeaderValue::from_static(mime));

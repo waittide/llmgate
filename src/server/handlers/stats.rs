@@ -19,15 +19,12 @@ pub async fn get_stats_today(State(state): State<AppState>) -> Response {
 
 pub async fn get_stats_daily(State(state): State<AppState>) -> Response {
     ok_or_500(stats::get_stats_daily(&state).await.map(|items| {
-        let mut max_request_count = 0;
-        for item in &items {
-            let count = item.metrics.request_success + item.metrics.request_failed;
-            if count > max_request_count {
-                max_request_count = count;
-            }
-        }
         StatsDailyResponse {
-            max_request_count,
+            max_request_count: items
+                .iter()
+                .map(|item| item.metrics.request_success + item.metrics.request_failed)
+                .max()
+                .unwrap_or(0),
             items,
         }
     }))
