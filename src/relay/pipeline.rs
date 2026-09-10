@@ -26,7 +26,7 @@ use crate::{
             ApiFormat, calculate_cost, calculate_input_cost, extract_usage_from_json, parse_request_metadata,
             rewrite_request_body_in_json,
         },
-        state::{RequestOverview, Usage, millis_to_rfc3339},
+        state::{RequestOverview, Usage, finish_request, millis_to_rfc3339},
         upstream::{build_upstream_request, get_client, normalize_base_url},
     },
     server::{middleware::AuthContext, resp::error},
@@ -313,7 +313,6 @@ async fn handle_successful_stream(
     let finalizer = StreamFinalizer {
         inner: output_stream,
         state: state.clone(),
-        req_id: ctx.log_base.id as u64,
         api_key_id: ctx.api_key_id,
         channel_id: ctx.channel.id,
         channel_model_id: ctx.channel_model.id,
@@ -548,15 +547,7 @@ fn complete_json_response(
     req_log.error = None;
     req_log.rounds_detail = log::serialize_rounds_detail(state, &ctx.rounds);
 
-    state.in_flight.broadcast(RequestOverview::from(&req_log));
-    state.in_flight.unregister(ctx.log_base.id as u64);
-
-    let state_clone = state.clone();
-    tokio::spawn(async move {
-        if let Err(e) = log::update_completed_log(&state_clone, &req_log).await {
-            tracing::error!("写入已完成请求日志失败: {}", e);
-        }
-    });
+    finish_request(state, req_log);
 
     let output_cost =
         (usage.completion_tokens as f64 / 1_000_000.0) * ctx.price_opt.as_ref().map(|p| p.output).unwrap_or(0.0);
@@ -634,15 +625,7 @@ fn build_failed_relay_response(state: &AppState, ctx: FailedRelayContext) -> Res
     req_log.round = ctx.round;
     req_log.error = Some(error_message);
     req_log.rounds_detail = log::serialize_rounds_detail(state, &ctx.rounds);
-    state.in_flight.broadcast(RequestOverview::from(&req_log));
-    state.in_flight.unregister(ctx.log_base.id as u64);
-
-    let state_clone = state.clone();
-    tokio::spawn(async move {
-        if let Err(e) = log::update_completed_log(&state_clone, &req_log).await {
-            tracing::error!("写入已完成请求日志失败: {}", e);
-        }
-    });
+    finish_request(state, req_log);
     Response::builder()
         .status(
             if ctx.last_status.is_client_error() || ctx.last_status.is_server_error() {
@@ -668,7 +651,6 @@ fn build_failed_relay_response(state: &AppState, ctx: FailedRelayContext) -> Res
 /// 正常完成路径必须先调用 `defuse()`，把收尾交给各自的完成逻辑。
 struct RelayGuard {
     state:      AppState,
-    req_id:     u64,
     log_base:   RequestLog,
     started_at: i64,
     defused:    bool,
@@ -685,20 +667,11 @@ impl Drop for RelayGuard {
         if self.defused {
             return;
         }
-        self.state.in_flight.unregister(self.req_id);
         let mut req_log = self.log_base.clone();
         req_log.status = request_status::INTERRUPTED.to_string();
         req_log.wait_time = chrono::Utc::now().timestamp_millis() - self.started_at;
         req_log.error = Some("客户端连接中断，转发提前终止".to_string());
-        self.state
-            .in_flight
-            .broadcast(RequestOverview::from(&req_log));
-        let state = self.state.clone();
-        tokio::spawn(async move {
-            if let Err(e) = log::update_completed_log(&state, &req_log).await {
-                tracing::error!("写入中断请求日志失败: {}", e);
-            }
-        });
+        finish_request(&self.state, req_log);
     }
 }
 
@@ -760,7 +733,6 @@ pub async fn forward_relay(
     };
     let relay_guard = RelayGuard {
         state: state.clone(),
-        req_id: request_id,
         log_base: log_base.clone(),
         started_at,
         defused: false,
@@ -856,20 +828,18 @@ pub async fn forward_relay(
                 Err(msg) => {
                     // 转换结果未通过目标形状校验：代理侧明确的 400，不透传上游
                     let resp = error(StatusCode::BAD_REQUEST, &msg);
-                    log::update_completed_log(
+                    finish_request(
                         &state,
-                        &RequestLog {
+                        RequestLog {
                             id: request_id as i64,
                             model: metadata.model.clone(),
                             status: request_status::FAILED.to_string(),
                             error: Some(msg),
+                            wait_time: start_time.elapsed().as_millis() as i64,
                             created_at: started_at,
                             ..log_base.clone()
                         },
-                    )
-                    .await
-                    .unwrap_or(());
-                    state.in_flight.unregister(request_id);
+                    );
                     relay_guard.defuse();
                     return resp;
                 }
@@ -1231,7 +1201,6 @@ mod relay_guard_tests {
         {
             let guard = RelayGuard {
                 state:      state.clone(),
-                req_id:     id,
                 log_base:   crate::model::RequestLog {
                     id: id as i64,
                     ..Default::default()
@@ -1250,7 +1219,6 @@ mod relay_guard_tests {
         state.in_flight.register(id2);
         RelayGuard {
             state:      state.clone(),
-            req_id:     id2,
             log_base:   crate::model::RequestLog {
                 id: id2 as i64,
                 ..Default::default()

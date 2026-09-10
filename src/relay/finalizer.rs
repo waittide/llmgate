@@ -16,7 +16,7 @@ use crate::{
     relay::{
         protocol::{calculate_cost, calculate_input_cost},
         sse::extract_usage_from_sse_buffer,
-        state::{RequestOverview, Usage},
+        state::{Usage, finish_request},
     },
 };
 
@@ -29,7 +29,6 @@ pub(crate) const RESPONSE_CAPTURE_LIMIT: usize = 64 * 1024;
 pub(crate) struct StreamFinalizer<S> {
     pub(crate) inner:            S,
     pub(crate) state:            AppState,
-    pub(crate) req_id:           u64,
     pub(crate) api_key_id:       i64,
     pub(crate) channel_id:       i64,
     pub(crate) channel_model_id: i64,
@@ -173,16 +172,7 @@ impl<S> StreamFinalizer<S> {
         req_log.error = error_opt;
         req_log.rounds_detail = log::serialize_rounds_detail(&self.state, &all_rounds);
 
-        let overview = RequestOverview::from(&req_log);
-        self.state.in_flight.broadcast(overview);
-        self.state.in_flight.unregister(self.req_id);
-
-        let state = self.state.clone();
-        tokio::spawn(async move {
-            if let Err(e) = log::update_completed_log(&state, &req_log).await {
-                tracing::error!("写入已完成请求日志失败: {}", e);
-            }
-        });
+        finish_request(&self.state, req_log);
     }
 }
 
@@ -285,7 +275,6 @@ mod tests {
         let mut finalizer = StreamFinalizer {
             inner:            pending_stream,
             state:            state.clone(),
-            req_id:           1,
             api_key_id:       1,
             channel_id:       1,
             channel_model_id: 1,

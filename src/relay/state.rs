@@ -4,7 +4,25 @@ use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{broadcast, watch};
 
-use crate::model::RequestLog;
+use crate::{
+    model::RequestLog,
+    op::{AppState, log},
+};
+
+/// 请求终态的唯一出口：广播终态概览、注销中断注册、异步落盘日志。
+///
+/// 各终结路径（成功、失败、中断、future 被 drop）只负责算出自己的终态记录，
+/// 效应一律从这里发出——同一套操作散落多处时，顺序与落盘策略都会各自漂移。
+pub(crate) fn finish_request(state: &AppState, entry: RequestLog) {
+    state.in_flight.broadcast(RequestOverview::from(&entry));
+    state.in_flight.unregister(entry.id as u64);
+    let state = state.clone();
+    tokio::spawn(async move {
+        if let Err(e) = log::update_completed_log(&state, &entry).await {
+            tracing::error!("写入已完成请求日志失败: {}", e);
+        }
+    });
+}
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
