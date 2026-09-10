@@ -1046,6 +1046,13 @@ impl AnthropicSink {
         }
         self.completed = true;
         if self.thinking_started {
+            self.push(
+                "content_block_delta",
+                json!({
+                    "index": self.thinking_block,
+                    "delta": { "type": "signature_delta", "signature": "" }
+                }),
+            );
             self.push("content_block_stop", json!({ "index": self.thinking_block }));
         }
         if self.text_started {
@@ -1093,7 +1100,12 @@ impl EventSink for AnthropicSink {
                     self.thinking_started = true;
                     self.thinking_block = self.next_block_index;
                     self.next_block_index += 1;
-                    self.start_block(self.thinking_block, json!({ "type": "thinking", "thinking": "" }));
+                    // signature 是 Anthropic thinking 块的必填字段；转译场景没有真实签名，
+                    // 补空串以满足客户端的类型校验（伪造签名会在回放时被上游拒绝）
+                    self.start_block(
+                        self.thinking_block,
+                        json!({ "type": "thinking", "thinking": "", "signature": "" }),
+                    );
                 }
                 self.push(
                     "content_block_delta",
@@ -1588,6 +1600,25 @@ mod tests {
 
     /// 截断的上游流在 Responses 客户端侧必须以 `response.incomplete` 收尾，
     /// 不能报 `response.completed` 却带着 `status: incomplete`。
+    /// 转译出的 Anthropic thinking 块必须字段完整：起始块带 signature，
+    /// 关闭前补 signature_delta，便于客户端按类型解析并在下一轮回传。
+    #[tokio::test]
+    async fn chat_reasoning_to_anthropic_thinking_block_has_signature() {
+        let out = run(
+            ApiFormat::OpenaiCompletion,
+            ApiFormat::AnthropicMessage,
+            vec![
+                "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"想一下\"},\"finish_reason\":null}]}\n\n",
+                "data: {\"choices\":[{\"delta\":{\"content\":\"答\"},\"finish_reason\":\"stop\"}]}\n\n",
+            ],
+        )
+        .await;
+        assert!(out.contains("\"type\":\"thinking\""));
+        assert!(out.contains("\"signature\":\"\""));
+        assert!(out.contains("signature_delta"));
+        assert!(out.contains("\"thinking\":\"想一下\""));
+    }
+
     #[tokio::test]
     async fn chat_truncated_to_responses_incomplete_event() {
         let out = run(

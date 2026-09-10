@@ -328,12 +328,14 @@ pub(super) fn emit_anthropic(resp: &RelayResponse) -> Value {
     let mut content = Vec::new();
     for part in &resp.content {
         match part {
+            // signature 是 Anthropic thinking 块的必填字段；无签名时补空串，
+            // 保证客户端按类型解析不报错
             ContentPart::Thinking { text, signature } => {
-                let mut block = json!({ "type": "thinking", "thinking": text });
-                if let Some(signature) = signature {
-                    block["signature"] = Value::String(signature.clone());
-                }
-                content.push(block);
+                content.push(json!({
+                    "type": "thinking",
+                    "thinking": text,
+                    "signature": signature.clone().unwrap_or_default()
+                }));
             }
             ContentPart::Text { text, .. } if !text.is_empty() => {
                 content.push(json!({ "type": "text", "text": text }));
@@ -643,6 +645,8 @@ mod tests {
         let anthropic = convert(ApiFormat::OpenaiCompletion, &chat, ApiFormat::AnthropicMessage, "m");
         assert_eq!(anthropic.pointer("/content/0/type").unwrap(), "thinking");
         assert_eq!(anthropic.pointer("/content/0/thinking").unwrap(), "推理过程");
+        // 无真实签名时补空串：Anthropic 的 thinking 块 signature 必填
+        assert_eq!(anthropic.pointer("/content/0/signature").unwrap(), "");
 
         let chat_empty = json!({
             "choices": [{ "index": 0, "message": { "role": "assistant", "content": "" }, "finish_reason": "stop" }],
