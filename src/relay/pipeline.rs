@@ -105,6 +105,39 @@ pub(crate) fn is_client_error(status: StatusCode) -> bool {
     matches!(status, StatusCode::BAD_REQUEST | StatusCode::UNPROCESSABLE_ENTITY)
 }
 
+/// 连接层失败的分类：超时对客户端是 504，其余是 502。
+///
+/// 分类必须在错误产生的现场判定：`reqwest::Error` 的 Display 不含 "timed out"
+/// （只有 `error sending request for url (...)`），事后按错误文本里找 "timeout"
+/// 永远不成立，超时会被一律记成 502。
+enum SendFailure {
+    Timeout(String),
+    Other(String),
+}
+
+impl SendFailure {
+    fn from_reqwest(err: reqwest::Error) -> Self {
+        if err.is_timeout() {
+            Self::Timeout(err.to_string())
+        } else {
+            Self::Other(err.to_string())
+        }
+    }
+
+    fn message(&self) -> &str {
+        match self {
+            Self::Timeout(message) | Self::Other(message) => message,
+        }
+    }
+
+    fn status(&self) -> StatusCode {
+        match self {
+            Self::Timeout(_) => StatusCode::GATEWAY_TIMEOUT,
+            Self::Other(_) => StatusCode::BAD_GATEWAY,
+        }
+    }
+}
+
 fn validate_relay_request(
     state: &AppState,
     auth_ctx: &AuthContext,
@@ -941,17 +974,17 @@ pub async fn forward_relay(
             )
             .await
             {
-                Ok(r) => r.map_err(|e| e.to_string()),
-                Err(_) => Err(format!(
+                Ok(r) => r.map_err(SendFailure::from_reqwest),
+                Err(_) => Err(SendFailure::Timeout(format!(
                     "上游流式响应在 {}s 内未返回初始响应头",
                     current_group
                         .relay_config
                         .stream_first_event_timeout_seconds
                         .max(5)
-                )),
+                ))),
             }
         } else {
-            fut.await.map_err(|e| e.to_string())
+            fut.await.map_err(SendFailure::from_reqwest)
         };
 
         match send_result {
@@ -1009,7 +1042,6 @@ pub async fn forward_relay(
                 state
                     .key_pool
                     .report_failure(ch_ref.id, key_idx, current_group.relay_config.cooldown_seconds);
-                keys_tried.insert(key_idx);
 
                 let is_client = is_client_error(status);
                 round_ctx.record_failure(
@@ -1034,24 +1066,20 @@ pub async fn forward_relay(
                     item = None;
                 }
             }
-            Err(err_msg) => {
+            Err(failure) => {
+                let err_msg = failure.message();
                 let round_duration_ms = round_start_time.elapsed().as_millis() as i64;
                 last_target_channel = ch_ref.name.clone();
                 last_target_model = cm_ref.name.clone();
                 last_response_url = target_req_url.clone();
                 last_response_headers = String::new();
-                last_status = if err_msg.contains("timeout") {
-                    StatusCode::GATEWAY_TIMEOUT
-                } else {
-                    StatusCode::BAD_GATEWAY
-                };
-                last_error_body = err_msg.clone();
+                last_status = failure.status();
+                last_error_body = err_msg.to_string();
 
                 // 连接层失败: 冷却该 key; 该渠道 key 全部试过后换下一个渠道
                 state
                     .key_pool
                     .report_failure(ch_ref.id, key_idx, current_group.relay_config.cooldown_seconds);
-                keys_tried.insert(key_idx);
                 if keys_tried.len() >= key_pool.len() {
                     item = None;
                 }
@@ -1063,9 +1091,9 @@ pub async fn forward_relay(
                     &mut rounds,
                     RoundOutcome {
                         response_headers: "",
-                        status:           502,
+                        status:           last_status.as_u16(),
                         duration_ms:      round_duration_ms,
-                        err_body:         &err_msg,
+                        err_body:         err_msg,
                         should_cooldown:  true,
                     },
                 );
@@ -1144,6 +1172,39 @@ mod validate_tests {
             { "role": "user", "content": "next" }
         ] });
         assert!(validate_chat_tool_pairing(&b).is_err());
+    }
+}
+
+#[cfg(test)]
+mod send_failure_tests {
+    use std::time::Duration;
+
+    use axum::http::StatusCode;
+
+    use super::SendFailure;
+
+    /// 上游接受连接但不回应时，请求级超时必须被认成 Timeout——这是 504 与 502 的分界。
+    /// 回归：原先在错误文本里找 "timeout"，而 `reqwest::Error` 的 Display 里没有该词
+    /// （只有 `error sending request for url (...)`），超时一律被记成 502。
+    #[tokio::test]
+    async fn reqwest_timeout_is_classified_as_timeout() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            // 只接受、不回应：超时由客户端兜底
+            let _socket = listener.accept().await.unwrap();
+            std::future::pending::<()>().await;
+        });
+
+        let err = crate::relay::upstream::get_client()
+            .get(format!("http://{addr}/"))
+            .timeout(Duration::from_millis(200))
+            .send()
+            .await
+            .unwrap_err();
+
+        assert!(err.is_timeout(), "前置条件：该错误应是超时: {err}");
+        assert_eq!(SendFailure::from_reqwest(err).status(), StatusCode::GATEWAY_TIMEOUT);
     }
 }
 
