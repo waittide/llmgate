@@ -1,4 +1,5 @@
 use anyhow::Result;
+use chrono::Timelike;
 use sqlx::Row;
 
 use crate::{
@@ -90,41 +91,42 @@ fn today_date() -> String {
     chrono::Local::now().format("%Y%m%d").to_string()
 }
 
-/// 若内存统计仍停留在前一天，先结转：重置今日与小时统计，并将前一天数据异步落盘。
-/// record_metrics（有新流量时）与 flush_stats_to_db（定时）都会调用，保证跨天翻转不依赖流量。
-fn rollover_daily_if_needed(state: &AppState, now_date: &str) {
-    let (prev_daily, prev_hourlies) = {
-        let mut stats = state.stats.write();
-        if stats.daily.date == now_date {
-            return;
-        }
-        let prev_daily = stats.daily.clone();
-        let prev_hourlies: Vec<StatsHourly> = stats
-            .hourly
-            .iter()
-            .filter(|h| {
-                h.date != now_date
-                    && (h.metrics.input_token > 0
-                        || h.metrics.output_token > 0
-                        || h.metrics.request_success > 0
-                        || h.metrics.request_failed > 0)
-            })
-            .cloned()
-            .collect();
+/// 跨天结转（调用方须已持有写锁）：内存统计仍停留前一天时重置今日与小时统计，
+/// 返回需要异步落盘的前一天数据；日期未变则返回 None。
+///
+/// 不变量：`hourly[*].date` 恒等于 `daily.date`（两者总在同一处一起重置），
+/// 因此日期等于今天即代表小时统计也已就位，调用方无需再逐小时校验。
+fn take_rollover(stats: &mut SystemStats, now_date: &str) -> Option<(StatsDaily, Vec<StatsHourly>)> {
+    if stats.daily.date == now_date {
+        return None;
+    }
+    let prev_daily = stats.daily.clone();
+    let prev_hourlies: Vec<StatsHourly> = stats
+        .hourly
+        .iter()
+        .filter(|h| {
+            h.metrics.input_token > 0
+                || h.metrics.output_token > 0
+                || h.metrics.request_success > 0
+                || h.metrics.request_failed > 0
+        })
+        .cloned()
+        .collect();
 
-        stats.daily.date = now_date.to_string();
-        stats.daily.metrics = StatsMetrics::default();
-        for (i, h) in stats.hourly.iter_mut().enumerate() {
-            *h = StatsHourly {
-                hour:    i as i64,
-                date:    now_date.to_string(),
-                metrics: StatsMetrics::default(),
-            };
-        }
-        (prev_daily, prev_hourlies)
-    };
+    stats.daily.date = now_date.to_string();
+    stats.daily.metrics = StatsMetrics::default();
+    for (i, h) in stats.hourly.iter_mut().enumerate() {
+        *h = StatsHourly {
+            hour:    i as i64,
+            date:    now_date.to_string(),
+            metrics: StatsMetrics::default(),
+        };
+    }
+    Some((prev_daily, prev_hourlies))
+}
 
-    // 写锁外异步落盘，不阻塞统计写入
+/// 将结转出的前一天统计异步落盘；零流量时 /stats/today 也能及时翻转。
+fn persist_rollover(state: &AppState, prev_daily: StatsDaily, prev_hourlies: Vec<StatsHourly>) {
     let db = state.db.clone();
     tokio::spawn(async move {
         let mut tx = match db.begin().await {
@@ -158,6 +160,16 @@ fn rollover_daily_if_needed(state: &AppState, now_date: &str) {
             tracing::error!("提交每日统计结转事务失败: {}", e);
         }
     });
+}
+
+/// 若内存统计仍停留在前一天，先结转：重置今日与小时统计，并将前一天数据异步落盘。
+/// record_metrics（有新流量时）与 flush_stats_to_db（定时）都会调用，保证跨天翻转不依赖流量。
+fn rollover_daily_if_needed(state: &AppState, now_date: &str) {
+    let pending = take_rollover(&mut state.stats.write(), now_date);
+    // 写锁外异步落盘，不阻塞统计写入
+    if let Some((prev_daily, prev_hourlies)) = pending {
+        persist_rollover(state, prev_daily, prev_hourlies);
+    }
 }
 /// 日统计 upsert：跨天结转与定时落盘共用同一份语句，列集不漂移。
 async fn upsert_daily_stats(conn: &mut sqlx::SqliteConnection, daily: &StatsDaily) -> sqlx::Result<()> {
@@ -248,29 +260,21 @@ async fn upsert_owner_metrics(
 }
 
 pub fn record_metrics(state: &AppState, api_key_id: i64, channel_id: i64, channel_model_id: i64, delta: &StatsMetrics) {
-    let now_date = today_date();
-    let current_hour = chrono::Local::now()
-        .format("%H")
-        .to_string()
-        .parse::<usize>()
-        .unwrap_or(0);
+    let now = chrono::Local::now();
+    let now_date = now.format("%Y%m%d").to_string();
 
-    // 0. 跨天先结转（独立写锁；落盘在锁外异步执行）
-    rollover_daily_if_needed(state, &now_date);
-
-    // 1. 原子更新总计、今日与当前小时统计
-    {
+    // 1. 跨天结转与总量/今日/当前小时累加在同一把写锁内完成：结转本身需要写锁，
+    //    再来一次只会让每请求多付一轮锁竞争。
+    let pending = {
         let mut stats = state.stats.write();
+        let pending = take_rollover(&mut stats, &now_date);
         stats.total.metrics.add(delta);
         stats.daily.metrics.add(delta);
-
-        if current_hour < 24 {
-            if stats.hourly[current_hour].date != now_date {
-                stats.hourly[current_hour].date = now_date.clone();
-                stats.hourly[current_hour].metrics = StatsMetrics::default();
-            }
-            stats.hourly[current_hour].metrics.add(delta);
-        }
+        stats.hourly[now.hour() as usize].metrics.add(delta);
+        pending
+    };
+    if let Some((prev_daily, prev_hourlies)) = pending {
+        persist_rollover(state, prev_daily, prev_hourlies);
     }
     // 2. 更新 API Key 内存统计
     if api_key_id > 0 {
