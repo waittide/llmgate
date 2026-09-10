@@ -17,7 +17,7 @@ use serde_json::{Value, json};
 use super::{
     StopReason, anthropic_stop_reason, anthropic_usage, chat_finish_reason, chat_usage, gemini_call_id,
     gemini_finish_reason, gemini_usage, responses_status, responses_usage, stop_reason_from_anthropic,
-    stop_reason_from_chat, stop_reason_from_gemini,
+    stop_reason_from_chat, stop_reason_from_gemini, stop_reason_from_responses,
 };
 use crate::relay::{
     SseBuffer, parse_sse_event,
@@ -309,17 +309,20 @@ impl EventParser for ResponsesEventParser {
                     })
                     .unwrap_or_default()
             }
-            "response.completed" => {
+            // 截断/过滤同样以终态事件收尾：漏掉 response.incomplete 会把它当未知事件
+            // 丢弃，EOF 时被补成 Stop，客户端的截断原因就此丢失。
+            "response.completed" | "response.incomplete" => {
                 let mut events = Vec::new();
                 if let Some(usage) = extract_usage_from_json(&value) {
                     events.push(StreamEvent::Usage(usage));
                 }
                 self.finished = true;
-                let reason = if value.pointer("/response/status").and_then(Value::as_str) == Some("incomplete") {
-                    StopReason::Length
-                } else {
-                    StopReason::Stop
-                };
+                let reason = stop_reason_from_responses(
+                    value.pointer("/response/status").and_then(Value::as_str),
+                    value
+                        .pointer("/response/incomplete_details/reason")
+                        .and_then(Value::as_str),
+                );
                 events.push(StreamEvent::Finish { reason });
                 events
             }
@@ -1816,6 +1819,35 @@ mod tests {
         assert!(out.contains("event: response.incomplete"));
         assert!(out.contains("\"reason\":\"max_output_tokens\""));
         assert_eq!(out.matches("event: response.completed").count(), 0);
+    }
+
+    /// 上游 Responses 流以 `response.incomplete` 收尾时，截断原因必须传到客户端，
+    /// 不能被当作未知事件丢弃、再在 EOF 补成正常结束。
+    #[tokio::test]
+    async fn responses_incomplete_event_reaches_chat_client() {
+        let out = run(
+            ApiFormat::OpenaiResponse,
+            ApiFormat::OpenaiCompletion,
+            vec![
+                "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"part\"}\n\n",
+                "event: response.incomplete\ndata: {\"type\":\"response.incomplete\",\"response\":{\"status\":\"incomplete\",\"incomplete_details\":{\"reason\":\"max_output_tokens\"},\"output\":[],\"usage\":{\"input_tokens\":1,\"output_tokens\":2,\"total_tokens\":3}}}\n\n",
+            ],
+        )
+        .await;
+        assert!(out.contains("\"finish_reason\":\"length\""), "{out}");
+        assert!(out.contains("\"completion_tokens\":2"), "用量不得丢失: {out}");
+        assert_eq!(out.matches("[DONE]").count(), 1, "终态只能发一次: {out}");
+
+        // 内容过滤同属未完成，必须映射为 content_filter 而不是截断
+        let filtered = run(
+            ApiFormat::OpenaiResponse,
+            ApiFormat::OpenaiCompletion,
+            vec![
+                "event: response.incomplete\ndata: {\"type\":\"response.incomplete\",\"response\":{\"status\":\"incomplete\",\"incomplete_details\":{\"reason\":\"content_filter\"},\"output\":[]}}\n\n",
+            ],
+        )
+        .await;
+        assert!(filtered.contains("\"finish_reason\":\"content_filter\""), "{filtered}");
     }
 
     #[tokio::test]

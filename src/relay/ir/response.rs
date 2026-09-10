@@ -3,9 +3,9 @@
 use serde_json::{Value, json};
 
 use super::{
-    ContentPart, RelayResponse, StopReason, anthropic_stop_reason, anthropic_usage, chat_finish_reason, chat_usage,
+    ContentPart, RelayResponse, anthropic_stop_reason, anthropic_usage, chat_finish_reason, chat_usage,
     gemini_call_id, gemini_finish_reason, gemini_usage, responses_status, responses_usage, stop_reason_from_anthropic,
-    stop_reason_from_chat, stop_reason_from_gemini,
+    stop_reason_from_chat, stop_reason_from_gemini, stop_reason_from_responses,
 };
 use crate::relay::{protocol::extract_usage_from_json, state::Usage};
 
@@ -119,12 +119,12 @@ pub(super) fn parse_responses(val: &Value, model_fallback: &str) -> Option<Relay
             }
         }
     }
-    // status=incomplete（如 token 截断）→ Length
-    let stop_reason = if as_str(val.get("status")) == Some("incomplete") {
-        StopReason::Length
-    } else {
-        StopReason::Stop
-    };
+    // status=incomplete（截断/内容过滤）→ 对应 StopReason，与 responses_status 互为逆映射
+    let stop_reason = stop_reason_from_responses(
+        as_str(val.get("status")),
+        val.pointer("/incomplete_details/reason")
+            .and_then(Value::as_str),
+    );
     Some(RelayResponse {
         model: owned_str(val.get("model")).unwrap_or_else(|| model_fallback.to_string()),
         content,
@@ -498,6 +498,22 @@ mod tests {
             "usage": { "input_tokens": 1, "output_tokens": 0, "total_tokens": 1 }
         });
         let chat = convert(ApiFormat::OpenaiResponse, &truncated, ApiFormat::OpenaiCompletion, "m");
+        assert_eq!(chat.pointer("/choices/0/finish_reason").unwrap(), "length");
+
+        // 内容过滤也是 incomplete，但理由必须区分：客户端据此判断是重试还是改内容
+        let filtered = json!({
+            "id": "resp_4",
+            "status": "incomplete",
+            "incomplete_details": { "reason": "content_filter" },
+            "output": [],
+            "usage": { "input_tokens": 1, "output_tokens": 0, "total_tokens": 1 }
+        });
+        let chat = convert(ApiFormat::OpenaiResponse, &filtered, ApiFormat::OpenaiCompletion, "m");
+        assert_eq!(chat.pointer("/choices/0/finish_reason").unwrap(), "content_filter");
+
+        // 无明细的 incomplete 仍按截断处理
+        let no_detail = json!({ "status": "incomplete", "output": [] });
+        let chat = convert(ApiFormat::OpenaiResponse, &no_detail, ApiFormat::OpenaiCompletion, "m");
         assert_eq!(chat.pointer("/choices/0/finish_reason").unwrap(), "length");
     }
 

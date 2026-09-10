@@ -223,6 +223,18 @@ pub fn responses_status(reason: &StopReason) -> (&'static str, Value) {
     }
 }
 
+/// `responses_status` 的逆映射：Responses 的 `status` 与 `incomplete_details.reason`
+/// → `StopReason`。流式终态事件与非流式响应体共用，保证两个方向口径一致。
+pub fn stop_reason_from_responses(status: Option<&str>, incomplete_reason: Option<&str>) -> StopReason {
+    match incomplete_reason {
+        Some("max_output_tokens") => StopReason::Length,
+        Some("content_filter") => StopReason::ContentFilter,
+        // 未带明细的 incomplete 仍属截断：过滤类未完成必带 reason
+        _ if status == Some("incomplete") => StopReason::Length,
+        _ => StopReason::Stop,
+    }
+}
+
 /// IR 用量 → 各协议的 usage 对象。
 ///
 /// 单一来源：流式 sink 与非流式 emitter 必须写出同一形状，否则同一次上游结果
