@@ -874,8 +874,15 @@ impl ResponsesSink {
             items.push((output_index, message));
         }
 
-        let tool_keys: Vec<String> = self.tools.keys().cloned().collect();
-        for call_id in tool_keys {
+        // 终态事件按 output_index 顺序发射：与增量事件的 item 顺序一致，
+        // 按 call_id 字典序发会让客户端看到乱序的 output_item.done
+        let mut tool_keys: Vec<(usize, String)> = self
+            .tools
+            .iter()
+            .map(|(call_id, call)| (call.output_index, call_id.clone()))
+            .collect();
+        tool_keys.sort_by_key(|(output_index, _)| *output_index);
+        for (_, call_id) in tool_keys {
             let PendingToolCall {
                 item_id,
                 name,
@@ -1250,7 +1257,9 @@ impl EventSink for AnthropicSink {
 /// Google Gemini streamGenerateContent SSE 流。
 pub struct GeminiSink {
     model:     String,
-    tools:     HashMap<String, PendingGeminiCall>,
+    /// BTreeMap 而非 HashMap：终态 chunk 的 parts 顺序必须可复现
+    ///（HashMap 的迭代顺序随随机哈希种子变化）
+    tools:     std::collections::BTreeMap<String, PendingGeminiCall>,
     usage:     Option<Usage>,
     completed: bool,
     pending:   VecDeque<Bytes>,
@@ -1266,7 +1275,7 @@ impl GeminiSink {
     pub fn new(model: String) -> Self {
         Self {
             model,
-            tools: HashMap::new(),
+            tools: std::collections::BTreeMap::new(),
             usage: None,
             completed: false,
             pending: VecDeque::new(),
@@ -1848,6 +1857,78 @@ mod tests {
         assert!(out.contains("event: response.incomplete"));
         assert!(out.contains("\"reason\":\"max_output_tokens\""));
         assert_eq!(out.matches("event: response.completed").count(), 0);
+    }
+
+    /// 提取每个 `response.function_call_arguments.done` 事件的 output_index（按出现顺序）。
+    fn done_event_output_indexes(out: &str) -> Vec<u64> {
+        out.split("\n\n")
+            .filter(|block| block.contains("response.function_call_arguments.done"))
+            .filter_map(|block| {
+                let data = block.lines().find_map(|line| line.strip_prefix("data: "))?;
+                let value: Value = serde_json::from_str(data).ok()?;
+                value.get("output_index")?.as_u64()
+            })
+            .collect()
+    }
+
+    /// 终态事件必须按 output_index 顺序发射：按 call_id 字典序发会让
+    /// function_call 的 done 事件相对其 output_item.added 乱序。
+    #[tokio::test]
+    async fn responses_done_events_follow_output_index_order() {
+        // 两个调用：call_b 先开始（output_index 0），call_a 后开始（output_index 1）；
+        // call_id 的字典序与 output_index 顺序相反
+        let out = run(
+            ApiFormat::OpenaiCompletion,
+            ApiFormat::OpenaiResponse,
+            vec![
+                "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_b\",\"function\":{\"name\":\"b\",\"arguments\":\"{\\\"x\\\":1}\"}}]}}]}\n\n",
+                "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":1,\"id\":\"call_a\",\"function\":{\"name\":\"a\",\"arguments\":\"{\\\"y\\\":2}\"}}]},\"finish_reason\":\"tool_calls\"}]}\n\n",
+            ],
+        )
+        .await;
+        assert_eq!(
+            done_event_output_indexes(&out),
+            vec![0, 1],
+            "终态事件顺序必须与 output_index 一致: {out}"
+        );
+    }
+
+    /// Gemini 终态 chunk 的 functionCall 顺序必须可复现（HashMap 迭代序随哈希种子变化）。
+    #[tokio::test]
+    async fn gemini_final_parts_order_is_reproducible() {
+        let chunks = vec![
+            "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"c1\",\"function\":{\"name\":\"alpha\",\"arguments\":\"{\\\"x\\\":1}\"}}]}}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":1,\"id\":\"c2\",\"function\":{\"name\":\"beta\",\"arguments\":\"{\\\"y\\\":2}\"}}]},\"finish_reason\":\"tool_calls\"}]}\n\n",
+        ];
+        let mut orders = Vec::new();
+        for _ in 0..5 {
+            let out = run(ApiFormat::OpenaiCompletion, ApiFormat::GeminiGenerate, chunks.clone()).await;
+            // 终态 chunk 的 parts 顺序
+            let final_chunk = out
+                .split("\n\n")
+                .filter(|block| block.contains("usageMetadata"))
+                .last()
+                .expect("缺少终态 chunk");
+            let data = final_chunk
+                .lines()
+                .find_map(|line| line.strip_prefix("data: "))
+                .unwrap();
+            let value: Value = serde_json::from_str(data).unwrap();
+            let names: Vec<&str> = value
+                .pointer("/candidates/0/content/parts")
+                .unwrap()
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter_map(|p| p.pointer("/functionCall/name").and_then(Value::as_str))
+                .collect();
+            assert_eq!(names.len(), 2, "两个 functionCall 都必须保留: {out}");
+            orders.push(names.join(","));
+        }
+        assert!(
+            orders.windows(2).all(|w| w[0] == w[1]),
+            "终态 parts 顺序必须可复现: {orders:?}"
+        );
     }
 
     /// 残留（缺空行收尾）的尾部事件若是错误帧，同样必须以 Err 终止传输：
