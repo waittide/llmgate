@@ -112,37 +112,23 @@ pub fn build_router(state: AppState) -> Router {
         .route("/v1beta/models/{model_action}", post(relay::generate_content))
         .layer(from_fn_with_state(state.clone(), api_key_auth_middleware));
 
-    // 6. CORS 跨域配置
+    // 6. CORS 跨域配置：配置了来源白名单则按白名单放行，否则允许任意来源
     let cors = {
-        let origins_setting = state
+        let origins: Vec<axum::http::HeaderValue> = state
             .settings
             .get("cors_allow_origins")
             .map(|e| e.value().clone())
-            .unwrap_or_default();
-        let trimmed = origins_setting.trim();
-        if !trimmed.is_empty() {
-            let origins: Vec<axum::http::HeaderValue> = trimmed
-                .split(',')
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-                .filter_map(|s| s.parse().ok())
-                .collect();
-            if !origins.is_empty() {
-                CorsLayer::new()
-                    .allow_origin(origins)
-                    .allow_methods(Any)
-                    .allow_headers(Any)
-            } else {
-                CorsLayer::new()
-                    .allow_origin(Any)
-                    .allow_methods(Any)
-                    .allow_headers(Any)
-            }
+            .unwrap_or_default()
+            .split(',')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .filter_map(|s| s.parse().ok())
+            .collect();
+        let cors = CorsLayer::new().allow_methods(Any).allow_headers(Any);
+        if origins.is_empty() {
+            cors.allow_origin(Any)
         } else {
-            CorsLayer::new()
-                .allow_origin(Any)
-                .allow_methods(Any)
-                .allow_headers(Any)
+            cors.allow_origin(origins)
         }
     };
 
@@ -168,6 +154,43 @@ mod tests {
 
     use super::*;
     use crate::test_support::setup_test_state;
+
+    #[tokio::test]
+    async fn test_cors_allow_origins_setting_is_honored() {
+        let (state, _db_path) = setup_test_state("server_cors").await;
+
+        // 未配置来源白名单：允许任意来源
+        let app = build_router(state.clone());
+        let req = Request::builder()
+            .method("GET")
+            .uri("/api/v1/user/status")
+            .header("origin", "https://evil.example")
+            .body(Body::empty())
+            .unwrap();
+        let res = app.oneshot(req).await.unwrap();
+        assert_eq!(
+            res.headers().get("access-control-allow-origin").unwrap(),
+            "*",
+            "默认应放行任意来源"
+        );
+
+        // 配置白名单后：只回显白名单内的来源
+        crate::op::setting::set_setting_string(&state, "cors_allow_origins", " https://ok.example , ,bad")
+            .await
+            .unwrap();
+        let app = build_router(state);
+        let req = Request::builder()
+            .method("GET")
+            .uri("/api/v1/user/status")
+            .header("origin", "https://ok.example")
+            .body(Body::empty())
+            .unwrap();
+        let res = app.oneshot(req).await.unwrap();
+        assert_eq!(
+            res.headers().get("access-control-allow-origin").unwrap(),
+            "https://ok.example"
+        );
+    }
 
     /// 回归：Gemini 入口 `{model}:generateContent` 在参数段带字面量后缀，
     /// 曾在 build_router 时触发 matchit "Only one parameter is allowed per path segment" panic。
