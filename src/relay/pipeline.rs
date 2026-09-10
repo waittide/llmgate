@@ -19,6 +19,7 @@ use crate::{
     model::{Channel, ChannelModel, ChannelProvider, Group, ModelPrice, RequestLog, StatsMetrics, request_status},
     op::{AppState, channel, group, log, model, stats},
     relay::{
+        error::build_client_error,
         finalizer::{RESPONSE_CAPTURE_LIMIT, StreamFinalizer},
         ir,
         protocol::{
@@ -364,6 +365,7 @@ async fn handle_successful_json(
                 state,
                 FailedRelayContext {
                     log_base: ctx.log_base,
+                    format: ctx.format,
                     last_target_channel: ctx.channel.name.clone(),
                     last_target_model: ctx.channel_model.name.clone(),
                     last_response_url: response_url,
@@ -409,6 +411,7 @@ async fn handle_successful_json(
                     state,
                     FailedRelayContext {
                         log_base: ctx.log_base,
+                        format: ctx.format,
                         last_target_channel: ctx.channel.name.clone(),
                         last_target_model: ctx.channel_model.name.clone(),
                         last_response_url: response_url,
@@ -524,6 +527,8 @@ async fn handle_successful_json(
 struct FailedRelayContext {
     /// 客户端侧日志基座（记录原始请求 url/headers/body，与成功路径的上游侧信息不同）
     log_base:              RequestLog,
+    /// 客户端请求协议；错误信封按它构造，避免把上游协议的错误体透传出去
+    format:                ApiFormat,
     last_target_channel:   String,
     last_target_model:     String,
     last_response_url:     String,
@@ -547,36 +552,9 @@ fn build_failed_relay_response(state: &AppState, ctx: FailedRelayContext) -> Res
         request_failed:  1,
     };
     stats::record_metrics(state, ctx.api_key_id, 0, 0, &failed_delta);
-    let (response_bytes, error_message) = if !ctx.last_error_body.is_empty() {
-        if serde_json::from_str::<serde_json::Value>(&ctx.last_error_body).is_ok() {
-            (Bytes::from(ctx.last_error_body.clone()), ctx.last_error_body.clone())
-        } else {
-            let json_err = serde_json::json!({
-                "error": {
-                    "message": ctx.last_error_body,
-                    "type": "upstream_error",
-                    "code": ctx.last_status.as_u16()
-                }
-            });
-            (
-                Bytes::from(serde_json::to_vec(&json_err).unwrap_or_default()),
-                ctx.last_error_body.clone(),
-            )
-        }
-    } else {
-        let fallback_msg = "上游请求在所有尝试后仍失败".to_string();
-        let json_err = serde_json::json!({
-            "error": {
-                "message": fallback_msg,
-                "type": "failover_exhausted",
-                "code": 502
-            }
-        });
-        (
-            Bytes::from(serde_json::to_vec(&json_err).unwrap_or_default()),
-            fallback_msg,
-        )
-    };
+    let built = build_client_error(ctx.format, ctx.last_status, &ctx.last_error_body);
+    let response_bytes = built.body;
+    let error_message = built.message;
 
     let mut req_log = ctx.log_base.clone();
     req_log.status = request_status::FAILED.to_string();
@@ -751,17 +729,18 @@ pub async fn forward_relay(
             return build_failed_relay_response(
                 &state,
                 FailedRelayContext {
-                    log_base:              log_base.clone(),
-                    last_target_channel:   String::new(),
-                    last_target_model:     String::new(),
-                    last_response_url:     String::new(),
+                    log_base: log_base.clone(),
+                    format,
+                    last_target_channel: String::new(),
+                    last_target_model: String::new(),
+                    last_response_url: String::new(),
                     last_response_headers: String::new(),
-                    last_status:           StatusCode::NOT_FOUND,
-                    last_error_body:       "分组不存在".to_string(),
-                    rounds:                Vec::new(),
-                    wait_time_ms:          0,
-                    round:                 0,
-                    api_key_id:            auth_ctx.api_key.id,
+                    last_status: StatusCode::NOT_FOUND,
+                    last_error_body: "分组不存在".to_string(),
+                    rounds: Vec::new(),
+                    wait_time_ms: 0,
+                    round: 0,
+                    api_key_id: auth_ctx.api_key.id,
                 },
             );
         }
@@ -1136,6 +1115,7 @@ pub async fn forward_relay(
         &state,
         FailedRelayContext {
             log_base,
+            format,
             last_target_channel,
             last_target_model,
             last_response_url,

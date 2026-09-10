@@ -1,3 +1,4 @@
+pub mod error;
 pub mod finalizer;
 pub mod ir;
 pub mod pipeline;
@@ -423,6 +424,60 @@ mod tests {
         assert_eq!(resp.status(), 400);
         bad.verify().await;
         healthy.verify().await;
+        let _ = std::fs::remove_file(db_path);
+    }
+
+    /// Anthropic 客户端打到 OpenAI 兼容上游：上游的错误体不得原样透传，
+    /// 必须改写为 Anthropic 错误信封（否则 SDK 只能报“未知错误”）。
+    #[tokio::test]
+    async fn anthropic_client_gets_anthropic_error_envelope() {
+        let (state, db_path) = test_support::setup_test_state("relay_err_env").await;
+        let upstream = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::any())
+            .respond_with(wiremock::ResponseTemplate::new(400).set_body_string(
+                r#"{"error":{"message":"model not found","type":"invalid_request_error","code":"model_not_found"}}"#,
+            ))
+            .mount(&upstream)
+            .await;
+
+        let model = add_channel(&state, "ch", &upstream.uri(), "k1", "m-env").await;
+        let mut group = crate::model::Group {
+            name: "m-env".into(),
+            mode: crate::model::GroupMode::Failover,
+            items: vec![crate::model::GroupItem {
+                channel_model_id: model.id,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        op::group::create_group(&state, &mut group).await.unwrap();
+
+        let resp = forward_relay(
+            state.clone(),
+            test_auth(),
+            ApiFormat::AnthropicMessage,
+            None,
+            Uri::from_static("/v1/messages"),
+            HeaderMap::new(),
+            Bytes::from(
+                json!({
+                    "model": "m-env",
+                    "max_tokens": 16,
+                    "messages": [{ "role": "user", "content": "hi" }]
+                })
+                .to_string(),
+            ),
+        )
+        .await;
+        assert_eq!(resp.status(), 400);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(value.get("type").unwrap(), "error");
+        assert_eq!(value.pointer("/error/type").unwrap(), "invalid_request_error");
+        assert_eq!(value.pointer("/error/message").unwrap(), "model not found");
+        assert!(value.pointer("/error/code").is_none());
         let _ = std::fs::remove_file(db_path);
     }
 }
