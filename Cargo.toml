@@ -2,6 +2,13 @@
 name = "llmgate"
 version = "0.1.0"
 edition = "2024"
+authors = ["waittide <waittide@outlook.com>"]
+description = "全能 AI 服务网关：多协议互转、多渠道聚合与用量统计的单二进制 LLM 网关"
+license = "MIT"
+repository = "https://github.com/waittide/llmgate"
+readme = "README.md"
+keywords = ["llm", "gateway", "proxy", "openai", "anthropic"]
+categories = ["web-programming::http-server"]
 
 [[bin]]
 name = "lg"

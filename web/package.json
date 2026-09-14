@@ -3,6 +3,15 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
+  "description": "LLMGate 管理面板（Vue 3 + Vite + Tailwind）",
+  "author": "waittide <waittide@outlook.com>",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/waittide/llmgate.git",
+    "directory": "web"
+  },
+  "homepage": "https://github.com/waittide/llmgate#readme",
   "scripts": {
     "dev": "vite --host 0.0.0.0",
     "build": "vue-tsc --noEmit && vite build",
