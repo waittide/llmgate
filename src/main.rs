@@ -37,7 +37,6 @@ async fn main() -> Result<()> {
         .with(fmt_layer)
         .init();
 
-    info!("=== 正在启动 {} (Rust 版) v{} ===", conf::APP_NAME, conf::VERSION);
     info!("数据目录: {:?}", config.data_dir);
 
     // 1. 初始化 SQLite 数据库与表结构
