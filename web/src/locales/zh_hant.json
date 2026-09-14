@@ -298,6 +298,13 @@
         "placeholder": "天數",
         "invalid": "保留天數必須為正整數",
         "saveFailed": "儲存失敗"
+      },
+      "record": {
+        "requestLabel": "記錄請求體",
+        "requestHint": "關閉後請求日誌不再保存請求報文",
+        "responseLabel": "記錄回應體",
+        "responseHint": "關閉後請求日誌不再保存回應報文",
+        "saveFailed": "儲存失敗"
       }
     }
   },

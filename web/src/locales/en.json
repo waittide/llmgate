@@ -298,6 +298,13 @@
         "placeholder": "Days",
         "invalid": "Retention days must be a positive integer",
         "saveFailed": "Failed to save"
+      },
+      "record": {
+        "requestLabel": "Record request bodies",
+        "requestHint": "When off, request logs no longer store request payloads",
+        "responseLabel": "Record response bodies",
+        "responseHint": "When off, request logs no longer store response payloads",
+        "saveFailed": "Failed to save"
       }
     }
   },

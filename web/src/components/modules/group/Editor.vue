@@ -307,7 +307,7 @@ const hasCancel = computed(() => Boolean(props.onCancel || slots.cancel));
                                             class="border-b-0"
                                         >
                                             <div class="rounded-lg bg-muted sticky top-0 z-10 flex px-2 overflow-hidden">
-                                                <AccordionTrigger class="py-3 hover:no-underline flex-1">
+                                                <AccordionTrigger class="py-3 hover:no-underline flex-1 items-center [&>svg]:translate-y-0">
                                                     <span class="truncate">{{ channel.name }}</span>
                                                     <span class="text-xs text-muted-foreground shrink-0 ml-auto mr-1">
                                                         {{ channel.models.length - channel.models.reduce((acc, m) => acc + (selectedKeys.has(memberKey(m)) ? 1 : 0), 0) }}/{{ channel.models.length }}

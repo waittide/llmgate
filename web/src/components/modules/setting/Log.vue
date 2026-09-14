@@ -1,7 +1,8 @@
 <script setup lang="ts">
 import { ref, watch } from 'vue';
-import { LuCalendarClock, LuScrollText, LuTrash2 } from 'vue-icons-plus/lu';
+import { LuCalendarClock, LuFileInput, LuFileOutput, LuScrollText, LuTrash2 } from 'vue-icons-plus/lu';
 import { Button } from '@/components/ui/button';
+import { Switch } from '@/components/ui/switch';
 import { Input } from '@/components/ui/input';
 import { useClearLogs } from '@/api/log';
 import { useSettingList, useSetSetting, SettingKey } from '@/api/setting';
@@ -24,6 +25,31 @@ watch(settings, (val) => {
         initialRetention.value = retention.value;
     }
 }, { immediate: true });
+
+const recordRequest = ref(true);
+const recordResponse = ref(true);
+
+watch(settings, (val) => {
+    if (!val) return;
+    const req = val.find((s) => s.key === SettingKey.LogRequestBodyEnabled);
+    if (req) recordRequest.value = req.value !== '0';
+    const resp = val.find((s) => s.key === SettingKey.LogResponseBodyEnabled);
+    if (resp) recordResponse.value = resp.value !== '0';
+}, { immediate: true });
+
+const toggleBodyRecording = (target: 'request' | 'response', enabled: boolean) => {
+    const key = target === 'request' ? SettingKey.LogRequestBodyEnabled : SettingKey.LogResponseBodyEnabled;
+    const ref = target === 'request' ? recordRequest : recordResponse;
+    const prev = ref.value;
+    ref.value = enabled;
+    setSetting.mutate({ key, value: enabled ? '1' : '0' }, {
+        onSuccess: () => toast.success(t('saved')),
+        onError: () => {
+            ref.value = prev;
+            toast.error(t('log.record.saveFailed'));
+        },
+    });
+};
 
 const handleSaveRetention = () => {
     const value = retentionDays.value.trim();
@@ -77,6 +103,38 @@ const handleClearLogs = () => {
                 @blur="handleSaveRetention"
                 :placeholder="t('log.retention.placeholder')"
                 class="w-32 rounded-xl"
+            />
+        </div>
+
+        <!-- 记录请求体开关 -->
+        <div class="flex items-center justify-between gap-4">
+            <div class="flex items-center gap-3">
+                <LuFileInput class="size-5 text-muted-foreground" />
+                <div class="flex flex-col">
+                    <span class="text-sm font-medium">{{ t('log.record.requestLabel') }}</span>
+                    <span class="text-xs text-muted-foreground">{{ t('log.record.requestHint') }}</span>
+                </div>
+            </div>
+            <Switch
+                :model-value="recordRequest"
+                @update:model-value="(checked?: boolean) => toggleBodyRecording('request', Boolean(checked))"
+                class="rounded-xl"
+            />
+        </div>
+
+        <!-- 记录响应体开关 -->
+        <div class="flex items-center justify-between gap-4">
+            <div class="flex items-center gap-3">
+                <LuFileOutput class="size-5 text-muted-foreground" />
+                <div class="flex flex-col">
+                    <span class="text-sm font-medium">{{ t('log.record.responseLabel') }}</span>
+                    <span class="text-xs text-muted-foreground">{{ t('log.record.responseHint') }}</span>
+                </div>
+            </div>
+            <Switch
+                :model-value="recordResponse"
+                @update:model-value="(checked?: boolean) => toggleBodyRecording('response', Boolean(checked))"
+                class="rounded-xl"
             />
         </div>
 

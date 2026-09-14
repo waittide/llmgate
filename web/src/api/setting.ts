@@ -15,6 +15,8 @@ export const SettingKey = {
     SyncModelInterval: 'sync_model_interval',
     CORSAllowOrigins: 'cors_allow_origins',
     LogRetentionDays: 'log_retention_days',
+    LogRequestBodyEnabled: 'log_request_body_enabled',
+    LogResponseBodyEnabled: 'log_response_body_enabled',
 } as const;
 
 /**

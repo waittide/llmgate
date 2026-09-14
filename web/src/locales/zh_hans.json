@@ -298,6 +298,13 @@
         "placeholder": "天数",
         "invalid": "保留天数必须为正整数",
         "saveFailed": "保存失败"
+      },
+      "record": {
+        "requestLabel": "记录请求体",
+        "requestHint": "关闭后请求日志不再保存请求报文",
+        "responseLabel": "记录响应体",
+        "responseHint": "关闭后请求日志不再保存响应报文",
+        "saveFailed": "保存失败"
       }
     }
   },
