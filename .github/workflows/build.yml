@@ -1,0 +1,123 @@
+name: build
+
+# 触发方式：
+#   - push 到 main / 任意 PR：多平台构建并上传产物（可随时下载验证）
+#   - push v* 标签：额外把产物发布到 GitHub Release
+#   - 手动：Actions 页面点 “Run workflow”
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  # 与仓库 rust-toolchain.toml 保持一致：工程要求 nightly
+  RUST_TOOLCHAIN: nightly
+
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-x86_64
+            os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+          - name: linux-aarch64
+            os: ubuntu-22.04-arm
+            target: aarch64-unknown-linux-gnu
+          - name: macos-aarch64
+            os: macos-14
+            target: aarch64-apple-darwin
+          - name: macos-x86_64
+            os: macos-14
+            target: x86_64-apple-darwin
+          - name: windows-x86_64
+            os: windows-latest
+            target: x86_64-pc-windows-msvc
+
+    steps:
+      - uses: actions/checkout@v7
+
+      # 前端资产在 cargo build 时经 rust-embed 内嵌进二进制，必须先构建前端
+      - uses: pnpm/action-setup@v6
+        with:
+          version: 10
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: web/pnpm-lock.yaml
+      - name: 构建前端
+        working-directory: web
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm build
+      - name: 校验前端产物
+        shell: bash
+        run: test -f static/out/index.html
+
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: 构建 llmgate
+        run: cargo build --release --locked --target ${{ matrix.target }}
+
+      - name: 打包
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          pkg="llmgate-${version}-${TARGET}"
+          bin="target/${TARGET}/release/lg"
+          [ "${RUNNER_OS}" = "Windows" ] && bin="${bin}.exe"
+
+          mkdir -p "dist/${pkg}"
+          cp "${bin}" README.md LICENSE "dist/${pkg}/"
+          if [ "${RUNNER_OS}" = "Windows" ]; then
+            (cd dist && 7z a "${pkg}.zip" "${pkg}" >/dev/null)
+          else
+            (cd dist && tar czf "${pkg}.tar.gz" "${pkg}")
+          fi
+          rm -rf "dist/${pkg}"
+          ls -l dist
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: llmgate-${{ matrix.target }}
+          path: dist/*
+          if-no-files-found: error
+
+  release:
+    name: 发布 Release
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          path: dist
+          merge-multiple: true
+      - uses: softprops/action-gh-release@v3
+        with:
+          files: dist/*
+          generate_release_notes: true
