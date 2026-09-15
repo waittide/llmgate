@@ -443,6 +443,9 @@ pub mod request_status {
     pub const FAILED: &str = "failed";
     pub const INTERRUPTED: &str = "interrupted";
     pub const STREAM_ERROR: &str = "stream_error";
+    /// 客户端在流结束前断开连接：既不是上游失败，也不能算成功（响应是否已完整送达无从得知）。
+    /// 单独成状态，避免把「客户端主动挂断」记成上游故障而抬高失败率。
+    pub const CLIENT_CLOSED: &str = "client_closed";
 }
 
 // ---------------- 模型价格与模型列表 (模型定价与模型列表) ----------------

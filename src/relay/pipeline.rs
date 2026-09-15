@@ -373,7 +373,6 @@ async fn handle_successful_stream(
         key_index: Some(ctx.key_index),
         response_capture: Vec::new(),
         cancel_rx: state.in_flight.get_cancel_receiver(ctx.log_base.id as u64),
-        interrupted: false,
         stall_timer: None,
         stall_timeout: Duration::from_secs(
             state
@@ -383,7 +382,7 @@ async fn handle_successful_stream(
                 .filter(|v| *v > 0)
                 .unwrap_or(300),
         ),
-        error_override: None,
+        outcome: None,
     };
     let body = Body::from_stream(finalizer);
 
