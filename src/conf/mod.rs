@@ -4,7 +4,16 @@ use clap::Parser;
 
 pub const APP_NAME: &str = "LLMGate";
 pub const APP_DESC: &str = "全能 AI 服务网关 (Rust 版)";
-pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+
+/// 本构建的版本标识。
+///
+/// 优先取 CI 注入的构建标识（`版本号+提交短hash`，如 `0.2.0+1a2b3c4`），
+/// 便于把任何一个发布出去的二进制对应回具体提交；本地构建未注入时
+/// 回退到 Cargo 包版本。
+pub const VERSION: &str = match option_env!("LLMGATE_BUILD_VERSION") {
+    Some(version) => version,
+    None => env!("CARGO_PKG_VERSION"),
+};
 
 #[derive(Parser, Debug, Clone)]
 #[command(name = APP_NAME, about = APP_DESC, version = VERSION)]
