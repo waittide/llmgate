@@ -3,7 +3,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/vue-query';
 import { apiRequest, openSseStream } from './client';
 
 // RequestState 表示 Relay 请求的实时状态。
-export type RequestState = 'running' | 'committed' | 'success' | 'failed' | 'canceled';
+export type RequestState = 'running' | 'committed' | 'success' | 'failed' | 'canceled' | 'client_closed';
 
 // RelayUsage 保存请求结束后确认的统一 Token 用量。
 export interface RelayUsage {

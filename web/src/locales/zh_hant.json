@@ -405,7 +405,8 @@
       "disconnected": "日誌連線已中斷，正在重新連線"
     },
     "status": {
-      "committed": "回應中"
+      "committed": "回應中",
+      "clientClosed": "客戶端中斷"
     },
     "card": {
       "errorInfo": "錯誤訊息",
@@ -448,6 +449,7 @@
       "success": "成功",
       "failed": "失敗",
       "streamError": "串流中斷",
+      "clientClosed": "客戶端中斷",
       "apply": "篩選",
       "refresh": "重新整理"
     },

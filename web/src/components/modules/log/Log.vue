@@ -95,6 +95,7 @@ const applyFilters = () => {
                     <SelectItem value="success">{{ t('filter.success') }}</SelectItem>
                     <SelectItem value="failed">{{ t('filter.failed') }}</SelectItem>
                     <SelectItem value="stream_error">{{ t('filter.streamError') }}</SelectItem>
+                    <SelectItem value="client_closed">{{ t('filter.clientClosed') }}</SelectItem>
                 </SelectContent>
             </Select>
             <Button variant="secondary" size="sm" class="rounded-xl" @click="applyFilters">

@@ -28,6 +28,7 @@ const actualModel = computed(() => props.log.target_model || props.log.model);
 const modelIconInfo = computed(() => getModelIcon(actualModel.value));
 const requestRunning = computed(() => props.log.status === 'running' || props.log.status === 'committed');
 const requestFailed = computed(() => props.log.status === 'failed' || props.log.status === 'canceled');
+const requestClientClosed = computed(() => props.log.status === 'client_closed');
 const errorText = computed(() => props.log.error ?? '');
 
 let timer: number | null = null;
@@ -49,10 +50,14 @@ watchEffect((onCleanup) => {
     <MorphingDialogTrigger
         :class="cn(
             'rounded-3xl border bg-card w-full text-left',
-            requestFailed ? 'border-destructive/40' : 'border-border',
+            requestFailed
+                ? 'border-destructive/40'
+                : requestClientClosed
+                  ? 'border-orange-500/40'
+                  : 'border-border',
         )"
     >
-        <div :class="cn('p-4 grid grid-cols-[auto_1fr] gap-4', requestFailed ? 'items-start' : 'items-center')">
+        <div :class="cn('p-4 grid grid-cols-[auto_1fr] gap-4', (requestFailed || (requestClientClosed && errorText)) ? 'items-start' : 'items-center')">
             <component
                 :is="modelIconInfo.Icon"
                 aria-hidden="true"
@@ -92,6 +97,12 @@ watchEffect((onCleanup) => {
                     class="p-2.5 rounded-xl bg-destructive/10 border border-destructive/20 overflow-hidden"
                 >
                     <p class="text-xs text-destructive line-clamp-2 whitespace-pre-line">{{ errorText }}</p>
+                </div>
+                <div
+                    v-else-if="requestClientClosed && errorText"
+                    class="p-2.5 rounded-xl bg-orange-500/10 border border-orange-500/20 overflow-hidden"
+                >
+                    <p class="text-xs text-orange-600 dark:text-orange-400 line-clamp-2 whitespace-pre-line">{{ errorText }}</p>
                 </div>
             </div>
         </div>

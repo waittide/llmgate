@@ -106,6 +106,7 @@ const actualChannel = computed(() => activeRound.value?.channel_name || props.lo
 const modelIconInfo = computed(() => getModelIcon(actualModel.value));
 const errorText = computed(() => activeRound.value?.error ?? props.log.error ?? '');
 const requestFailed = computed(() => props.log.status === 'failed' || props.log.status === 'canceled');
+const requestClientClosed = computed(() => props.log.status === 'client_closed');
 const responseCommitted = computed(() => props.log.status === 'committed');
 const showRounds = computed(() => props.log.status === 'running' && rounds.value.length > 0);
 const roundSuccess = (r: RoundLog) => r.status >= 200 && r.status < 300;
@@ -345,7 +346,7 @@ async function handleStopRound() {
                 <div class="flex flex-col rounded-2xl border border-border bg-muted/30 overflow-hidden min-h-0">
                     <div class="flex h-10 shrink-0 items-center gap-2 border-b border-border bg-muted/50 px-3 md:px-4">
                         <span class="text-sm font-medium text-card-foreground">
-                            {{ showRounds ? t('retryDetails') : activeRound?.error ? t('errorInfo') : requestFailed ? t('errorInfo') : t('responseContent') }}
+                            {{ showRounds ? t('retryDetails') : activeRound?.error ? t('errorInfo') : (requestFailed || requestClientClosed) ? t('errorInfo') : t('responseContent') }}
                         </span>
                         <button
                             v-if="log.status === 'running' && log.sending"
@@ -358,6 +359,13 @@ async function handleStopRound() {
                             <LuSquare v-else class="size-3.5" />
                             {{ t('stopRound') }}
                         </button>
+                        <Badge
+                            v-else-if="requestClientClosed"
+                            variant="outline"
+                            class="ml-auto text-xs border-orange-500/30 bg-orange-500/10 text-orange-600 dark:text-orange-400"
+                        >
+                            {{ statusT('clientClosed') }}
+                        </Badge>
                         <Badge v-else-if="!requestFailed" variant="secondary" class="ml-auto text-xs">
                             {{ responseCommitted ? statusT('committed') : `${log.usage.completion_tokens.toLocaleString()} ${t('tokens')}` }}
                         </Badge>
@@ -408,7 +416,7 @@ async function handleStopRound() {
                                 :collapsed="roundSuccess(activeRound)"
                             />
                         </template>
-                        <template v-else-if="requestFailed">
+                        <template v-else-if="requestFailed || requestClientClosed">
                             <JsonContent :content="errorText" :fallback-text="t('noResponseContent')" />
                         </template>
                         <div v-else-if="responseBody.isLoading.value" class="flex h-full items-center justify-center">

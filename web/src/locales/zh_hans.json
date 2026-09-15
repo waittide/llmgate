@@ -405,7 +405,8 @@
       "disconnected": "日志连接已断开，正在重连"
     },
     "status": {
-      "committed": "响应中"
+      "committed": "响应中",
+      "clientClosed": "客户端中断"
     },
     "card": {
       "errorInfo": "错误信息",
@@ -448,6 +449,7 @@
       "success": "成功",
       "failed": "失败",
       "streamError": "流中断",
+      "clientClosed": "客户端中断",
       "apply": "筛选",
       "refresh": "刷新"
     },

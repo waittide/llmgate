@@ -405,7 +405,8 @@
       "disconnected": "Log stream disconnected, reconnecting"
     },
     "status": {
-      "committed": "Responding"
+      "committed": "Responding",
+      "clientClosed": "Client interrupted"
     },
     "card": {
       "errorInfo": "Error Info",
@@ -448,6 +449,7 @@
       "success": "Success",
       "failed": "Failed",
       "streamError": "Stream interrupted",
+      "clientClosed": "Client interrupted",
       "apply": "Filter",
       "refresh": "Refresh"
     },
