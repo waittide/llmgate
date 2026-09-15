@@ -2,20 +2,31 @@ name: build
 
 # 触发方式：
 #   - push 到 main / 任意 PR：多平台构建并上传产物（可随时下载验证）
-#   - push v* 标签：额外把产物发布到 GitHub Release
+#   - push v* 标签：构建后发布 GitHub Release
+#       · 日期标签 v2026.09.17（每日快照）发布为 pre-release
+#       · 语义化标签 v0.2.0（人工维护的里程碑）发布为正式 Release，成为 Latest
+#   - 每天 00:00（北京时间）：自动构建并发布当日快照，见下方 schedule
 #   - 手动：Actions 页面点 “Run workflow”
+#
+# 每日快照与发布都在本工作流内完成，因此全程只需默认的 GITHUB_TOKEN：
+# GitHub 为防止递归触发，GITHUB_TOKEN 产生的 push 事件不会启动新工作流，
+# 但这里根本不依赖「用标签去触发另一个工作流」，所以不受该限制影响，无需 PAT。
 on:
   push:
     branches: [main]
     tags: ["v*"]
   pull_request:
+  schedule:
+    # cron 用 UTC：16:00 UTC == 次日 00:00 (UTC+8)。
+    # 该时刻处于下班时段，不产生落在 07:00-20:00 工作时间的发布记录。
+    - cron: "0 16 * * *"
   workflow_dispatch:
 
 permissions:
   contents: read
 
 concurrency:
-  group: build-${{ github.ref }}
+  group: build-${{ github.ref }}-${{ github.event_name }}
   cancel-in-progress: true
 
 env:
@@ -24,8 +35,102 @@ env:
   RUST_TOOLCHAIN: nightly
 
 jobs:
+  # 版本信息只在这里算一次，构建矩阵与发布 job 共用，避免各平台各算各的。
+  meta:
+    name: 计算版本信息
+    runs-on: ubuntu-latest
+    outputs:
+      skip: ${{ steps.ver.outputs.skip }}
+      release: ${{ steps.ver.outputs.release }}
+      release_tag: ${{ steps.ver.outputs.release_tag }}
+      prerelease: ${{ steps.ver.outputs.prerelease }}
+      artifact_version: ${{ steps.ver.outputs.artifact_version }}
+      build_version: ${{ steps.ver.outputs.build_version }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # 需要标签与历史：快照要找出上一个日期标签并比对其提交
+          fetch-depth: 0
+
+      - name: 计算版本号与发布信息
+        id: ver
+        shell: bash
+        env:
+          # 临时停用每日快照：仓库 Settings → Variables 加 NIGHTLY_ENABLED=false
+          NIGHTLY_ENABLED: ${{ vars.NIGHTLY_ENABLED }}
+        run: |
+          set -euo pipefail
+
+          sha=$(git rev-parse --short=7 HEAD)
+          version=""
+          release=false
+          skip=false
+          prerelease=false
+          release_tag=""
+
+          if [ "${GITHUB_EVENT_NAME}" = "schedule" ]; then
+            # ---- 每日快照 ----
+            if [ "${NIGHTLY_ENABLED}" = "false" ]; then
+              echo "每日快照已通过 NIGHTLY_ENABLED=false 停用"
+              skip=true
+            else
+              # 按北京日期命名。cron 在 16:00 UTC 触发时北京已是次日。
+              version=$(TZ=Asia/Shanghai date +%Y.%m.%d)
+              release_tag="v${version}"
+              prerelease=true
+
+              # 只跟上一个日期快照比较，且按创建时间取最新。
+              # 刻意不用“最新 v* 标签”：手工发的 v0.2.0 会按创建时间排在前面，
+              # 而日期标签在版本序上又压过它（2026 > 0），两种取法都会取错基准。
+              # 用 for-each-ref --count=1 而非 `git tag | head -1`：
+              # 后者在标签累积很多时可能因 SIGPIPE 被 pipefail 判为失败。
+              last=$(git for-each-ref --sort=-creatordate --count=1 --format='%(refname:short)' \
+                'refs/tags/v[0-9][0-9][0-9][0-9].[0-9][0-9].[0-9][0-9]')
+              if [ -n "${last}" ] && [ "$(git rev-parse "${last}^{commit}")" = "$(git rev-parse HEAD)" ]; then
+                echo "自 ${last} 以来无新提交，跳过本次快照"
+                skip=true
+              else
+                echo "本次快照标签：${release_tag}（上一个：${last:-无}）"
+                release=true
+              fi
+            fi
+          elif [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            # ---- 标签构建：版本以标签为准 ----
+            version="${GITHUB_REF_NAME#v}"
+            release_tag="${GITHUB_REF_NAME}"
+            release=true
+            # 纯日期形式判定为快照，发布为 pre-release：
+            # GitHub 的 Latest 只认最新的非预发布版本，故快照不会挤掉正式版。
+            if [[ "${version}" =~ ^[0-9]{4}\.[0-9]{2}\.[0-9]{2}$ ]]; then
+              prerelease=true
+            fi
+          else
+            # ---- 分支 / PR 构建：只上传产物，不发布 ----
+            version=$(sed -n '/^\[package\]/,/^\[/{s/^version = "\(.*\)"/\1/p}' Cargo.toml | head -1)
+          fi
+
+          # 跳过时（如已停用）无需版本号，避免 set -u 下引用未绑定变量
+          if [ "${skip}" != "true" ] && [ -z "${version}" ]; then
+            echo "无法确定版本号" >&2
+            exit 1
+          fi
+
+          {
+            echo "skip=${skip}"
+            echo "release=${release}"
+            echo "release_tag=${release_tag}"
+            echo "prerelease=${prerelease}"
+            echo "artifact_version=${version}"
+            # 注入给二进制的构建标识：版本号 + 提交短 hash
+            echo "build_version=${version}+${sha}"
+          } >> "$GITHUB_OUTPUT"
+
+          echo "版本=${version} 发布=${release} 快照=${prerelease} 跳过=${skip} 注入=${version}+${sha}"
+
   build:
     name: ${{ matrix.name }}
+    needs: meta
+    if: needs.meta.outputs.skip != 'true'
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -76,16 +181,19 @@ jobs:
           key: ${{ matrix.target }}
 
       - name: 构建 llmgate
+        env:
+          # 由根目录 build.rs 透传给 rustc，成为二进制自报的版本号
+          LLMGATE_BUILD_VERSION: ${{ needs.meta.outputs.build_version }}
         run: cargo build --release --locked --target ${{ matrix.target }}
 
       - name: 打包
         shell: bash
         env:
           TARGET: ${{ matrix.target }}
+          VERSION: ${{ needs.meta.outputs.artifact_version }}
         run: |
           set -euo pipefail
-          version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
-          pkg="llmgate-${version}-${TARGET}"
+          pkg="llmgate-${VERSION}-${TARGET}"
           bin="target/${TARGET}/release/lg"
           [ "${RUNNER_OS}" = "Windows" ] && bin="${bin}.exe"
 
@@ -107,8 +215,8 @@ jobs:
 
   release:
     name: 发布 Release
-    needs: build
-    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [meta, build]
+    if: needs.meta.outputs.release == 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -117,7 +225,20 @@ jobs:
         with:
           path: dist
           merge-multiple: true
+
+      # 各平台产物合并后统一出一份校验和（分散在各 artifact 里会重名冲突）
+      - name: 生成校验和
+        run: |
+          cd dist
+          sha256sum * > SHA256SUMS
+          cat SHA256SUMS
+
       - uses: softprops/action-gh-release@v3
         with:
+          tag_name: ${{ needs.meta.outputs.release_tag }}
+          # 仅当标签尚不存在时生效（快照场景由这里创建标签）；已存在的标签会被忽略
+          target_commitish: ${{ github.sha }}
           files: dist/*
           generate_release_notes: true
+          # 每日快照标为 pre-release，不抢占 Latest；人工语义化版本才是正式版
+          prerelease: ${{ needs.meta.outputs.prerelease }}
