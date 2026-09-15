@@ -40,10 +40,15 @@ interface ChannelFormData {
     key: string;
     custom_header: CustomHeader[];
     param_override: string;
+    session_header: string;
     models: ChannelModelInput[];
     enabled: boolean;
     auto_sync: boolean;
 }
+
+// 开启「分配会话标识」时预填的头名：OpenCode Go 要求的会话头，
+// 也是当前唯一强制校验该头的上游。
+const DEFAULT_SESSION_HEADER = 'x-opencode-session';
 
 const props = defineProps<{
     channel?: Channel;
@@ -61,6 +66,7 @@ const emptyFormData: ChannelFormData = {
     key: '',
     custom_header: [{ header_key: '', header_value: '' }],
     param_override: '',
+    session_header: '',
     models: [],
     auto_sync: false,
     enabled: true,
@@ -79,6 +85,7 @@ const formData = reactive<ChannelFormData>(
                       ? props.channel.custom_header.map((h) => ({ ...h }))
                       : [{ header_key: '', header_value: '' }],
               param_override: props.channel.param_override ?? '',
+              session_header: props.channel.session_header ?? '',
               models: props.channel.models.map(({ name, source }) => ({ name, source })),
               auto_sync: props.channel.auto_sync,
           }
@@ -95,6 +102,14 @@ const isPending = computed(() => (props.channel ? updateChannel.isPending.value 
 const autoModels = computed(() => formData.models.filter((model) => model.source === 'auto').map((model) => model.name));
 const manualModels = computed(() => formData.models.filter((model) => model.source === 'manual').map((model) => model.name));
 const hasModels = computed(() => formData.models.length > 0);
+
+// 开关语义：头名非空即开启；关闭时清空头名，开启时补上默认头名
+const sessionEnabled = computed({
+    get: () => formData.session_header.trim() !== '',
+    set: (enabled: boolean) => {
+        formData.session_header = enabled ? formData.session_header.trim() || DEFAULT_SESSION_HEADER : '';
+    },
+});
 
 const inputValue = ref('');
 // 刷新获取到的候选模型列表（不会自动选中，由用户勾选）
@@ -190,6 +205,7 @@ const handleSubmit = (event: Event) => {
                 auto_sync: formData.auto_sync,
                 custom_header,
                 param_override: formData.param_override.trim(),
+                session_header: formData.session_header.trim(),
             },
             {
                 onSuccess: () => setIsOpen(false),
@@ -210,6 +226,9 @@ const handleSubmit = (event: Event) => {
     {
         const next = formData.param_override.trim();
         if (next !== (props.channel.param_override ?? '')) req.param_override = next;
+    }
+    if (formData.session_header.trim() !== (props.channel.session_header ?? '')) {
+        req.session_header = formData.session_header.trim();
     }
 
     updateChannel.mutate(req, {
@@ -473,6 +492,24 @@ const handleSubmit = (event: Event) => {
                                 </Button>
                             </div>
                         </div>
+                    </div>
+
+                    <div class="space-y-2">
+                        <label class="flex items-center gap-2 cursor-pointer">
+                            <Switch v-model="sessionEnabled" />
+                            <span class="text-sm font-medium text-card-foreground">{{ t('sessionHeader') }}</span>
+                        </label>
+                        <Input
+                            v-if="sessionEnabled"
+                            :id="`${idPrefix}-session-header`"
+                            type="text"
+                            v-model="formData.session_header"
+                            :placeholder="t('sessionHeaderPlaceholder')"
+                            class="rounded-xl"
+                        />
+                        <p v-if="sessionEnabled" class="text-xs text-muted-foreground">
+                            {{ t('sessionHeaderHint') }}
+                        </p>
                     </div>
 
                     <div class="space-y-2">

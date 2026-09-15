@@ -48,11 +48,13 @@ export type Channel = StatsMetrics & {
     auto_sync: boolean;
     custom_header: CustomHeader[];
     param_override?: string | null;
+    session_header: string; // 会话标识头名称，空串表示未开启「分配会话标识」。
 };
 
 // ChannelServer 表示后端可能返回空 custom_header 的原始渠道数据。
-export type ChannelServer = Omit<Channel, 'custom_header'> & {
+export type ChannelServer = Omit<Channel, 'custom_header' | 'session_header'> & {
     custom_header: CustomHeader[] | null; // 渠道自定义请求头，空值会在页面查询时归一化为空数组。
+    session_header?: string | null; // 旧库或旧版本可能不返回该字段，空值归一化为空串。
 };
 
 // ChannelListItem 表示页面消费的渠道原始数据及格式化统计。
@@ -74,6 +76,7 @@ export type CreateChannelRequest = {
     auto_sync?: boolean;
     custom_header?: CustomHeader[];
     param_override?: string | null;
+    session_header?: string;
 };
 
 /**
@@ -90,6 +93,7 @@ export type UpdateChannelRequest = {
     auto_sync?: boolean;
     custom_header?: CustomHeader[];
     param_override?: string | null;
+    session_header?: string;
 };
 
 export type FetchModelRequest = {
@@ -109,6 +113,7 @@ const channelListFormattedQueryOptions = queryOptions({
                 ...item,
                 models,
                 custom_header: item.custom_header ?? [],
+                session_header: item.session_header ?? '',
             }) satisfies Channel,
             formatted: {
                 input_token: formatCount(item.input_token),
