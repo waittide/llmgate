@@ -197,6 +197,10 @@ pub struct Channel {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub custom_header:  Vec<CustomHeader>,
     pub param_override: Option<String>,
+    /// 会话标识头名称：非空即开启「分配会话标识」。转发时每轮请求以该头名携带
+    /// 一个按会话稳定的 ID（客户端自带同名头则沿用其值），供 OpenCode Go 等按
+    /// 会话做路由与提示缓存亲和的上游使用；头名为空表示关闭，不发送该头。
+    pub session_header: String,
     #[serde(flatten)]
     pub metrics:        StatsMetrics,
 }
@@ -218,6 +222,18 @@ impl Channel {
             pool
         }
     }
+
+    /// 已开启「分配会话标识」时返回可用的头名。头名为空，或含空格、非 ASCII 等
+    /// 非 RFC 7230 token 字符（配置笔误）时一律视为未开启：坏配置只会让该渠道
+    /// 不携带会话头，不会让转发请求构建失败。
+    pub fn session_header_name(&self) -> Option<&str> {
+        let name = self.session_header.trim();
+        let is_token = !name.is_empty()
+            && name
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&b));
+        is_token.then_some(name)
+    }
 }
 
 fn default_true() -> bool {
@@ -238,6 +254,8 @@ pub struct ChannelUpdateRequest {
     pub custom_header:  Option<Vec<CustomHeader>>,
     /// 缺省(None)保持现值；Some(空串/空白)清除该覆盖；Some(非空)覆盖原值。
     pub param_override: Option<String>,
+    /// 缺省(None)保持现值；Some(空串/空白)关闭会话标识；Some(非空)覆盖头名。
+    pub session_header: Option<String>,
 }
 
 // ---------------- 分组 (Group) ----------------

@@ -32,6 +32,7 @@ LLMGate is a personal LLM API aggregation gateway written in Rust. It gathers yo
 - **Any-to-any conversion across four formats**: OpenAI Chat Completions, OpenAI Responses, Anthropic Messages and Google Gemini GenerateContent, all normalised into `RelayRequest` / `RelayResponse` / `StreamEvent`.
 - **Streaming and non-streaming share one path**: SSE streams and one-shot JSON responses are driven by the same IR logic, with client-specific headers such as `anthropic-beta` passed through.
 - **Lossy conversion made explicit**: fields the upstream does not support are dropped in the emitter, and anything that cannot be modelled is carried explicitly as `ContentPart::Unknown` — never silently discarded.
+- **Session ID switch**: a channel can opt in per-channel with a header name, and every request then carries an ID that is stable for the whole conversation (a client-supplied header of the same name wins; otherwise the ID is derived from the caller identity plus the conversation prefix). Upstreams such as OpenCode Go that require `x-opencode-session` get the routing and prompt-cache affinity they expect.
 
 ### Routing & resilience
 
@@ -189,7 +190,7 @@ Routing is described by three configuration layers: **channels** (how to reach a
 
 | Concept | Description |
 | :--- | :--- |
-| `channels` | Upstream type (`openai` / `openai_responses` / `anthropic` / `gemini`), `base_url`, key pool, custom headers, parameter override (`param_override`), auto-sync flag |
+| `channels` | Upstream type (`openai` / `openai_responses` / `anthropic` / `gemini`), `base_url`, key pool, custom headers, parameter override (`param_override`), session header (`session_header`), auto-sync flag |
 | `channel_models` | Model entries under a channel; sourced either from auto-sync or added manually — manual entries are never overwritten by a sync |
 | `groups` | The publicly exposed model name plus the routing mode (`manual` / `failover`) |
 | `group_items` | Channel members of a group and their priorities; `failover` picks by ascending priority |
