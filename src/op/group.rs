@@ -90,15 +90,20 @@ pub fn list_model_names(state: &AppState) -> Vec<String> {
 
 pub fn get_group_by_name(state: &AppState, name: &str) -> Result<Group> {
     let cache = state.groups.read();
-    let group_id = cache
-        .by_name
-        .get(name)
-        .ok_or_else(|| anyhow!("模型 {} 对应的分组不存在", name))?;
-    cache
-        .by_id
-        .get(group_id)
-        .cloned()
-        .ok_or_else(|| anyhow!("模型 {} 对应的分组不存在", name))
+    let Some(group_id) = cache.by_name.get(name) else {
+        // 分组缓存重载（改渠道/分组）期间会短暂未命中：这会让请求被「model not found」
+        // 秒拒且不落任何请求日志，必须留痕，否则事后完全查不到原因。
+        tracing::warn!("模型 {} 在分组缓存中未命中（缓存正在重载？），本次按未知模型拒绝", name);
+        return Err(anyhow!("模型 {} 对应的分组不存在", name));
+    };
+    cache.by_id.get(group_id).cloned().ok_or_else(|| {
+        tracing::warn!(
+            "分组索引不一致：模型 {} 指向分组 {}，但缓存中没有该分组明细",
+            name,
+            group_id
+        );
+        anyhow!("模型 {} 对应的分组不存在", name)
+    })
 }
 
 pub fn get_group_by_id(state: &AppState, id: i64) -> Result<Group> {
