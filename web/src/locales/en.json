@@ -520,6 +520,8 @@
       "modelAvailable": "Available Models",
       "modelSelectAll": "Select All",
       "modelDeselectAll": "Deselect All",
+      "modelSearchPlaceholder": "Search models...",
+      "modelSearchEmpty": "No matching models",
       "typeOpenaiCompletion": "OpenAI Completion",
       "typeOpenAIResponse": "OpenAI Response",
       "typeAnthropic": "Anthropic",

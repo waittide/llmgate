@@ -107,6 +107,13 @@ const normalizedPassthrough = computed(() =>
 const inputValue = ref('');
 // 刷新获取到的候选模型列表（不会自动选中，由用户勾选）
 const availableModels = ref<string[]>([]);
+// 候选模型搜索词：仅过滤展示，不影响全选/取消全选的作用范围
+const modelSearch = ref('');
+const filteredAvailableModels = computed(() => {
+    const keyword = modelSearch.value.trim().toLowerCase();
+    if (!keyword) return availableModels.value;
+    return availableModels.value.filter((name) => name.toLowerCase().includes(keyword));
+});
 const trimmedInput = computed(() => inputValue.value.trim());
 // 输入的模型名非空且未添加过时才允许追加
 const canAddModel = computed(
@@ -148,6 +155,7 @@ const handleRefreshModels = () => {
                 if (data && data.length > 0) {
                     // 只填充候选列表，不自动选中，由用户决定勾选哪些模型
                     availableModels.value = Array.from(new Set(data.map((m) => m.trim()).filter(Boolean)));
+                    modelSearch.value = '';
                     toast.success(t('modelRefreshSuccess'));
                 } else {
                     toast.warning(t('modelRefreshEmpty'));
@@ -344,7 +352,8 @@ const handleSubmit = (event: Event) => {
             <div v-if="availableModels.length > 0" class="space-y-2">
                 <div class="flex items-center justify-between">
                     <label class="text-xs font-medium text-card-foreground">
-                        {{ t('modelAvailable') }} ({{ availableModels.length }})
+                        {{ t('modelAvailable') }}
+                        ({{ modelSearch.trim() ? `${filteredAvailableModels.length}/${availableModels.length}` : availableModels.length }})
                     </label>
                     <div class="flex items-center gap-1">
                         <Button
@@ -367,9 +376,18 @@ const handleSubmit = (event: Event) => {
                         </Button>
                     </div>
                 </div>
+                <Input
+                    type="text"
+                    v-model="modelSearch"
+                    :placeholder="t('modelSearchPlaceholder')"
+                    class="rounded-xl h-8 text-sm"
+                />
                 <div class="rounded-xl border border-border bg-muted/30 p-2.5 max-h-40 overflow-y-auto">
+                    <p v-if="filteredAvailableModels.length === 0" class="py-1 px-1 text-xs text-muted-foreground">
+                        {{ t('modelSearchEmpty') }}
+                    </p>
                     <label
-                        v-for="name in availableModels"
+                        v-for="name in filteredAvailableModels"
                         :key="name"
                         class="flex items-center gap-2 py-1 text-sm text-card-foreground cursor-pointer hover:bg-muted/60 rounded-lg px-1"
                     >

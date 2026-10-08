@@ -520,6 +520,8 @@
       "modelAvailable": "可選模型",
       "modelSelectAll": "全選",
       "modelDeselectAll": "取消全選",
+      "modelSearchPlaceholder": "搜尋模型...",
+      "modelSearchEmpty": "沒有匹配的模型",
       "typeOpenaiCompletion": "OpenAI Completion",
       "typeOpenAIResponse": "OpenAI Response",
       "typeAnthropic": "Anthropic",
