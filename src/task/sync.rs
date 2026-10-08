@@ -24,8 +24,7 @@ pub async fn fetch_upstream_models(channel: &Channel) -> Result<Vec<String>> {
     // 同步仅用首个 key：无失败反馈回路，轮询由转发路径负责
     let key_pool = channel.key_pool();
     let api_key = key_pool.first().map(String::as_str).unwrap_or("");
-    // 模型列表没有会话语义：会话 ID 传空，渠道即便开启会话标识也不会写入该头
-    let headers = build_upstream_headers(channel, api_key, None, "")?;
+    let headers = build_upstream_headers(channel, api_key, None)?;
     let resp = build_upstream_request(client, channel, "/models", None, Some(15), headers)?
         .send()
         .await?;
@@ -124,17 +123,17 @@ pub async fn sync_all_channel_models(state: &AppState) -> Result<()> {
         }
 
         let update_req = crate::model::ChannelUpdateRequest {
-            id:             ch.id,
-            name:           None,
-            channel_type:   None,
-            enabled:        None,
-            base_url:       None,
-            key:            None,
-            models:         Some(existing_models),
-            auto_sync:      None,
-            custom_header:  None,
-            param_override: None,
-            session_header: None,
+            id:                 ch.id,
+            name:               None,
+            channel_type:       None,
+            enabled:            None,
+            base_url:           None,
+            key:                None,
+            models:             Some(existing_models),
+            auto_sync:          None,
+            custom_header:      None,
+            passthrough_header: None,
+            param_override:     None,
         };
         if let Err(e) = channel::update_channel(state, &update_req).await {
             warn!("渠道 {} 同步结果写回失败: {}", ch.name, e);

@@ -10,7 +10,7 @@ use crate::{
 
 pub async fn refresh_channel_cache(state: &AppState) -> Result<()> {
     // 1. 先将所有渠道读取到本地映射，防止击穿和 404 竞争条件
-    let rows = sqlx::query("SELECT id, name, type, enabled, base_url, key, auto_sync, custom_header, param_override, session_header, input_token, output_token, input_cost, output_cost, wait_time, request_success, request_failed FROM channels ORDER BY id ASC")
+    let rows = sqlx::query("SELECT id, name, type, enabled, base_url, key, auto_sync, custom_header, passthrough_header, param_override, input_token, output_token, input_cost, output_cost, wait_time, request_success, request_failed FROM channels ORDER BY id ASC")
         .fetch_all(&state.db)
         .await?;
 
@@ -26,8 +26,9 @@ pub async fn refresh_channel_cache(state: &AppState) -> Result<()> {
         let auto_sync: bool = row.get::<i64, _>("auto_sync") != 0;
         let custom_header_json: String = row.get("custom_header");
         let custom_header: Vec<CustomHeader> = serde_json::from_str(&custom_header_json).unwrap_or_default();
+        let passthrough_header_json: String = row.get("passthrough_header");
+        let passthrough_header: Vec<String> = serde_json::from_str(&passthrough_header_json).unwrap_or_default();
         let param_override: Option<String> = row.get("param_override");
-        let session_header: String = row.get("session_header");
 
         let metrics = StatsMetrics::from_sql_row(&row);
 
@@ -41,8 +42,8 @@ pub async fn refresh_channel_cache(state: &AppState) -> Result<()> {
             models: Vec::new(),
             auto_sync,
             custom_header,
+            passthrough_header,
             param_override,
-            session_header,
             metrics,
         };
 
@@ -122,12 +123,28 @@ pub fn get_channel(state: &AppState, id: i64) -> Result<Channel> {
         .ok_or_else(|| anyhow!("渠道不存在"))
 }
 
+/// 规范化透传名单：去两侧空白、丢掉空项、统一小写（Header 名大小写不敏感）并去重，
+/// 保留首次出现的顺序。非法名字不报错——匹配不上任何真实 Header，也不会影响请求构建。
+pub(crate) fn normalize_passthrough(list: &[String]) -> Vec<String> {
+    let mut normalized: Vec<String> = Vec::new();
+    for name in list {
+        let name = name.trim().to_ascii_lowercase();
+        if !name.is_empty() && !normalized.contains(&name) {
+            normalized.push(name);
+        }
+    }
+    normalized
+}
+
 pub async fn create_channel(state: &AppState, channel: &mut Channel) -> Result<()> {
+    // 透传名单规范化后回写，保证返回给前端的值就是落库值
+    channel.passthrough_header = normalize_passthrough(&channel.passthrough_header);
+    let passthrough_header_json = serde_json::to_string(&channel.passthrough_header)?;
     let custom_header_json = serde_json::to_string(&channel.custom_header)?;
     let mut tx = state.db.begin().await?;
     let result = sqlx::query(
         r#"
-        INSERT INTO channels (name, type, enabled, base_url, key, auto_sync, custom_header, param_override, session_header)
+        INSERT INTO channels (name, type, enabled, base_url, key, auto_sync, custom_header, passthrough_header, param_override)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         "#,
     )
@@ -138,8 +155,8 @@ pub async fn create_channel(state: &AppState, channel: &mut Channel) -> Result<(
     .bind(&channel.key)
     .bind(channel.auto_sync as i64)
     .bind(&custom_header_json)
+    .bind(&passthrough_header_json)
     .bind(&channel.param_override)
-    .bind(channel.session_header.trim())
     .execute(&mut *tx)
     .await?;
 
@@ -177,22 +194,23 @@ pub async fn update_channel(state: &AppState, req: &ChannelUpdateRequest) -> Res
     let auto_sync = req.auto_sync.unwrap_or(current.auto_sync);
     let custom_header = req.custom_header.as_ref().unwrap_or(&current.custom_header);
     let custom_header_json = serde_json::to_string(custom_header)?;
+    let passthrough_header = match req.passthrough_header.as_ref() {
+        None => current.passthrough_header.clone(),
+        Some(list) => normalize_passthrough(list),
+    };
+    let passthrough_header_json = serde_json::to_string(&passthrough_header)?;
     // 语义：缺省(None)保持现值；Some(空串/空白)清除该覆盖；Some(非空)覆盖原值。
     let param_override = match req.param_override.as_deref() {
         None => current.param_override.clone(),
         Some(s) if s.trim().is_empty() => None,
         Some(s) => Some(s.to_string()),
     };
-    let session_header = match req.session_header.as_deref() {
-        None => current.session_header.clone(),
-        Some(s) => s.trim().to_string(),
-    };
 
     let mut tx = state.db.begin().await?;
     sqlx::query(
         r#"
         UPDATE channels
-        SET name = ?, type = ?, enabled = ?, base_url = ?, key = ?, auto_sync = ?, custom_header = ?, param_override = ?, session_header = ?
+        SET name = ?, type = ?, enabled = ?, base_url = ?, key = ?, auto_sync = ?, custom_header = ?, passthrough_header = ?, param_override = ?
         WHERE id = ?
         "#,
     )
@@ -203,8 +221,8 @@ pub async fn update_channel(state: &AppState, req: &ChannelUpdateRequest) -> Res
     .bind(key)
     .bind(auto_sync as i64)
     .bind(&custom_header_json)
+    .bind(&passthrough_header_json)
     .bind(&param_override)
-    .bind(&session_header)
     .bind(req.id)
     .execute(&mut *tx)
     .await?;
@@ -321,13 +339,13 @@ mod tests {
 
         // 更新渠道模型：保留 gpt-4o，移除 gpt-4o-mini，新增 o1-preview
         let update_req = ChannelUpdateRequest {
-            id:             ch.id,
-            name:           None,
-            channel_type:   None,
-            enabled:        None,
-            base_url:       None,
-            key:            None,
-            models:         Some(vec![
+            id:                 ch.id,
+            name:               None,
+            channel_type:       None,
+            enabled:            None,
+            base_url:           None,
+            key:                None,
+            models:             Some(vec![
                 ChannelModel {
                     name: "gpt-4o".to_string(),
                     source: ChannelModelSource::Manual,
@@ -339,10 +357,10 @@ mod tests {
                     ..Default::default()
                 },
             ]),
-            auto_sync:      None,
-            custom_header:  None,
-            param_override: None,
-            session_header: None,
+            auto_sync:          None,
+            custom_header:      None,
+            passthrough_header: None,
+            param_override:     None,
         };
 
         let updated_channel = update_channel(&state, &update_req).await.unwrap();
@@ -408,13 +426,13 @@ mod tests {
 
         // 更新载荷中包含重名模型时同样不应失败
         let update_req = ChannelUpdateRequest {
-            id:             ch.id,
-            name:           None,
-            channel_type:   None,
-            enabled:        None,
-            base_url:       None,
-            key:            None,
-            models:         Some(vec![
+            id:                 ch.id,
+            name:               None,
+            channel_type:       None,
+            enabled:            None,
+            base_url:           None,
+            key:                None,
+            models:             Some(vec![
                 ChannelModel {
                     name: "gpt-4o-mini".to_string(),
                     source: ChannelModelSource::Manual,
@@ -426,10 +444,10 @@ mod tests {
                     ..Default::default()
                 },
             ]),
-            auto_sync:      None,
-            custom_header:  None,
-            param_override: None,
-            session_header: None,
+            auto_sync:          None,
+            custom_header:      None,
+            passthrough_header: None,
+            param_override:     None,
         };
 
         let updated = update_channel(&state, &update_req).await.unwrap();

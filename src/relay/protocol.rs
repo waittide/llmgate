@@ -13,12 +13,8 @@ pub enum ApiFormat {
 #[derive(Debug, Default, Deserialize)]
 #[serde(default)]
 pub struct ChatRequestMetadata {
-    pub model:      String,
-    pub stream:     bool,
-    /// 本轮请求的会话标识：由网关按「调用方身份 + 会话前缀」推导一次，渠道开启
-    /// 「分配会话标识」时写入上游请求头。不来自请求体，故反序列化时跳过。
-    #[serde(skip)]
-    pub session_id: String,
+    pub model:  String,
+    pub stream: bool,
 }
 
 pub fn parse_request_metadata(body: &[u8]) -> Option<ChatRequestMetadata> {

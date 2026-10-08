@@ -39,16 +39,12 @@ interface ChannelFormData {
     base_url: string;
     key: string;
     custom_header: CustomHeader[];
+    passthrough_header: string[];
     param_override: string;
-    session_header: string;
     models: ChannelModelInput[];
     enabled: boolean;
     auto_sync: boolean;
 }
-
-// 开启「分配会话标识」时预填的头名：OpenCode Go 要求的会话头，
-// 也是当前唯一强制校验该头的上游。
-const DEFAULT_SESSION_HEADER = 'x-opencode-session';
 
 const props = defineProps<{
     channel?: Channel;
@@ -65,8 +61,8 @@ const emptyFormData: ChannelFormData = {
     base_url: '',
     key: '',
     custom_header: [{ header_key: '', header_value: '' }],
+    passthrough_header: [],
     param_override: '',
-    session_header: '',
     models: [],
     auto_sync: false,
     enabled: true,
@@ -85,7 +81,7 @@ const formData = reactive<ChannelFormData>(
                       ? props.channel.custom_header.map((h) => ({ ...h }))
                       : [{ header_key: '', header_value: '' }],
               param_override: props.channel.param_override ?? '',
-              session_header: props.channel.session_header ?? '',
+              passthrough_header: [...(props.channel.passthrough_header ?? [])],
               models: props.channel.models.map(({ name, source }) => ({ name, source })),
               auto_sync: props.channel.auto_sync,
           }
@@ -103,13 +99,10 @@ const autoModels = computed(() => formData.models.filter((model) => model.source
 const manualModels = computed(() => formData.models.filter((model) => model.source === 'manual').map((model) => model.name));
 const hasModels = computed(() => formData.models.length > 0);
 
-// 开关语义：头名非空即开启；关闭时清空头名，开启时补上默认头名
-const sessionEnabled = computed({
-    get: () => formData.session_header.trim() !== '',
-    set: (enabled: boolean) => {
-        formData.session_header = enabled ? formData.session_header.trim() || DEFAULT_SESSION_HEADER : '';
-    },
-});
+// 透传名单规范化：去两侧空白、丢空项、统一小写并去重（Header 名大小写不敏感）
+const normalizedPassthrough = computed(() =>
+    Array.from(new Set(formData.passthrough_header.map((name) => name.trim().toLowerCase()).filter(Boolean)))
+);
 
 const inputValue = ref('');
 // 刷新获取到的候选模型列表（不会自动选中，由用户勾选）
@@ -204,8 +197,8 @@ const handleSubmit = (event: Event) => {
                 models: formData.models,
                 auto_sync: formData.auto_sync,
                 custom_header,
+                passthrough_header: normalizedPassthrough.value,
                 param_override: formData.param_override.trim(),
-                session_header: formData.session_header.trim(),
             },
             {
                 onSuccess: () => setIsOpen(false),
@@ -227,8 +220,8 @@ const handleSubmit = (event: Event) => {
         const next = formData.param_override.trim();
         if (next !== (props.channel.param_override ?? '')) req.param_override = next;
     }
-    if (formData.session_header.trim() !== (props.channel.session_header ?? '')) {
-        req.session_header = formData.session_header.trim();
+    if (JSON.stringify(normalizedPassthrough.value) !== JSON.stringify(props.channel.passthrough_header ?? [])) {
+        req.passthrough_header = normalizedPassthrough.value;
     }
 
     updateChannel.mutate(req, {
@@ -495,21 +488,42 @@ const handleSubmit = (event: Event) => {
                     </div>
 
                     <div class="space-y-2">
-                        <label class="flex items-center gap-2 cursor-pointer">
-                            <Switch v-model="sessionEnabled" />
-                            <span class="text-sm font-medium text-card-foreground">{{ t('sessionHeader') }}</span>
-                        </label>
-                        <Input
-                            v-if="sessionEnabled"
-                            :id="`${idPrefix}-session-header`"
-                            type="text"
-                            v-model="formData.session_header"
-                            :placeholder="t('sessionHeaderPlaceholder')"
-                            class="rounded-xl"
-                        />
-                        <p v-if="sessionEnabled" class="text-xs text-muted-foreground">
-                            {{ t('sessionHeaderHint') }}
-                        </p>
+                        <div class="flex items-center justify-between">
+                            <label class="text-sm font-medium text-card-foreground">
+                                {{ t('passthroughHeader') }} {{ formData.passthrough_header.length > 0 ? `(${formData.passthrough_header.length})` : '' }}
+                            </label>
+                            <Button
+                                type="button"
+                                variant="ghost"
+                                size="sm"
+                                @click="formData.passthrough_header = [...formData.passthrough_header, '']"
+                                class="h-6 px-2 text-xs text-muted-foreground/70 hover:text-muted-foreground hover:bg-transparent"
+                            >
+                                <LuPlus class="h-3 w-3 mr-1" />
+                                {{ t('passthroughHeaderAdd') }}
+                            </Button>
+                        </div>
+                        <div class="space-y-2">
+                            <div v-for="(_, idx) in formData.passthrough_header" :key="`pt-${idx}`" class="flex items-center gap-2">
+                                <Input
+                                    type="text"
+                                    v-model="formData.passthrough_header[idx]"
+                                    :placeholder="t('passthroughHeaderPlaceholder')"
+                                    class="rounded-xl flex-1"
+                                />
+                                <Button
+                                    type="button"
+                                    variant="ghost"
+                                    size="sm"
+                                    @click="formData.passthrough_header = formData.passthrough_header.filter((_, i) => i !== idx)"
+                                    class="h-8 w-8 p-0 rounded-xl text-muted-foreground hover:text-destructive hover:bg-transparent"
+                                    title="Remove"
+                                >
+                                    <LuX class="h-4 w-4" />
+                                </Button>
+                            </div>
+                        </div>
+                        <p class="text-xs text-muted-foreground">{{ t('passthroughHeaderHint') }}</p>
                     </div>
 
                     <div class="space-y-2">

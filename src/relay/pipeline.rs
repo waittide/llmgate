@@ -27,9 +27,7 @@ use crate::{
             rewrite_request_body_in_json,
         },
         state::{RequestOverview, Usage, finish_request, millis_to_rfc3339},
-        upstream::{
-            build_upstream_headers, build_upstream_request, get_client, normalize_base_url, resolve_session_id,
-        },
+        upstream::{build_upstream_headers, build_upstream_request, get_client, normalize_base_url},
     },
     server::{middleware::AuthContext, resp::error},
     utils::{estimate_tokens, truncate_utf8},
@@ -705,9 +703,6 @@ pub async fn forward_relay(
         Ok(v) => v,
         Err(err_resp) => return *err_resp,
     };
-    // 会话标识每轮推导一次：客户端自带同名头时由渠道侧优先沿用，这里算的是
-    // 回退值 —— 「调用方身份 + 会话前缀」在整段会话内不变，同一会话各轮一致。
-    metadata.session_id = resolve_session_id(auth_ctx.api_key.id, &body_bytes);
     // Gemini 客户端的流式标志在 URL path（:streamGenerateContent），请求体没有 stream 字段
     if format == ApiFormat::GeminiGenerate {
         metadata.stream = uri.path().contains(":streamGenerateContent");
@@ -886,10 +881,9 @@ pub async fn forward_relay(
         keys_tried.insert(key_idx);
 
         // 本轮请求头使用本轮实际选中的 key；日志与真正的上游请求共用这一份构
-        // 建结果（渠道自定义头、会话标识都在其中），失败则退回客户端头做日志
+        // 建结果（渠道自定义头在其中），失败则退回客户端头做日志
         let target_req_url = format!("{}{}", normalize_base_url(&ch_ref.base_url), target_endpoint);
-        let round_headers =
-            build_upstream_headers(ch_ref, key_pool[key_idx].as_str(), Some(&headers), &metadata.session_id);
+        let round_headers = build_upstream_headers(ch_ref, key_pool[key_idx].as_str(), Some(&headers));
         let channel_req_headers = round_headers
             .as_ref()
             .map(serialize_headers)

@@ -182,27 +182,29 @@ pub struct ChannelModel {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Channel {
-    pub id:             i64,
-    pub name:           String,
+    pub id:                 i64,
+    pub name:               String,
     #[serde(rename = "type")]
-    pub channel_type:   ChannelProvider,
+    pub channel_type:       ChannelProvider,
     #[serde(default = "default_true")]
-    pub enabled:        bool,
-    pub base_url:       String,
+    pub enabled:            bool,
+    pub base_url:           String,
     /// 支持多 key：换行或逗号分隔多个；粘性优先级使用（利于缓存命中），
     /// 429/401/403 时键级冷却顺延，全部失效才走渠道级失败
-    pub key:            String,
-    pub models:         Vec<ChannelModel>,
-    pub auto_sync:      bool,
+    pub key:                String,
+    pub models:             Vec<ChannelModel>,
+    pub auto_sync:          bool,
     #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub custom_header:  Vec<CustomHeader>,
-    pub param_override: Option<String>,
-    /// 会话标识头名称：非空即开启「分配会话标识」。转发时每轮请求以该头名携带
-    /// 一个按会话稳定的 ID（客户端自带同名头则沿用其值），供 OpenCode Go 等按
-    /// 会话做路由与提示缓存亲和的上游使用；头名为空表示关闭，不发送该头。
-    pub session_header: String,
+    pub custom_header:      Vec<CustomHeader>,
+    /// 透传名单：客户端携带的同名 Header 原样转发给该渠道上游（大小写不敏感）。
+    /// 名单外的客户端 Header 仍按原有白名单处理（默认丢弃）。用于把客户端自行
+    /// 管理的标识头（如 `x-opencode-session`）直接送达要求它的上游，网关不做
+    /// 任何推导或改写；空名单表示一个都不透传。
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub passthrough_header: Vec<String>,
+    pub param_override:     Option<String>,
     #[serde(flatten)]
-    pub metrics:        StatsMetrics,
+    pub metrics:            StatsMetrics,
 }
 
 impl Channel {
@@ -223,16 +225,18 @@ impl Channel {
         }
     }
 
-    /// 已开启「分配会话标识」时返回可用的头名。头名为空，或含空格、非 ASCII 等
-    /// 非 RFC 7230 token 字符（配置笔误）时一律视为未开启：坏配置只会让该渠道
-    /// 不携带会话头，不会让转发请求构建失败。
-    pub fn session_header_name(&self) -> Option<&str> {
-        let name = self.session_header.trim();
-        let is_token = !name.is_empty()
-            && name
-                .bytes()
-                .all(|b| b.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&b));
-        is_token.then_some(name)
+    /// 该渠道是否透传客户端的同名 Header：逐项大小写不敏感比较，空名单一个都不透传。
+    /// 鉴权类头名（`authorization` / `x-api-key` / `x-goog-api-key`）由渠道 key 负责，
+    /// 即使被写进名单也不透传，避免客户端凭据覆盖渠道凭据。
+    pub fn allows_passthrough(&self, name: &str) -> bool {
+        let reserved = ["authorization", "x-api-key", "x-goog-api-key"]
+            .iter()
+            .any(|reserved| name.eq_ignore_ascii_case(reserved));
+        !reserved
+            && self
+                .passthrough_header
+                .iter()
+                .any(|allowed| allowed.eq_ignore_ascii_case(name))
     }
 }
 
@@ -242,20 +246,20 @@ fn default_true() -> bool {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct ChannelUpdateRequest {
-    pub id:             i64,
-    pub name:           Option<String>,
+    pub id:                 i64,
+    pub name:               Option<String>,
     #[serde(rename = "type")]
-    pub channel_type:   Option<ChannelProvider>,
-    pub enabled:        Option<bool>,
-    pub base_url:       Option<String>,
-    pub key:            Option<String>,
-    pub models:         Option<Vec<ChannelModel>>,
-    pub auto_sync:      Option<bool>,
-    pub custom_header:  Option<Vec<CustomHeader>>,
+    pub channel_type:       Option<ChannelProvider>,
+    pub enabled:            Option<bool>,
+    pub base_url:           Option<String>,
+    pub key:                Option<String>,
+    pub models:             Option<Vec<ChannelModel>>,
+    pub auto_sync:          Option<bool>,
+    pub custom_header:      Option<Vec<CustomHeader>>,
+    /// 缺省(None)保持现值；Some(整体替换)覆盖透传名单。
+    pub passthrough_header: Option<Vec<String>>,
     /// 缺省(None)保持现值；Some(空串/空白)清除该覆盖；Some(非空)覆盖原值。
-    pub param_override: Option<String>,
-    /// 缺省(None)保持现值；Some(空串/空白)关闭会话标识；Some(非空)覆盖头名。
-    pub session_header: Option<String>,
+    pub param_override:     Option<String>,
 }
 
 // ---------------- 分组 (Group) ----------------

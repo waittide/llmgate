@@ -32,7 +32,6 @@ LLMGate は Rust で書かれた個人向けの LLM API 集約ゲートウェイ
 - **4 フォーマットの任意相互変換**: OpenAI Chat Completions、OpenAI Responses、Anthropic Messages、Google Gemini GenerateContent を `RelayRequest` / `RelayResponse` / `StreamEvent` に正規化します。
 - **ストリーミングと一括応答が同一経路**: SSE ストリームと単発 JSON 応答は同じ IR ロジックで処理され、`anthropic-beta` などのクライアント固有ヘッダーも透過します。
 - **非可逆変換を明示**: アップストリームが対応しないフィールドは emitter 側で明示的に破棄し、表現できない内容は `ContentPart::Unknown` として明示的に保持します（暗黙の欠落はさせません）。
-- **セッション ID スイッチ**: チャンネル単位で有効化とヘッダー名を指定でき、有効時は各リクエストに会話単位で安定した ID を付与します（クライアントが同名ヘッダーを送っていればその値、なければ「呼び出し元の識別子 + 会話プレフィックス」から導出し、同一セッションの各ターンで同じ ID）。`x-opencode-session` を必須とする OpenCode Go などのルーティング／プロンプトキャッシュ親和がそのまま機能します。
 
 ### ルーティングと耐障害性
 
@@ -190,7 +189,7 @@ curl http://localhost:8080/v1/models -H 'Authorization: Bearer <API_KEY>'
 
 | 概念 | 説明 |
 | :--- | :--- |
-| `channels` | アップストリーム種別（`openai` / `openai_responses` / `anthropic` / `gemini`）、`base_url`、キープール、カスタムヘッダー、パラメータ上書き（`param_override`）、セッションヘッダー（`session_header`）、自動同期の有無 |
+| `channels` | アップストリーム種別（`openai` / `openai_responses` / `anthropic` / `gemini`）、`base_url`、キープール、カスタムヘッダー、クライアントヘッダー透過リスト（`passthrough_header`、記載したヘッダーはそのまま転送）、パラメータ上書き（`param_override`）、自動同期の有無 |
 | `channel_models` | チャネル配下のモデル。自動同期由来と手動追加があり、手動追加分が同期で上書きされることはありません |
 | `groups` | 外部に公開するモデル名とルーティングモード（`manual` / `failover`） |
 | `group_items` | グループに属するチャネルと優先度。`failover` は優先度の昇順に選択します |

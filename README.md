@@ -32,7 +32,6 @@ LLMGate 是一个用 Rust 编写的个人 LLM API 聚合网关：把手上零散
 - **四种格式任意互转**：OpenAI Chat Completions、OpenAI Responses、Anthropic Messages、Google Gemini GenerateContent（`ApiFormat` 四类，经 `RelayRequest` / `RelayResponse` / `StreamEvent` 统一表示）。
 - **流式与整包同源**：SSE 流式响应与一次性 JSON 响应由同一套 IR 逻辑驱动，附带上游 `anthropic-beta` 等客户端特征头透传。
 - **有损转换显式化**：上游不支持的字段在 emitter 侧显式丢弃，无法建模的内容以 `ContentPart::Unknown` 显式携带，不做静默丢弃。
-- **会话标识开关**：渠道可开启「分配会话标识」并指定头名，每轮请求携带一个按会话稳定的 ID（客户端自带同名头则沿用其值，否则按「身份 + 会话前缀」推导，同一会话各轮一致）；OpenCode Go 这类要求 `x-opencode-session` 的上游据此完成路由与提示缓存亲和。
 
 ### 路由与容灾
 
@@ -190,7 +189,7 @@ LLMGate 的路由由三张配置表串起来：**渠道**（上游怎么连）�
 
 | 概念 | 说明 |
 | :--- | :--- |
-| 渠道 `channels` | 上游类型（`openai` / `openai_responses` / `anthropic` / `gemini`）、`base_url`、密钥池、自定义 Header、参数覆盖（`param_override`）、会话标识（`session_header`）、是否自动同步模型 |
+| 渠道 `channels` | 上游类型（`openai` / `openai_responses` / `anthropic` / `gemini`）、`base_url`、密钥池、自定义 Header、透传客户端 Header（`passthrough_header`，名单内的客户端头原样转发）、参数覆盖（`param_override`）、是否自动同步模型 |
 | 模型 `channel_models` | 渠道下的模型条目，来源分为自动同步与手工添加；两者共存时手工条目不会被同步覆盖 |
 | 分组 `groups` | 对外的模型名与路由模式（`manual` / `failover`） |
 | 分组项 `group_items` | 分组内的渠道成员与优先级，`failover` 模式按优先级升序选择 |

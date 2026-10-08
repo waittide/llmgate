@@ -251,37 +251,42 @@ mod tests {
         let _ = std::fs::remove_file(db_path);
     }
 
-    /// 捕获上游实际收到的会话标识头，用于断言转发路径确实带上它。
-    struct CaptureSession(std::sync::Arc<parking_lot::Mutex<Vec<Option<String>>>>);
+    /// 上游收到的 (x-opencode-session, x-unlisted-header) 列表。
+    type CapturedHeaders = std::sync::Arc<parking_lot::Mutex<Vec<(Option<String>, Option<String>)>>>;
 
-    impl wiremock::Respond for CaptureSession {
+    /// 记录上游实际收到的两个候选头，用于断言透传名单的边界。
+    struct CapturePassthrough(CapturedHeaders);
+
+    impl wiremock::Respond for CapturePassthrough {
         fn respond(&self, request: &wiremock::Request) -> wiremock::ResponseTemplate {
-            self.0.lock().push(
+            let read = |name: &str| {
                 request
                     .headers
-                    .get("x-opencode-session")
+                    .get(name)
                     .and_then(|value| value.to_str().ok())
-                    .map(str::to_string),
-            );
+                    .map(str::to_string)
+            };
+            self.0
+                .lock()
+                .push((read("x-opencode-session"), read("x-unlisted-header")));
             wiremock::ResponseTemplate::new(200).set_body_string(CHAT_OK_BODY)
         }
     }
 
-    /// 会话标识由渠道开关驱动：未开启时不写该头；开启后每轮带上会话 ID，同一
-    /// 会话多轮复用同一 ID、不同会话区分，客户端自带同名头则沿用其值。
+    /// 渠道透传名单：未开启时客户端头全部丢弃；开启后只放行名单内的头且值原样上行。
     #[tokio::test]
-    async fn upstream_requests_carry_stable_session_header() {
-        let (state, db_path) = test_support::setup_test_state("relay_session").await;
+    async fn channel_passthrough_forwards_only_listed_client_headers() {
+        let (state, db_path) = test_support::setup_test_state("relay_passthrough").await;
         let server = wiremock::MockServer::start().await;
-        let sessions: std::sync::Arc<parking_lot::Mutex<Vec<Option<String>>>> = Default::default();
+        let seen: CapturedHeaders = Default::default();
         wiremock::Mock::given(wiremock::matchers::method("POST"))
-            .respond_with(CaptureSession(sessions.clone()))
+            .respond_with(CapturePassthrough(seen.clone()))
             .mount(&server)
             .await;
 
-        let model = add_channel(&state, "ch", &server.uri(), "k1", "m-session").await;
+        let model = add_channel(&state, "ch", &server.uri(), "k1", "m-passthrough").await;
         let mut group = crate::model::Group {
-            name: "m-session".into(),
+            name: "m-passthrough".into(),
             mode: crate::model::GroupMode::Failover,
             items: vec![crate::model::GroupItem {
                 channel_model_id: model.id,
@@ -291,26 +296,18 @@ mod tests {
         };
         op::group::create_group(&state, &mut group).await.unwrap();
 
-        let first_turn = json!({
-            "model": "m-session",
-            "messages": [{ "role": "user", "content": "写一个快排" }]
-        });
-        // 后续轮次重放首轮历史，只是追加了新消息
-        let later_turn = json!({
-            "model": "m-session",
-            "messages": [
-                { "role": "user", "content": "写一个快排" },
-                { "role": "assistant", "content": "ok" },
-                { "role": "user", "content": "再优化一下" }
-            ]
-        });
-        let other_conversation = json!({
-            "model": "m-session",
-            "messages": [{ "role": "user", "content": "写一个归并" }]
+        let body = json!({
+            "model": "m-passthrough",
+            "messages": [{ "role": "user", "content": "hi" }]
         });
 
-        let send = |body: serde_json::Value, headers: HeaderMap| {
+        let mut client_headers = HeaderMap::new();
+        client_headers.insert("x-opencode-session", "client-session-abc".parse().unwrap());
+        client_headers.insert("x-unlisted-header", "should-be-dropped".parse().unwrap());
+
+        let send = |headers: HeaderMap| {
             let state = state.clone();
+            let body = body.clone();
             async move {
                 forward_relay(
                     state,
@@ -326,54 +323,28 @@ mod tests {
             }
         };
 
-        // 未开启：正常转发，不写会话头
-        assert_eq!(send(first_turn.clone(), HeaderMap::new()).await, 200);
+        // 未开启透传：客户端头一个都不上行
+        assert_eq!(send(client_headers.clone()).await, 200);
 
-        // 开启「分配会话标识」并指定头名
+        // 开启透传：只放行名单内的头
         let req: crate::model::ChannelUpdateRequest = serde_json::from_value(json!({
             "id": model.channel_id,
-            "session_header": "x-opencode-session",
+            "passthrough_header": ["X-Opencode-Session"],
         }))
         .unwrap();
         op::channel::update_channel(&state, &req).await.unwrap();
-
-        assert_eq!(send(first_turn.clone(), HeaderMap::new()).await, 200);
-        assert_eq!(send(later_turn, HeaderMap::new()).await, 200);
-        assert_eq!(send(other_conversation, HeaderMap::new()).await, 200);
-        // 客户端自带同名头时沿用其值
-        let mut client_headers = HeaderMap::new();
-        client_headers.insert("x-opencode-session", "client-session-abc".parse().unwrap());
-        assert_eq!(send(first_turn.clone(), client_headers).await, 200);
-
-        // 关闭：不再写会话头
-        let req: crate::model::ChannelUpdateRequest = serde_json::from_value(json!({
-            "id": model.channel_id,
-            "session_header": "",
-        }))
-        .unwrap();
-        op::channel::update_channel(&state, &req).await.unwrap();
-        assert_eq!(send(first_turn, HeaderMap::new()).await, 200);
+        assert_eq!(send(client_headers).await, 200);
 
         server.verify().await;
-        let seen = sessions.lock().clone();
-        assert_eq!(seen.len(), 6);
-        assert_eq!(seen[0], None, "未开启会话标识时不得写该头");
-        let session_id = seen[1]
-            .clone()
-            .expect("开启后上游必须收到 x-opencode-session");
-        assert!(!session_id.is_empty());
+        let seen = seen.lock().clone();
+        assert_eq!(seen.len(), 2);
+        assert_eq!(seen[0], (None, None), "未开启透传时客户端头不得上行");
         assert_eq!(
-            seen[2].as_deref(),
-            Some(session_id.as_str()),
-            "同一会话后续轮次必须复用同一会话 ID"
+            seen[1].0.as_deref(),
+            Some("client-session-abc"),
+            "名单内客户端头必须原样上行"
         );
-        assert_ne!(
-            seen[3].as_deref(),
-            Some(session_id.as_str()),
-            "不同会话必须使用不同会话 ID"
-        );
-        assert_eq!(seen[4].as_deref(), Some("client-session-abc"));
-        assert_eq!(seen[5], None, "关闭会话标识后不得再写该头");
+        assert_eq!(seen[1].1, None, "名单外客户端头必须丢弃");
         let _ = std::fs::remove_file(db_path);
     }
 
