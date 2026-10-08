@@ -148,10 +148,10 @@ cargo build --release
 | :--- | :--- | :--- |
 | `--host` | 监听地址 | `0.0.0.0` |
 | `-p`, `--port` | 监听端口 | `8080` |
-| `-d`, `--data-dir` | 数据库与文件存储目录 | `data` |
+| `-d`, `--data-dir` | 数据库与文件存储目录 | `~/.config/llmgate` |
 | `--debug` | 输出 Debug 级别日志 | 关闭 |
 
-数据库文件位于 `{data_dir}/data.db`（WAL 模式，同时存在 `data.db-wal` / `data.db-shm`）。进程收到 `SIGINT` / `SIGTERM` 时会先把内存中的统计增量落盘，再限时等待后台任务退出。
+数据目录默认 `~/.config/llmgate`（无 `HOME` 时退回相对目录 `data`，也可用 `-d` 指定）。数据库文件位于 `{data_dir}/data.db`（WAL 模式，同时存在 `data.db-wal` / `data.db-shm`）。进程收到 `SIGINT` / `SIGTERM` 时会先把内存中的统计增量落盘，再限时等待后台任务退出。
 
 ## 🔌 客户端接入
 

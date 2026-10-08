@@ -148,10 +148,10 @@ Then open <http://localhost:8080>. The first launch creates the admin account au
 | :--- | :--- | :--- |
 | `--host` | Listen address | `0.0.0.0` |
 | `-p`, `--port` | Listen port | `8080` |
-| `-d`, `--data-dir` | Directory for the database and files | `data` |
+| `-d`, `--data-dir` | Directory for the database and files | `~/.config/llmgate` |
 | `--debug` | Emit debug-level logs | off |
 
-The database lives at `{data_dir}/data.db` (WAL mode, so `data.db-wal` / `data.db-shm` appear next to it). On `SIGINT` / `SIGTERM` the process flushes in-memory statistics to disk first, then waits a bounded time for background tasks to exit.
+The data directory defaults to `~/.config/llmgate` (it falls back to the relative `data` when `HOME` is unset; `-d` overrides it). The database lives at `{data_dir}/data.db` (WAL mode, so `data.db-wal` / `data.db-shm` appear next to it). On `SIGINT` / `SIGTERM` the process flushes in-memory statistics to disk first, then waits a bounded time for background tasks to exit.
 
 ## 🔌 Client Setup
 
