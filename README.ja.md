@@ -11,6 +11,7 @@
 [![Vue](https://img.shields.io/badge/web-Vue%203%20%2B%20Vite%20%2B%20Tailwind-42b883.svg)](web)
 [![Deploy](https://img.shields.io/badge/deploy-single%20binary-success.svg)](#-クイックスタート)
 [![SQLite](https://img.shields.io/badge/storage-SQLite%20WAL-003b57.svg)](src/db/mod.rs)
+[![Docker](https://img.shields.io/badge/ghcr.io-llmgate-2496ed.svg)](https://github.com/waittide/llmgate/pkgs/container/llmgate)
 
 </div>
 
@@ -142,16 +143,35 @@ cargo build --release
 
 > ⚠️ 初回ログイン後すぐに「設定 → アカウント」でユーザー名とパスワードを変更してください。
 
+### Docker
+
+イメージは GitHub Actions が自動でビルドし GHCR へ push します。`main` は `dev` をローリング更新（push のたびに更新し `sha-<コミット>` タグも付与）、日次スナップショットも `dev`（前回スナップショット以降にビルド入力が変わっていなければスキップ）、タグは対応するバージョン、セマンティックバージョンは `latest` も更新します。
+
+```bash
+# データはホストの ./data に置かれます。コンテナは uid/gid 1000 で動くので先に権限を付与
+mkdir -p ./data && sudo chown -R 1000:1000 ./data
+
+docker run -d --name llmgate \
+  -p 8080:8080 \
+  -e TZ=Asia/Shanghai \
+  -v "$PWD/data:/data" \
+  ghcr.io/waittide/llmgate:latest
+```
+
+リポジトリ直下の `docker-compose.yml` が同じ内容です（`docker compose up -d`）。`image` を `build: .` に変えればソースからのビルドになります。
+
+コンテナ内のデータディレクトリは `/data` で、ホストの任意のパスにマウントすれば永続化できます。コンテナ内のパスを変えたい場合は `-e LLMGATE_DATA_DIR=/other -v <ホスト側>:/other` を渡します。データベースは `/data/data.db`（WAL モードのため `-wal` / `-shm` が併存）で、バックアップはディレクトリごとコピーするだけです。起動時にデータディレクトリが書き込み可能かを自己チェックし、所有者が違う場合は実行すべき `chown` コマンドを示して即座に終了します。
+
 ### 起動オプション
 
 | オプション | 説明 | 既定値 |
 | :--- | :--- | :--- |
 | `--host` | 待ち受けアドレス | `0.0.0.0` |
 | `-p`, `--port` | 待ち受けポート | `8080` |
-| `-d`, `--data-dir` | データベースとファイルの保存先 | `~/.config/llmgate` |
+| `-d`, `--data-dir` | データベースとファイルの保存先（環境変数 `LLMGATE_DATA_DIR`） | `~/.config/llmgate` |
 | `--debug` | Debug レベルのログ出力 | 無効 |
 
-データディレクトリの既定値は `~/.config/llmgate` です（`HOME` が無い場合は相対パス `data` に退避し、`-d` で上書きできます）。データベースは `{data_dir}/data.db` にあります（WAL モードのため `data.db-wal` / `data.db-shm` が併存します）。`SIGINT` / `SIGTERM` を受けると、まずメモリ上の統計をディスクへ書き出し、その後バックグラウンドタスクの終了を期限付きで待ちます。
+データディレクトリの既定値は `~/.config/llmgate` です（`HOME` が無い場合は相対パス `data` に退避します。`-d` または環境変数 `LLMGATE_DATA_DIR` で上書きでき、コンテナイメージでは同変数が `/data` に設定されています）。データベースは `{data_dir}/data.db` にあります（WAL モードのため `data.db-wal` / `data.db-shm` が併存します）。`SIGINT` / `SIGTERM` を受けると、まずメモリ上の統計をディスクへ書き出し、その後バックグラウンドタスクの終了を期限付きで待ちます。
 
 ## 🔌 クライアントからの利用
 

@@ -1,0 +1,43 @@
+# syntax=docker/dockerfile:1
+#
+# CI 用镜像：只组装二进制，镜像里不做任何编译。
+#
+# 二进制由 .github/workflows/build.yml 的 build job 在原生 runner 上按架构编好，
+# docker job 把它们摊到 build/linux/<TARGETARCH>/lg，这里按架构取用。
+# 这样 arm64 就不必在 QEMU 里重跑一遍 Rust 编译（含 bundled sqlite 的 C 编译），
+# 模拟架构上只剩下面几条 apt / useradd 指令。
+#
+# 本地从源码构建请用根目录的 Dockerfile（docker build . 默认走的就是它）。
+
+# 基础镜像与二进制构建环境要满足「运行时 glibc >= 构建时 glibc」：
+# CI 在 ubuntu-22.04 / ubuntu-22.04-arm 上编译（glibc 2.35），这里是 bookworm（2.36），够用。
+# 若日后把 runner 升到更新的 glibc，下面那句 `lg --version` 会在构建时直接报 GLIBC 版本错误，
+# 届时把这里的基础镜像一起升上去即可，而不是留到运行期才炸。
+FROM debian:bookworm-slim AS runtime
+
+# 由 BuildKit 按目标平台注入：linux/amd64 → amd64，linux/arm64 → arm64
+ARG TARGETARCH
+
+# ca-certificates：上游 HTTPS 由 rustls 校验，需要系统根证书
+# tzdata：统计按本地日期分桶（chrono::Local），TZ 生效依赖它
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends ca-certificates tzdata \
+ && rm -rf /var/lib/apt/lists/*
+
+# 非 root 运行，UID/GID 固定 1000：挂载宿主机目录时需保证该属主
+RUN useradd --uid 1000 --user-group --create-home --shell /usr/sbin/nologin llmgate \
+ && mkdir -p /data \
+ && chown llmgate:llmgate /data
+
+# 架构对不上会在这一句直接失败：在目标架构下跑一次真实二进制
+COPY build/linux/${TARGETARCH}/lg /usr/local/bin/lg
+RUN chmod 755 /usr/local/bin/lg \
+ && /usr/local/bin/lg --version
+
+# 默认数据目录；数据库文件位于 ${LLMGATE_DATA_DIR}/data.db（WAL 模式，另有 -wal/-shm）
+ENV LLMGATE_DATA_DIR=/data
+VOLUME ["/data"]
+EXPOSE 8080
+USER llmgate
+
+ENTRYPOINT ["/usr/local/bin/lg"]

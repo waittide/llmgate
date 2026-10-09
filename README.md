@@ -11,6 +11,7 @@
 [![Vue](https://img.shields.io/badge/web-Vue%203%20%2B%20Vite%20%2B%20Tailwind-42b883.svg)](web)
 [![Deploy](https://img.shields.io/badge/deploy-single%20binary-success.svg)](#-快速开始)
 [![SQLite](https://img.shields.io/badge/storage-SQLite%20WAL-003b57.svg)](src/db/mod.rs)
+[![Docker](https://img.shields.io/badge/ghcr.io-llmgate-2496ed.svg)](https://github.com/waittide/llmgate/pkgs/container/llmgate)
 
 </div>
 
@@ -142,16 +143,35 @@ cargo build --release
 
 > ⚠️ 首次登录后请立即在「设置 → 账户」中修改用户名与密码。
 
+### 使用 Docker
+
+镜像由 GitHub Actions 自动构建并推送到 GHCR：`main` 分支滚动发布 `dev`（每次推送都更新，并附一个 `sha-<提交>` 标签），每日快照同样发布 `dev`（构建输入自上一个快照以来没变则跳过），打标签发布对应版本号，语义化版本同时顶 `latest`。
+
+```bash
+# 数据落在宿主机 ./data；容器以 uid/gid 1000 运行，先给目录授权
+mkdir -p ./data && sudo chown -R 1000:1000 ./data
+
+docker run -d --name llmgate \
+  -p 8080:8080 \
+  -e TZ=Asia/Shanghai \
+  -v "$PWD/data:/data" \
+  ghcr.io/waittide/llmgate:latest
+```
+
+仓库根目录的 `docker-compose.yml` 是等价写法，`docker compose up -d` 即可启动；把 `image` 换成 `build: .` 就改为从源码本地构建。
+
+容器内数据目录为 `/data`，映射到宿主机任意路径即可持久化；要换容器内的挂载点，用 `-e LLMGATE_DATA_DIR=/other -v 宿主机目录:/other`。数据库文件是 `/data/data.db`（WAL 模式，另有 `-wal` / `-shm`），备份只需拷贝整个目录。启动时会自检数据目录可写，属主不对会直接报错退出并给出要执行的 `chown` 命令。
+
 ### 启动参数
 
 | 参数 | 说明 | 默认值 |
 | :--- | :--- | :--- |
 | `--host` | 监听地址 | `0.0.0.0` |
 | `-p`, `--port` | 监听端口 | `8080` |
-| `-d`, `--data-dir` | 数据库与文件存储目录 | `~/.config/llmgate` |
+| `-d`, `--data-dir` | 数据库与文件存储目录（环境变量 `LLMGATE_DATA_DIR`） | `~/.config/llmgate` |
 | `--debug` | 输出 Debug 级别日志 | 关闭 |
 
-数据目录默认 `~/.config/llmgate`（无 `HOME` 时退回相对目录 `data`，也可用 `-d` 指定）。数据库文件位于 `{data_dir}/data.db`（WAL 模式，同时存在 `data.db-wal` / `data.db-shm`）。进程收到 `SIGINT` / `SIGTERM` 时会先把内存中的统计增量落盘，再限时等待后台任务退出。
+数据目录默认 `~/.config/llmgate`（无 `HOME` 时退回相对目录 `data`；可用 `-d` 或环境变量 `LLMGATE_DATA_DIR` 指定，容器镜像里该变量默认 `/data`）。数据库文件位于 `{data_dir}/data.db`（WAL 模式，同时存在 `data.db-wal` / `data.db-shm`）。进程收到 `SIGINT` / `SIGTERM` 时会先把内存中的统计增量落盘，再限时等待后台任务退出。
 
 ## 🔌 客户端接入
 

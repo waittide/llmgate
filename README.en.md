@@ -11,6 +11,7 @@
 [![Vue](https://img.shields.io/badge/web-Vue%203%20%2B%20Vite%20%2B%20Tailwind-42b883.svg)](web)
 [![Deploy](https://img.shields.io/badge/deploy-single%20binary-success.svg)](#-quick-start)
 [![SQLite](https://img.shields.io/badge/storage-SQLite%20WAL-003b57.svg)](src/db/mod.rs)
+[![Docker](https://img.shields.io/badge/ghcr.io-llmgate-2496ed.svg)](https://github.com/waittide/llmgate/pkgs/container/llmgate)
 
 </div>
 
@@ -142,16 +143,35 @@ Then open <http://localhost:8080>. The first launch creates the admin account au
 
 > ⚠️ Change both the username and the password under "Settings → Account" right after your first login.
 
+### Docker
+
+Images are built by GitHub Actions and pushed to GHCR: `main` rolls `dev` (updated on every push, alongside a `sha-<commit>` tag), the daily snapshot publishes `dev` as well (skipped when the build inputs are unchanged since the previous snapshot), tags publish the matching version, and semantic versions also take `latest`.
+
+```bash
+# Data lands in ./data on the host; the container runs as uid/gid 1000, so grant it first
+mkdir -p ./data && sudo chown -R 1000:1000 ./data
+
+docker run -d --name llmgate \
+  -p 8080:8080 \
+  -e TZ=Asia/Shanghai \
+  -v "$PWD/data:/data" \
+  ghcr.io/waittide/llmgate:latest
+```
+
+The `docker-compose.yml` at the repository root is the equivalent setup (`docker compose up -d`); swap `image` for `build: .` to build from source instead.
+
+The container keeps its data in `/data` — map it to any host path to persist. To use a different in-container path, pass `-e LLMGATE_DATA_DIR=/other -v <host-dir>:/other`. The database is `/data/data.db` (WAL mode, so `-wal` / `-shm` sit next to it); backing up means copying the whole directory. At startup it checks that the data directory is writable and exits with the exact `chown` command to run when the owner is wrong.
+
 ### Command-line options
 
 | Option | Description | Default |
 | :--- | :--- | :--- |
 | `--host` | Listen address | `0.0.0.0` |
 | `-p`, `--port` | Listen port | `8080` |
-| `-d`, `--data-dir` | Directory for the database and files | `~/.config/llmgate` |
+| `-d`, `--data-dir` | Directory for the database and files (env `LLMGATE_DATA_DIR`) | `~/.config/llmgate` |
 | `--debug` | Emit debug-level logs | off |
 
-The data directory defaults to `~/.config/llmgate` (it falls back to the relative `data` when `HOME` is unset; `-d` overrides it). The database lives at `{data_dir}/data.db` (WAL mode, so `data.db-wal` / `data.db-shm` appear next to it). On `SIGINT` / `SIGTERM` the process flushes in-memory statistics to disk first, then waits a bounded time for background tasks to exit.
+The data directory defaults to `~/.config/llmgate` (it falls back to the relative `data` when `HOME` is unset; override it with `-d` or the `LLMGATE_DATA_DIR` environment variable, which the container image sets to `/data`). The database lives at `{data_dir}/data.db` (WAL mode, so `data.db-wal` / `data.db-shm` appear next to it). On `SIGINT` / `SIGTERM` the process flushes in-memory statistics to disk first, then waits a bounded time for background tasks to exit.
 
 ## 🔌 Client Setup
 

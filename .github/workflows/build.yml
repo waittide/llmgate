@@ -46,6 +46,7 @@ jobs:
       prerelease: ${{ steps.ver.outputs.prerelease }}
       artifact_version: ${{ steps.ver.outputs.artifact_version }}
       build_version: ${{ steps.ver.outputs.build_version }}
+      image_changed: ${{ steps.ver.outputs.image_changed }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -67,6 +68,9 @@ jobs:
           skip=false
           prerelease=false
           release_tag=""
+          # 容器镜像是否需要重建。默认 true（分支/标签构建一律出镜像），
+          # 只有每日快照会在「构建输入没变」时置为 false，见下面的 schedule 分支。
+          image_changed=true
 
           if [ "${GITHUB_EVENT_NAME}" = "schedule" ]; then
             # ---- 每日快照 ----
@@ -92,6 +96,14 @@ jobs:
               else
                 echo "本次快照标签：${release_tag}（上一个：${last:-无}）"
                 release=true
+                # 每日快照的镜像只跟构建输入挂钩：只动文档/截图的提交不必重打镜像。
+                # 与二进制快照不同，这里不看「有没有新提交」，只看构建输入变没变。
+                if [ -n "${last}" ] \
+                  && git diff --quiet "${last}" HEAD -- \
+                       src web Cargo.toml Cargo.lock build.rs rust-toolchain.toml Dockerfile Dockerfile.ci .dockerignore; then
+                  echo "构建输入自 ${last} 以来未变化，跳过镜像重建"
+                  image_changed=false
+                fi
               fi
             fi
           elif [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
@@ -123,9 +135,10 @@ jobs:
             echo "artifact_version=${version}"
             # 注入给二进制的构建标识：版本号 + 提交短 hash
             echo "build_version=${version}+${sha}"
+            echo "image_changed=${image_changed}"
           } >> "$GITHUB_OUTPUT"
 
-          echo "版本=${version} 发布=${release} 快照=${prerelease} 跳过=${skip} 注入=${version}+${sha}"
+          echo "版本=${version} 发布=${release} 快照=${prerelease} 跳过=${skip} 镜像=${image_changed} 注入=${version}+${sha}"
 
   build:
     name: ${{ matrix.name }}
@@ -212,6 +225,118 @@ jobs:
           name: llmgate-${{ matrix.target }}
           path: dist/*
           if-no-files-found: error
+
+  # 组装镜像：二进制由上面的 build job 在原生 runner 上按架构编好（含 linux/arm64），
+  # 这里只把它们摊到 build/linux/<arch>/lg，再用 Dockerfile.ci 组装 —— 镜像里没有编译，
+  # 所以 arm64 不必在 QEMU 里重跑一遍 Rust 编译。本地从源码构建仍走根目录的 Dockerfile。
+  #   - push main / 手动触发 → dev（滚动预览版，另附 sha-* 标签）
+  #   - 每日快照           → dev；构建输入自上一个快照以来没变则整个 job 跳过
+  #   - push v*           → 对应版本号；语义化版本额外顶 latest
+  #   - PR                → 只构建校验，不推送
+  # 放在本工作流内而非独立工作流，是因为每日快照的标签由 GITHUB_TOKEN 创建，
+  # 按注释所述不会触发新的 push 事件；同一次运行里构建才能覆盖快照。
+  docker:
+    name: 组装并推送 Docker 镜像
+    needs: [meta, build]
+    # 只有每日快照会在构建输入没变时把 image_changed 置 false（其余事件恒为 true）
+    if: |
+      needs.meta.outputs.skip != 'true'
+      && needs.meta.outputs.image_changed == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v7
+
+      # 只取两个 linux 架构的产物，macOS / Windows 的与镜像无关
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: llmgate-*-unknown-linux-gnu
+          path: dist
+          merge-multiple: true
+
+      - name: 按架构摊开二进制
+        shell: bash
+        env:
+          VERSION: ${{ needs.meta.outputs.artifact_version }}
+        run: |
+          set -euo pipefail
+          for pair in x86_64:amd64 aarch64:arm64; do
+            target="${pair%%:*}-unknown-linux-gnu"
+            arch="${pair##*:}"
+            mkdir -p "build/linux/${arch}"
+            tar xzf "dist/llmgate-${VERSION}-${target}.tar.gz" -C /tmp --strip-components=1
+            cp /tmp/lg "build/linux/${arch}/lg"
+          done
+          ls -lR build/linux
+
+      # QEMU 现在只用来跑运行时镜像里那几条 apt / useradd 指令
+      - uses: docker/setup-qemu-action@v4
+      - uses: docker/setup-buildx-action@v4
+
+      - name: 计算镜像标签
+        id: img
+        shell: bash
+        run: |
+          set -euo pipefail
+          # GHCR 要求镜像名全小写
+          image="ghcr.io/${GITHUB_REPOSITORY,,}"
+          tags=()
+
+          if [ "${GITHUB_EVENT_NAME}" = "pull_request" ]; then
+            # 仅校验构建，标签只用于本地标识，不会被推送
+            tags+=("${image}:pr-${GITHUB_REF_NAME//\//-}")
+          elif [ "${GITHUB_EVENT_NAME}" = "schedule" ]; then
+            # 每日快照固定 dev；构建输入没变时本 job 已被 meta.image_changed 拦下
+            tags+=("${image}:dev")
+          elif [ "${{ needs.meta.outputs.release }}" = "true" ]; then
+            # 版本标签 + 纯版本号，如 v0.2.0 / 0.2.0
+            tags+=("${image}:${{ needs.meta.outputs.release_tag }}")
+            tags+=("${image}:${{ needs.meta.outputs.artifact_version }}")
+            # 只有人工维护的语义化版本才顶 latest
+            if [ "${{ needs.meta.outputs.prerelease }}" != "true" ]; then
+              tags+=("${image}:latest")
+            fi
+          else
+            # 分支推送与手动触发：滚动 dev
+            tags+=("${image}:dev")
+          fi
+
+          # PR 不推送，其余场景都额外留一个可按提交定位的标签
+          if [ "${GITHUB_EVENT_NAME}" != "pull_request" ]; then
+            tags+=("${image}:sha-${GITHUB_SHA::7}")
+          fi
+
+          joined=$(IFS=,; echo "${tags[*]}")
+          echo "tags=${joined}" >> "$GITHUB_OUTPUT"
+          echo "镜像标签: ${joined}"
+
+      - name: 登录 GHCR
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: 构建并推送
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: ./Dockerfile.ci
+          # PR 只验 amd64，合入后才出多架构镜像
+          platforms: ${{ github.event_name == 'pull_request' && 'linux/amd64' || 'linux/amd64,linux/arm64' }}
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.img.outputs.tags }}
+          # source 标签用于把 GHCR 上的包关联回本仓库
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.version=${{ needs.meta.outputs.artifact_version }}
+            org.opencontainers.image.licenses=MIT
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
 
   release:
     name: 发布 Release
