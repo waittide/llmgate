@@ -1,0 +1,19 @@
+# 版本控制与 CI
+.git
+.github
+.agent
+
+# 本地构建产物（镜像内会从源码重新构建）
+target
+dist
+static/out
+web/node_modules
+
+# 运行时数据，不进镜像
+data
+*.db
+*.db-wal
+*.db-shm
+
+# 文档与截图
+docs

@@ -1,0 +1,31 @@
+# LLMGate 单容器部署示例。
+#
+#   docker compose up -d       # 启动
+#   docker compose logs -f     # 看日志
+#   docker compose pull        # 升级到最新镜像
+#
+# 所有状态都落在挂载目录里（{宿主机目录}/data.db，WAL 模式另带 -wal/-shm），
+# 迁移或备份只需搬这个目录。
+
+services:
+  llmgate:
+    image: ghcr.io/waittide/llmgate:latest
+    # 想从源码本地构建时，注释掉上面的 image，改用：
+    # build: .
+    container_name: llmgate
+    restart: unless-stopped
+    ports:
+      # 左侧是宿主机端口（按需改），右侧是容器内端口（与 --port 一致）
+      - "8080:8080"
+    environment:
+      # 容器内数据目录，需与下面挂载点的右侧一致
+      LLMGATE_DATA_DIR: /data
+      # 统计按本地日期分桶，改成你的时区
+      TZ: Asia/Shanghai
+    volumes:
+      # 宿主机目录:容器内数据目录 —— 只改冒号左边，就能把数据放到任意位置
+      - ./data:/data
+    # 容器内以 uid/gid 1000 运行，首次挂载宿主机目录需先授权：
+    #   mkdir -p ./data && sudo chown -R 1000:1000 ./data
+    # 不想授权也可以直接以 root 运行（省事但安全性略低）：
+    # user: "0:0"
