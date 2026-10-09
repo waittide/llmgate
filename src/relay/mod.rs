@@ -251,10 +251,10 @@ mod tests {
         let _ = std::fs::remove_file(db_path);
     }
 
-    /// 上游收到的 (x-opencode-session, x-unlisted-header) 列表。
-    type CapturedHeaders = std::sync::Arc<parking_lot::Mutex<Vec<(Option<String>, Option<String>)>>>;
+    /// 上游收到的 (x-opencode-session, x-unlisted-header, user-agent) 列表。
+    type CapturedHeaders = std::sync::Arc<parking_lot::Mutex<Vec<(Option<String>, Option<String>, Option<String>)>>>;
 
-    /// 记录上游实际收到的两个候选头，用于断言透传名单的边界。
+    /// 记录上游实际收到的候选头，用于断言透传名单的边界。
     struct CapturePassthrough(CapturedHeaders);
 
     impl wiremock::Respond for CapturePassthrough {
@@ -266,9 +266,11 @@ mod tests {
                     .and_then(|value| value.to_str().ok())
                     .map(str::to_string)
             };
-            self.0
-                .lock()
-                .push((read("x-opencode-session"), read("x-unlisted-header")));
+            self.0.lock().push((
+                read("x-opencode-session"),
+                read("x-unlisted-header"),
+                read("user-agent"),
+            ));
             wiremock::ResponseTemplate::new(200).set_body_string(CHAT_OK_BODY)
         }
     }
@@ -304,6 +306,7 @@ mod tests {
         let mut client_headers = HeaderMap::new();
         client_headers.insert("x-opencode-session", "client-session-abc".parse().unwrap());
         client_headers.insert("x-unlisted-header", "should-be-dropped".parse().unwrap());
+        client_headers.insert("user-agent", "omp/18.8.6".parse().unwrap());
 
         let send = |headers: HeaderMap| {
             let state = state.clone();
@@ -323,7 +326,7 @@ mod tests {
             }
         };
 
-        // 未开启透传：客户端头一个都不上行
+        // 未开启透传：仅内置白名单头（user-agent）上行
         assert_eq!(send(client_headers.clone()).await, 200);
 
         // 开启透传：只放行名单内的头
@@ -338,13 +341,18 @@ mod tests {
         server.verify().await;
         let seen = seen.lock().clone();
         assert_eq!(seen.len(), 2);
-        assert_eq!(seen[0], (None, None), "未开启透传时客户端头不得上行");
+        assert_eq!(
+            seen[0],
+            (None, None, Some("omp/18.8.6".to_string())),
+            "未开启透传时只有内置白名单头可上行"
+        );
         assert_eq!(
             seen[1].0.as_deref(),
             Some("client-session-abc"),
             "名单内客户端头必须原样上行"
         );
         assert_eq!(seen[1].1, None, "名单外客户端头必须丢弃");
+        assert_eq!(seen[1].2.as_deref(), Some("omp/18.8.6"), "内置白名单头始终上行");
         let _ = std::fs::remove_file(db_path);
     }
 
