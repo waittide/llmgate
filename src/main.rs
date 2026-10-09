@@ -38,6 +38,7 @@ async fn main() -> Result<()> {
         .init();
 
     info!("数据目录: {:?}", config.data_dir);
+    config.ensure_data_dir()?;
 
     // 1. 初始化 SQLite 数据库与表结构
     let db_path = config.db_path();
