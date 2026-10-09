@@ -330,8 +330,10 @@ async function handleStopRound() {
                         </div>
                         <template v-else>
                             <HttpMeta
-                                :url="activeRound?.request_url || detail.data.value?.request_url"
-                                :headers="activeRound?.request_headers || detail.data.value?.request_headers"
+                                :url="activeRound?.request_url || log.request_url || detail.data.value?.request_url"
+                                :origin-headers="detail.data.value?.request_headers"
+                                :headers="activeRound?.request_headers || log.request_headers"
+                                :headers-label="t('upstreamHeaders')"
                                 :loading="detail.isLoading.value"
                             />
                             <JsonContent

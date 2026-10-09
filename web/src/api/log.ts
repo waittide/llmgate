@@ -46,6 +46,9 @@ export interface RelayLogOverview {
     sending: boolean;
     error?: string;
     rounds?: RoundLog[];
+    // 运行中轮次发往上游的 URL 与 Header；轮次结束后改由 rounds 明细提供。
+    request_url?: string;
+    request_headers?: string;
 }
 
 // useClearLogs 清空已完成的内存日志。

@@ -912,6 +912,8 @@ pub async fn forward_relay(
             target_channel: ch_ref.name.clone(),
             target_model: cm_ref.name.clone(),
             sending: true,
+            request_url: target_req_url.clone(),
+            request_headers: channel_req_headers.clone(),
             rounds: rounds.clone(),
             ..Default::default()
         });

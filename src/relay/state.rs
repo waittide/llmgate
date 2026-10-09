@@ -84,21 +84,27 @@ pub fn merge_usage(slot: &mut Option<Usage>, incoming: Usage) {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct RequestOverview {
-    pub id:             u64,
-    pub status:         String,
-    pub started_at:     String,
-    pub duration:       i64, // 耗时（毫秒）
-    pub model:          String,
-    pub usage:          Usage,
-    pub cost:           f64,
-    pub round:          i64,
-    pub target_channel: String,
-    pub target_model:   String,
-    pub sending:        bool,
+    pub id:              u64,
+    pub status:          String,
+    pub started_at:      String,
+    pub duration:        i64, // 耗时（毫秒）
+    pub model:           String,
+    pub usage:           Usage,
+    pub cost:            f64,
+    pub round:           i64,
+    pub target_channel:  String,
+    pub target_model:    String,
+    pub sending:         bool,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub error:          Option<String>,
+    pub error:           Option<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub rounds:         Vec<crate::model::RoundLog>,
+    pub rounds:          Vec<crate::model::RoundLog>,
+    /// 本轮发往上游的 URL 与 Header：只在运行中的轮次广播，供面板实时对照
+    /// 客户端原始请求头与真正上行的那一份；轮次结束后由 rounds 明细接管。
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub request_url:     String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub request_headers: String,
 }
 
 /// 毫秒时间戳转 RFC3339 字符串（非法值返回空串）。
@@ -111,26 +117,28 @@ pub fn millis_to_rfc3339(ms: i64) -> String {
 impl From<&RequestLog> for RequestOverview {
     fn from(log: &RequestLog) -> Self {
         RequestOverview {
-            id:             log.id as u64,
-            status:         log.status.clone(),
-            started_at:     millis_to_rfc3339(log.created_at),
-            duration:       log.wait_time,
-            model:          log.model.clone(),
-            usage:          Usage {
+            id:              log.id as u64,
+            status:          log.status.clone(),
+            started_at:      millis_to_rfc3339(log.created_at),
+            duration:        log.wait_time,
+            model:           log.model.clone(),
+            usage:           Usage {
                 prompt_tokens:      log.prompt_tokens,
                 completion_tokens:  log.completion_tokens,
                 total_tokens:       log.total_tokens,
                 cache_read_tokens:  log.cache_read_tokens,
                 cache_write_tokens: log.cache_write_tokens,
             },
-            cost:           log.cost,
-            round:          log.round,
-            target_channel: log.target_channel.clone(),
-            target_model:   log.target_model.clone(),
-            sending:        log.status == crate::model::request_status::RUNNING
+            cost:            log.cost,
+            round:           log.round,
+            target_channel:  log.target_channel.clone(),
+            target_model:    log.target_model.clone(),
+            sending:         log.status == crate::model::request_status::RUNNING
                 || log.status == crate::model::request_status::COMMITTED,
-            error:          log.error.clone(),
-            rounds:         serde_json::from_str(&log.rounds_detail).unwrap_or_default(),
+            error:           log.error.clone(),
+            rounds:          serde_json::from_str(&log.rounds_detail).unwrap_or_default(),
+            request_url:     String::new(),
+            request_headers: String::new(),
         }
     }
 }
